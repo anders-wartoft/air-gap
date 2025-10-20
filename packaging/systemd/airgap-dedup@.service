@@ -1,0 +1,44 @@
+[Unit]
+Description=Air Gap Deduplication Service Instance %i
+Documentation=https://github.com/anders-wartoft/air-gap
+Documentation=file:///usr/share/doc/airgap-dedup/README.md
+After=network-online.target kafka.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=airgap
+Group=airgap
+
+# Working directory
+WorkingDirectory=/opt/airgap/dedup
+
+# Main execution with Java options from environment
+ExecStart=/bin/sh -c 'exec /usr/bin/java ${JAVA_OPTS:--Xms512m -Xmx4g} -jar /opt/airgap/dedup/air-gap-deduplication-fat.jar'
+
+# Instance-specific environment file
+EnvironmentFile=/etc/default/airgap-dedup-%i
+Environment=INSTANCE_ID=%i
+
+# Restart behavior
+Restart=on-failure
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=4G
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=airgap-dedup-%i
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/airgap/dedup /var/log/airgap
+
+[Install]
+WantedBy=multi-user.target

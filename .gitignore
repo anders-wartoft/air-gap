@@ -7,3 +7,4 @@ target/
 certs/tmp/
 **/*/.$*
 *.log
+plan/

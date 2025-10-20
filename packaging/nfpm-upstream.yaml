@@ -1,0 +1,78 @@
+name: ${PACKAGE_NAME}
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: ${RELEASE}
+section: utils
+priority: optional
+maintainer: "Air Gap"
+description: |
+  Air Gap upstream components - Kafka to UDP sender with encryption.
+  Includes upstream (main sender) and resend (gap recovery) binaries.
+  Built from commit ${GITHUB_SHA}.
+homepage: "https://github.com/anders-wartoft/air-gap"
+license: "LGPL-2.1-only"
+
+contents:
+  # Binaries
+  - src: target/linux-amd64/upstream
+    dst: /usr/local/bin/airgap-upstream
+    file_info:
+      mode: 0755
+
+  - src: target/linux-amd64/resend
+    dst: /usr/local/bin/airgap-resend
+    file_info:
+      mode: 0755
+
+  # Systemd services
+  - src: packaging/systemd/airgap-upstream.service
+    dst: /lib/systemd/system/airgap-upstream.service
+    file_info:
+      mode: 0644
+
+  - src: packaging/systemd/airgap-resend.service
+    dst: /lib/systemd/system/airgap-resend.service
+    file_info:
+      mode: 0644
+
+  # Configuration examples
+  - src: config/upstream.properties
+    dst: /etc/airgap/upstream.properties.example
+    type: config
+    file_info:
+      mode: 0644
+
+  - src: config/resend.properties
+    dst: /etc/airgap/resend.properties.example
+    type: config
+    file_info:
+      mode: 0644
+
+  # Documentation
+  - src: README.md
+    dst: /usr/share/doc/airgap-upstream/README.md
+    file_info:
+      mode: 0644
+
+scripts:
+  preinstall: packaging/scripts/airgap-upstream-preinstall.sh
+  postinstall: packaging/scripts/airgap-upstream-postinstall.sh
+  postremove: packaging/scripts/airgap-upstream-postremove.sh
+
+overrides:
+  rpm:
+    depends:
+      - glibc
+      - shadow-utils
+      - systemd
+  deb:
+    depends:
+      - libc6
+      - adduser
+      - systemd
+  apk:
+    depends:
+      - libc6-compat
+      - shadow
+      - openrc

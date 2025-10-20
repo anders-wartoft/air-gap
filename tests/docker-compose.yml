@@ -1,0 +1,36 @@
+version: '3.8'
+
+# Simple Docker Compose for testing air-gap packages
+# Usage: docker-compose up -d
+#        docker-compose exec rocky bash
+#        docker-compose down
+
+services:
+  # Rocky Linux 9 - Test RPM packages
+  rocky:
+    image: rockylinux:9
+    container_name: airgap-test-rocky
+    volumes:
+      - ../target/dist:/packages:ro
+      - ./scripts:/scripts:ro
+    command: tail -f /dev/null
+
+  # Ubuntu 22.04 - Test DEB packages
+  ubuntu:
+    image: ubuntu:22.04
+    container_name: airgap-test-ubuntu
+    volumes:
+      - ../target/dist:/packages:ro
+      - ./scripts:/scripts:ro
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+    command: tail -f /dev/null
+
+  # Alpine 3.18 - Test APK packages
+  alpine:
+    image: alpine:3.18
+    container_name: airgap-test-alpine
+    volumes:
+      - ../target/dist:/packages:ro
+      - ./scripts:/scripts:ro
+    command: tail -f /dev/null
