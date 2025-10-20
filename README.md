@@ -358,6 +358,7 @@ Some problems that may arise are:
 ## Service
 
 The applications responds to os signals and can be installed as a service in, e.g., Linux.
+The applications responds to os signals and can be installed as a service in, e.g., Linux.
 See https://fabianlee.org/2022/10/29/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-22-04/
 
 ## Compile
@@ -373,6 +374,12 @@ The project uses a modular Makefile-based build system that supports building Go
 ## Compile
 
 There is a Makefile that will get the latest tag from git and save in version.go, then build upstream and downstream.
+
+## Build System
+
+The project uses a modular Makefile-based build system that supports building Go binaries, Java applications, and system packages (RPM, DEB, APK).
+
+### Quick Build Commands
 
 ```bash
 # Build everything (Go + Java)
@@ -434,14 +441,86 @@ make clean      # removes binaries and version.go, then performs a make
 ```
 
 To build manually, change directory to the application you would like to build (./src/upstream, ...).
+To build manually, change directory to the application you would like to build (./src/upstream, ...).
 Compile the applications with `go build {filename}`.
 
 Example:
-
 ```bash
+# Go applications
 # Go applications
 cd src/cmd/upstream
 go build -o upstream main.go
+
+# Java application
+cd java-streams
+mvn clean package
+```
+
+## Packaging
+
+The project includes production-ready system packages for major Linux distributions using [nfpm](https://nfpm.goreleaser.com/):
+
+### Package Formats
+
+- **RPM** - For RHEL, CentOS, Fedora, Rocky Linux, AlmaLinux
+- **DEB** - For Debian, Ubuntu
+- **APK** - For Alpine Linux
+
+### Package Contents
+
+Each package includes:
+- Compiled binaries installed to `/usr/local/bin/`
+- Systemd service files for easy daemon management
+- User/group creation (`airgap` user)
+- Configuration templates
+- Automatic dependency installation
+
+### Package Testing
+
+Docker-based package testing is available in the `tests/` directory:
+
+```bash
+# Start test containers
+cd tests
+docker-compose up -d
+
+# Test RPM packages on Rocky Linux
+docker-compose exec rocky bash /scripts/test-rpm.sh
+
+# Test DEB packages on Ubuntu
+docker-compose exec ubuntu bash /scripts/test-deb.sh
+
+# Test APK packages on Alpine
+docker-compose exec alpine sh /scripts/test-apk.sh
+
+# Cleanup
+docker-compose down
+```
+
+### Installation
+
+After building packages with `make package-all`, install them on your target system:
+
+**RPM-based systems:**
+```bash
+sudo dnf install target/dist/airgap-upstream-*.rpm
+sudo dnf install target/dist/airgap-downstream-*.rpm
+sudo dnf install target/dist/airgap-dedup-*.rpm
+```
+
+**DEB-based systems:**
+```bash
+sudo apt install ./target/dist/airgap-upstream_*_amd64.deb
+sudo apt install ./target/dist/airgap-downstream_*_amd64.deb
+sudo apt install ./target/dist/airgap-dedup_*_amd64.deb
+```
+
+**Alpine:**
+```bash
+sudo apk add --allow-untrusted target/dist/airgap-upstream-*.apk
+sudo apk add --allow-untrusted target/dist/airgap-downstream-*.apk
+sudo apk add --allow-untrusted target/dist/airgap-dedup-*.apk
+```
 
 # Java application
 cd java-streams
@@ -594,6 +673,7 @@ Environment="AIRGAP_UPSTREAM_VERBOSE=true"
 #Environment="AIRGAP_UPSTREAM_KEY_FILE="
 #Environment="AIRGAP_UPSTREAM_CA_FILE="
 #Environment="AIRGAP_UPSTREAM_DELIVER_FILTER="
+#Environment="AIRGAP_UPSTREAM_DELIVER_FILTER="
 
 # Set min and max memory (in bytes, e.g., 256M min, 1G max)
 MemoryMin=256M
@@ -677,6 +757,7 @@ See LICENSE file
 ### 0.1.4-SNAPSHOT
 
 - Changed the logging for the go applications to include log levels. Monitoring and log updates.
+- Changed the logging for the go applications to include log levels. Monitoring and log updates.
 - Documented redundancy and load balancing (see doc folder)
 - Documented resend (future updates will implement the new resend algorithm)
 
@@ -694,6 +775,7 @@ See LICENSE file
 - UDP sending have been made more robust
 - Transfer of binary data from upstream to downstream is now supported
 - Sending a sighup to upstream or downstream will now force a re-write of the log file, so you can rotate the log file and then sighup the application to make it log to a new file with the name specified in the upstream or downstream configuration.
+- air-gap now supports TLS and mTLS to Kafka upstream and downstream.
 - air-gap now supports TLS and mTLS to Kafka upstream and downstream.
 
 ### 0.1.1-SNAPSHOT
