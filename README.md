@@ -31,9 +31,11 @@ This will build the upstream and downstream binaries as well as the Kafka Stream
 	- Connect to real Kafka by editing the config files.
 	- Enable encryption by setting `publicKeyFile` and related fields.
 	- See the rest of this README and [Deduplication.md](doc/Deduplication.md) for advanced usage, gap detection, and production deployment.
+	- A short [Installation and Configuration.md](doc/Installation%20and%20Configuration.md) guide is available.
     - More help for setting up encryption to Kafka can be found here: [Kafka-encryption.md](doc/Kafka-encryption.md)
     - See [Monitoring.md](doc/Monitoring.md) on how to monitor the applications for resource usage etc.
     - To set up reduncancy and/or load balancing, see [Redundancy and Load Balancing.md](doc/Redundancy%20and%20Load%20Balancing.md)
+	- Finally, there is a [Resend.md](doc/Resend.md) guide that .
 
 
 ## Notation
@@ -46,7 +48,8 @@ There are four executable files that together constitutes the transfer software.
 To use guaranteed delivery, you must be able to copy information from the gap-detector that runs downstream to the set-timestamp program that runs upstream. The information that needs to traverse the diode in the wrong direction is basically a topic id, partition id and position for the first lost event. set-timestamp is an application that uses that information, queries Kafka upstream on the last timestamp before that event and configures the upstream application to start reading at that timestamp.
 
 ![air-gap flow](doc/img/air-gap%20flow.png)
-N.B., neither the configuration files nor the key files are not shown in the above image.
+
+N.B., neither the configuration files nor the key files are shown in the above image.
 
 upstream reads from a Kafka topic specified in the upstream configuration file. It then enrypts the data and sends it over the UDP connection, that might include a hardware diode. Packets that are more than MTU in size (with header) will get fragmented and sent as several UDP packets. Downstream listens to UDP packets, performs defragmentation and decryption of the content and writes to a Kafka instance and topic specified in the downstream configuration file.
 
@@ -59,7 +62,7 @@ To enable users to get started without Kafka and without hardware diode, use the
 - upstream.properties
 - downstream.properties
 
-These properties files are configured for getting a few random strings instead of reading from Kafka and to send with UDP without encyption. Change the targetIP in upstream3.properties to the one you would like to send to. The targetIP in downstream3.properties is set to 0.0.0.0 so it will bind to all local addresses.
+These properties files are configured for getting a few random strings instead of reading from Kafka and to send with UDP without encyption. Change the targetIP in upstream.properties to the one you would like to send to. The targetIP in downstream.properties is set to 0.0.0.0 so it will bind to all addresses.
 
 In one terminal, start the server with:
 ```bash
@@ -107,8 +110,7 @@ If a message is read but not delivered (because the thread is sleeping) and the 
 This is covered in the [Deduplication.md](doc/Deduplication.md) documentation
 
 ### Using Gap Detection Events to Resend from Upstream
-TBD
-
+See [Resend.md](doc/Resend.md) for details regarding the create and resend applications.
 
 ## Keys
 Generate keystore with certificate or obtain otherwise.
@@ -162,8 +164,8 @@ from=
 publicKeyFile=certs/server2.pem
 # Every n seconds, generate a new symmetric key
 generateNewSymmetricKeyEvery=500
-# Read the MTU from the nic, or set manually
-mtu=auto
+# Read the MTU from the nic (and subtract space for IPv6 and UDP headers), or set manually
+payloadSize=auto
 ```
 
 All configuration can be overridden by environment variables. In the case a file is parsed that will be parsed first and may result in configuration errors. After that, any environment variables are checked and, if found, will overwrite the file configuration.
@@ -218,7 +220,7 @@ Resend will receive a major overhaul so this section is now deprecated:
 The same configuration file is used for set-timestamp. set-timestamp uses the bootstrapServers to query for timestamps for each topic partition and position in the set-timestamp arguments. When the earlierst timestamp has been retrieved, the configuration files's from parameter is set to that timestamp. When upstream restarts, it will read all Kafka events from the beginning and discard those before the from timestamp. During the start phase, set-timestamp will revert the from parameter to an empty string so the next startup will use Kafka's stored pointer for where to read from in the future. 
 
 ### Downstream
-Downstream has a similar configuration file as upstream
+Downstream has a similar configuration file as upstream. Note that downstream has mtu as a property and not payloadSize
 
 ```bash
 id=Downstream_1
@@ -404,7 +406,7 @@ Environment="AIRGAP_UPSTREAM_TARGET_PORT=1234"
 Environment="AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS=192.168.153.145:9092"
 Environment="AIRGAP_UPSTREAM_TOPIC=transfer"
 Environment="AIRGAP_UPSTREAM_GROUP_ID=test"
-Environment="AIRGAP_UPSTREAM_MTU=auto"
+Environment="AIRGAP_UPSTREAM_PAYLOAD_SIZE=auto"
 Environment="AIRGAP_UPSTREAM_LOG_FILE_NAME=/var/log/airgap/upstream/upstream.log"
 Environment="AIRGAP_UPSTREAM_VERBOSE=true"
 #Environment='AIRGAP_UPSTREAM_SENDING_THREADS={"now": 0}'
