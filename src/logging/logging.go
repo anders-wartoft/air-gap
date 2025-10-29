@@ -20,7 +20,7 @@ const (
 )
 
 var logLevel = INFO // default
-var logger = log.New(os.Stdout, "", log.LstdFlags)
+var logger = log.New(os.Stderr, "", log.LstdFlags)
 
 // StdLogger exposes the underlying *log.Logger for use with libraries like Sarama
 var StdLogger = logger

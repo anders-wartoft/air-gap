@@ -210,15 +210,6 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | logStatistics                   | AIRGAP_UPSTREAM_LOG_STATISTICS  | 0             | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
 | compressWhenLengthExceeds | AIRGAP_UPSTREAM_COMPRESS_WHEN_LOG_EXCEEDS | 0           | Using compression (gzip) on short events can make them longer. The break-even length is around 100 bytes for the gzip compression. Set this to a value (ideally above 1200) to gzip longer events |
 
-### Removed settings
-| Config file property name | Environment variable name | Default value | Description |
-|--------------------------|--------------------------|---------------|-------------|
-| source                   | AIRGAP_UPSTREAM_SOURCE   |               | Source could be 'kafka' or 'random'. 'random' created dummy data instead of getting the data from Kafka. |
-
-Resend will receive a major overhaul so this section is now deprecated:
-
-The same configuration file is used for set-timestamp. set-timestamp uses the bootstrapServers to query for timestamps for each topic partition and position in the set-timestamp arguments. When the earlierst timestamp has been retrieved, the configuration files's from parameter is set to that timestamp. When upstream restarts, it will read all Kafka events from the beginning and discard those before the from timestamp. During the start phase, set-timestamp will revert the from parameter to an empty string so the next startup will use Kafka's stored pointer for where to read from in the future. 
-
 ### Downstream
 Downstream has a similar configuration file as upstream. Note that downstream has mtu as a property and not payloadSize
 
@@ -228,7 +219,6 @@ nic=en0
 targetIP=127.0.0.1
 targetPort=1234
 bootstrapServers=192.168.153.138:9092
-topic=log
 privateKeyFiles=certs/private*.pem
 target=kafka
 verbose=true
@@ -247,7 +237,6 @@ The property privateKeyFiles should point to one or more private key files that 
 | targetIP                 | AIRGAP_DOWNSTREAM_TARGET_IP  |               | Ip address to bind to |
 | targetPort               | AIRGAP_DOWNSTREAM_TARGET_PORT |               | Port to bind to |
 | bootstrapServers         | AIRGAP_DOWNSTREAM_BOOTSTRAP_SERVERS |               | Bootstrap url for Kafka, with port |
-| topic                    | AIRGAP_DOWNSTREAM_TOPIC    |               | Topic name in Kafka to write to (internal logging). Topic name for events from the upstream topics will have the same name as the upstream topic, if not translated by the setting AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |
 | clientId                 | AIRGAP_DOWNSTREAM_CLIENT_ID    |               | Id to use when writing to Kafka |
 | mtu                      | AIRGAP_DOWNSTREAM_MTU      | 0             | 0 - ask the NIC for the MTU, else enter a positive integer |
 | target                   | AIRGAP_DOWNSTREAM_TARGET   | kafka         | kafka, cmd and null are valid values. cmd will print the output to the console, null will just forget the received message but collect statistics of received events to calculate EPS when terminated. |
@@ -276,7 +265,6 @@ nic=enp1s0                # Use a high-performance NIC if available
 targetIP=0.0.0.0          # Bind to all interfaces
 targetPort=1234           # Use your desired UDP port
 bootstrapServers=192.168.153.138:9092
-topic=log
 privateKeyFiles=certs/private*.pem
 target=kafka
 mtu=auto
@@ -466,6 +454,9 @@ air-gap uses IBM/sarama for the Kafka read/write. For other dependencies, check 
 See LICENSE file
 
 # Release Notes
+
+## 0.1.6-SNAPSHOT
+* Removed `topic` configuration from downstream. Downstream uses upstream's topic name, or a translation of that name.
 
 ## 0.1.5-SNAPSHOT
 * Multiple sockets with SO_REUSEPORT for faster and more reliable UDP receive in Linux and Mac for downstream. Fallback to single thread in Windows.

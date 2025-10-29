@@ -198,16 +198,21 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 			}
 			Logger.Printf("generateNewSymmetricKeyEvery: %d", result.generateNewSymmetricKeyEvery)
 		case "payloadSize":
-			payloadSize, err := strconv.Atoi(value)
-			if err != nil {
-				Logger.Fatalf("Error parsing payloadSize: %v", err)
-			}
-			if payloadSize < 500 || payloadSize > 65507-protocol.HEADER_SIZE {
-				if payloadSize != 0 { // auto-detect payloadSize when payloadSize=0
-					Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", payloadSize, 65507-protocol.HEADER_SIZE)
+			if value == "auto" {
+				result.payloadSize = 0
+			} else {
+				tmp, err := strconv.Atoi(value)
+				if err != nil {
+					Logger.Fatalf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or a two byte integer", value)
+				} else {
+					result.payloadSize = uint16(tmp)
 				}
 			}
-			result.payloadSize = uint16(payloadSize)
+			if result.payloadSize < 500 || result.payloadSize > 65507-protocol.HEADER_SIZE {
+				if result.payloadSize != 0 { // auto-detect payloadSize when payloadSize=0
+					Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", result.payloadSize, 65507-protocol.HEADER_SIZE)
+				}
+			}
 			Logger.Printf("payloadSize: %d", result.payloadSize)
 		case "eps":
 			result.eps, err = strconv.ParseFloat(value, 64)
@@ -346,17 +351,21 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		config.generateNewSymmetricKeyEvery = value
 	}
 	if payloadSize := os.Getenv(prefix + "PAYLOAD_SIZE"); payloadSize != "" {
-		value, err := strconv.Atoi(payloadSize)
-		if err != nil {
-			Logger.Fatalf("Error parsing PAYLOAD_SIZE environment variable: %v", err)
-		}
-		if value < 500 || value > 65507-protocol.HEADER_SIZE {
-			if value != 0 { // auto-detect payloadSize when payloadSize=0
-				Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", value, 65507-protocol.HEADER_SIZE)
+		if payloadSize == "auto" {
+			config.payloadSize = 0
+		} else {
+			value, err := strconv.Atoi(payloadSize)
+			if err != nil {
+				Logger.Fatalf("Error parsing PAYLOAD_SIZE environment variable: %v", err)
 			}
+			if value < 500 || value > 65507-protocol.HEADER_SIZE {
+				if value != 0 { // auto-detect payloadSize when payloadSize=0
+					Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", value, 65507-protocol.HEADER_SIZE)
+				}
+			}
+			Logger.Print("Overriding payloadSize with environment variable: " + prefix + "PAYLOAD_SIZE" + " with value: " + payloadSize)
+			config.payloadSize = uint16(value)
 		}
-		Logger.Print("Overriding payloadSize with environment variable: " + prefix + "PAYLOAD_SIZE" + " with value: " + payloadSize)
-		config.payloadSize = uint16(value)
 	}
 	if eps := os.Getenv(prefix + "EPS"); eps != "" {
 		value, err := strconv.ParseFloat(eps, 64)
@@ -451,6 +460,10 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				}
 				config.generateNewSymmetricKeyEvery = v
 			case "payloadSize":
+				if value == "auto" {
+					config.payloadSize = 0
+					break
+				}
 				payloadSize, err := strconv.Atoi(value)
 				if err != nil {
 					Logger.Fatalf("Error parsing payloadSize command line argument: %v", err)

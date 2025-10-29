@@ -39,7 +39,7 @@ The application `create` takes the following parameters:
 * logLevel={DEBUG, INFO, WARN, ERROR or FATAL}
 * logFileName={Log to file instead of console}
 * limit={'first' or 'all'. If 'first' then only the first missing offset is reported in the result}
-* resultFileName={Name of a file to receive the JSON result. If empty the result will be printed to the console}
+* resendFileName={Name of a file to receive the JSON result. If empty the result will be printed to the console}
 * certFile={path to crt file if using TLS with Kafka}
 * keyFile={path to key file for the certFile}
 * caFile={path to crt file of the issuer of the server certificate}
@@ -52,7 +52,7 @@ Example:
 ```
 The output will be written to stdout, so if you want to save the result to a file, you can use:
 ```sh
-./create --topic=gaps --bootstrap-servers=localhost:9092 --resultFileName=filename.json
+./create --topic=gaps --bootstrap-servers=localhost:9092 --resendFileName=filename.json
 ```
 After creating the JSON file, inspect it to ensure it contains valid JSON.
 
