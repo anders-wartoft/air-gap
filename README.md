@@ -245,6 +245,7 @@ The property privateKeyFiles should point to one or more private key files that 
 | certFile                 | AIRGAP_DOWNSTREAM_CERT_FILE |               | For TLS to Kafka, add a certificate pem encoded file here |
 | keyFile                  | AIRGAP_DOWNSTREAM_KEY_FILE  |               | The private key for the certFile certificate |
 | caFile                   | AIRGAP_DOWNSTREAM_CA_FILE   |               | The CA that issued the Kafka server's certificate |
+| internalTopic            | AIRGAP_DOWNSTREAM_INTERNAL_TOPIC    |  airgap-internal  | Topic name in Kafka to write to (internal logging). Topic name for events from the upstream topics will have the same name as the upstream topic, if not translated by the setting AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |
 | topicTranslations        | AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |            | Rename topics with a specified name to another name. Used in multi downstreams setup (see Redundancy and Load Balancing.md) |
 | logStatistics            | AIRGAP_DOWNSTREAM_LOG_STATISTICS  | 0             | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
 | numReceivers             | AIRGAP_DOWNSTREAM_NUM_RECEIVERS   | 1             | Number of UDP receivers to start that concurrently binds to the targetPort |

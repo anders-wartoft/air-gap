@@ -138,6 +138,7 @@ func defaultConfiguration() TransferConfiguration {
 	config.batchSize = 32               // default batching of 32 messages
 	config.readBufferMultiplier = 16    // default 16 times mtu as memory buffer
 	config.rcvBufSize = 4 * 1024 * 1024 // default 4MB OS receive buffer for UDP sockets
+	config.topic = "airgap-internal"
 	return config
 }
 
@@ -301,6 +302,8 @@ func readConfiguration(fileName string, result TransferConfiguration) (TransferC
 			} else {
 				result.rcvBufSize = tmp
 			}
+		case "internalTopic":
+			result.topic = value
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -338,10 +341,6 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	if bootstrapServers := os.Getenv(prefix + "BOOTSTRAP_SERVERS"); bootstrapServers != "" {
 		Logger.Print("Overriding bootstrapServers with environment variable: " + prefix + "BOOTSTRAP_SERVERS" + " with value: " + bootstrapServers)
 		config.bootstrapServers = bootstrapServers
-	}
-	if topic := os.Getenv(prefix + "TOPIC"); topic != "" {
-		Logger.Print("Overriding topic with environment variable: " + prefix + "TOPIC" + " with value: " + topic)
-		config.topic = topic
 	}
 	if mtu := os.Getenv(prefix + "MTU"); mtu != "" {
 		Logger.Print("Overriding mtu with environment variable: " + prefix + "MTU" + " with value: " + mtu)
@@ -451,6 +450,9 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			config.rcvBufSize = tmp
 		}
 	}
+	if internalTopic := os.Getenv(prefix + "INTERNAL_TOPIC"); internalTopic != "" {
+		config.topic = internalTopic
+	}
 	return config
 }
 
@@ -462,7 +464,6 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  targetIP: %s", config.targetIP)
 	Logger.Printf("  targetPort: %d", config.targetPort)
 	Logger.Printf("  bootstrapServers: %s", config.bootstrapServers)
-	Logger.Printf("  topic: %s", config.topic)
 	Logger.Printf("  mtu: %d", config.mtu)
 	Logger.Printf("  privateKeyGlob: %s", config.privateKeyGlob)
 	Logger.Printf("  target: %s", config.target)
@@ -478,6 +479,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  batchSize: %d", config.batchSize)
 	Logger.Printf("  readBufferMultiplier: %d", config.readBufferMultiplier)
 	Logger.Printf("  rcvBufSize: %d", config.rcvBufSize)
+	Logger.Printf("  internalTopic: %s", config.topic)
 	if len(config.translations) > 0 {
 		Logger.Printf("  topicTranslations: %s", config.topicTranslations)
 	}
@@ -505,9 +507,6 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	}
 	if result.target == "kafka" && result.bootstrapServers == "" {
 		Logger.Fatal("Missing required configuration: bootstrapServers")
-	}
-	if result.target == "kafka" && result.topic == "" {
-		Logger.Fatal("Missing required configuration: topic")
 	}
 	if result.logFileName != "" {
 		// Check that the logFileName is a valid file name

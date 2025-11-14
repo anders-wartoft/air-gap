@@ -22,6 +22,13 @@ import (
 
 // Send a message to Kafka or stdout
 func sendMessage(messageType uint8, id string, topic string, message []byte) {
+	// If topic is "" then the configuration prohibits sending messages
+	if topic == "" {
+		if Logger.CanLog(logging.DEBUG) {
+			Logger.Debugf("Not sending message %s since topic name is empty", string(message))
+		}
+		return
+	}
 	partition := int32(0)
 	// If no id, just create one
 	var messageKey string
