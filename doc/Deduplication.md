@@ -20,6 +20,17 @@
     export STATE_DIR_CONFIG=/tmp/dedup_state_a/
     export GAP_EMIT_INTERVAL_SEC=60
     export PERSIST_INTERVAL_MS=10000
+
+    # For TLS connections, also add
+    export KAFKA_SECURITY_PROTOCOL=SSL
+    export KAFKA_SSL_TRUSTSTORE_LOCATION=/opt/airgap/certs/client.truststore.jks
+    export KAFKA_SSL_TRUSTSTORE_PASSWORD=changeit
+    export KAFKA_SSL_KEYSTORE_LOCATION=/opt/airgap/certs/client.keystore.jks
+    export KAFKA_SSL_KEYSTORE_PASSWORD=changeit
+
+    # or
+    export KAFKA_SASL_MECHANISM=PLAIN
+    export KAFKA_SASL_JAAS_CONFIG='org.apache.kafka.common.security.plain.PlainLoginModule required username="user" password="pass";'
     ```
 
 3. **Start the deduplication service:**

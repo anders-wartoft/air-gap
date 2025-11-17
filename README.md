@@ -458,6 +458,10 @@ See LICENSE file
 
 ## 0.1.6-SNAPSHOT
 * Removed `topic` configuration from downstream. Downstream uses upstream's topic name, or a translation of that name.
+* Fixed the following issues:
+  * resend will not accept payloadSize=auto #1
+  * Separate internal logging from event stream from Upstream Kafka #2
+  * Dedup can't use TLS to connect to Kafka #3
 
 ## 0.1.5-SNAPSHOT
 * Multiple sockets with SO_REUSEPORT for faster and more reliable UDP receive in Linux and Mac for downstream. Fallback to single thread in Windows.
