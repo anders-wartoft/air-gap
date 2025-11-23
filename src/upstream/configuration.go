@@ -112,6 +112,8 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 				tmp, err := strconv.Atoi(value)
 				if err != nil {
 					Logger.Fatalf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or a two byte integer", value)
+				} else if tmp < 0 || tmp > 65535 {
+					Logger.Fatalf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or 0-65535", value)
 				} else {
 					result.payloadSize = uint16(tmp)
 				}
@@ -309,6 +311,9 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		if payloadSize == "auto" {
 			config.payloadSize = 0
 		} else if payloadSizeInt, err := strconv.Atoi(payloadSize); err == nil {
+			if payloadSizeInt < 0 || payloadSizeInt > 65535 {
+				Logger.Fatalf("Error in config PAYLOAD_SIZE. Illegal value: %s. Legal values are 'auto' or 0-65535", payloadSize)
+			}
 			config.payloadSize = uint16(payloadSizeInt)
 		}
 	}

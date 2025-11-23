@@ -208,6 +208,8 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 				tmp, err := strconv.Atoi(value)
 				if err != nil {
 					Logger.Fatalf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or a two byte integer", value)
+				} else if tmp < 0 || tmp > 65535 {
+					Logger.Fatalf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or 0-65535", value)
 				} else {
 					result.payloadSize = uint16(tmp)
 				}
@@ -367,6 +369,9 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 					Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", value, 65507-protocol.HEADER_SIZE)
 				}
 			}
+			if value < 0 || value > 65535 {
+				Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values must fit in uint16 (0-65535)", value)
+			}
 			Logger.Print("Overriding payloadSize with environment variable: " + prefix + "PAYLOAD_SIZE" + " with value: " + payloadSize)
 			config.payloadSize = uint16(value)
 		}
@@ -478,6 +483,9 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 					if payloadSize != 0 { // auto-detect payloadSize when payloadSize=0
 						Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", payloadSize, 65507-protocol.HEADER_SIZE)
 					}
+				}
+				if payloadSize < 0 || payloadSize > 65535 {
+					Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values must fit in uint16 (0-65535)", payloadSize)
 				}
 				config.payloadSize = uint16(payloadSize)
 			case "eps":

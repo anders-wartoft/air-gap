@@ -180,6 +180,8 @@ func readConfiguration(fileName string, result TransferConfiguration) (TransferC
 				tmp, err := strconv.Atoi(value)
 				if err != nil {
 					Logger.Fatalf("Error in config mtu. Ilegal value: %s. Legal values are 'auto' or a two byte integer", value)
+				} else if tmp < 0 || tmp > 65535 {
+					Logger.Fatalf("Error in config mtu. Ilegal value: %s. Legal values are 'auto' or 0-65535", value)
 				} else {
 					result.mtu = uint16(tmp)
 				}
@@ -287,12 +289,9 @@ func readConfiguration(fileName string, result TransferConfiguration) (TransferC
 			tmp, err := strconv.Atoi(value)
 			if err != nil {
 				Logger.Fatalf("Error in config readBufferMultiplier. Illegal value: %s. Legal values are positive integers", value)
-			} else if tmp < 1 {
-				Logger.Fatalf("Error in config readBufferMultiplier. Illegal value: %s. Legal values are positive integers", value)
+			} else if tmp < 1 || tmp > 65535 {
+				Logger.Fatalf("Error in config readBufferMultiplier. Illegal value: %s. Legal values are positive integers up to 65535", value)
 			} else {
-				if tmp > 65535 {
-					Logger.Fatalf("Error in config readBufferMultiplier. Illegal value: %s. Legal values are positive integers up to 65535", value)
-				}
 				result.readBufferMultiplier = uint16(tmp)
 			}
 		case "rcvBufSize":
@@ -351,6 +350,9 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		if mtu == "auto" {
 			config.mtu = 0
 		} else if mtuInt, err := strconv.Atoi(mtu); err == nil {
+			if mtuInt < 0 || mtuInt > 65535 {
+				Logger.Fatalf("Error in config MTU. Illegal value: %s. Legal values are 'auto' or 0-65535", mtu)
+			}
 			config.mtu = uint16(mtuInt)
 		}
 	}
@@ -435,12 +437,9 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		tmp, err := strconv.Atoi(readBufferMultiplier)
 		if err != nil {
 			Logger.Fatalf("Error in config readBufferMultiplier. Illegal value: %s. Legal values are positive integers", readBufferMultiplier)
-		} else if tmp < 1 {
-			Logger.Fatalf("Error in config readBufferMultiplier. Illegal value: %s. Legal values are positive integers", readBufferMultiplier)
+		} else if tmp < 1 || tmp > 65535 {
+			Logger.Fatalf("Error in config readBufferMultiplier. Illegal value: %s. Legal values are positive integers up to 65535", readBufferMultiplier)
 		} else {
-			if tmp > 65535 {
-				Logger.Fatalf("Error in config readBufferMultiplier. Illegal value: %s. Legal values are positive integers up to 65535", readBufferMultiplier)
-			}
 			config.readBufferMultiplier = uint16(tmp)
 		}
 	}
