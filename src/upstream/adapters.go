@@ -15,8 +15,9 @@ func (k *KafkaAdapter) Read(ctx context.Context, name string, offset int,
 	kafka.ReadFromKafkaWithContext(ctx, name, offset, bootstrapServers, topic, group, from, handler)
 }
 
-func (k *KafkaAdapter) SetTLS(certFile, keyFile, caFile string) {
-	kafka.SetTLSConfigParameters(certFile, keyFile, caFile)
+func (k *KafkaAdapter) SetTLS(certFile, keyFile, caFile, keyPasswordFile string) error {
+	_, err := kafka.SetTLSConfigParameters(certFile, keyFile, caFile, keyPasswordFile)
+	return err
 }
 
 type UDPAdapter struct {

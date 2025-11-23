@@ -10,7 +10,7 @@ import (
 type KafkaClient interface {
 	Read(ctx context.Context, name string, offset int, bootstrapServers, topic, group, from string,
 		handler kafka.KafkaHandler)
-	SetTLS(certFile, keyFile, caFile string)
+	SetTLS(certFile, keyFile, caFile, keyPasswordFile string) error
 }
 
 // UDPClient defines the interface for UDP connection

@@ -215,7 +215,7 @@ func connectToKafka(config TransferConfiguration) {
 	// Check if we have TLS to Kafka
 	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
 		Logger.Print("Using TLS for Kafka")
-		tlsConfig, err := kafka.SetTLSConfigParameters(config.certFile, config.keyFile, config.caFile)
+		tlsConfig, err := kafka.SetTLSConfigParameters(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
 		if err != nil {
 			Logger.Panicf("Error setting TLS config parameters: %v", err)
 		}

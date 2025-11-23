@@ -29,8 +29,9 @@ func (k *KafkaAdapter) ReadToEndPartition(partition int, ctx context.Context, br
 	return kafka.ReadToEndPartition(partition, ctx, brokers, topic, group, fromOffset, callbackFunction)
 }
 
-func (k *KafkaAdapter) SetTLS(certFile, keyFile, caFile string) {
-	kafka.SetTLSConfigParameters(certFile, keyFile, caFile)
+func (k *KafkaAdapter) SetTLS(certFile, keyFile, caFile, keyPasswordFile string) error {
+	_, err := kafka.SetTLSConfigParameters(certFile, keyFile, caFile, keyPasswordFile)
+	return err
 }
 
 func (k *KafkaAdapter) GetLastOffset(servers, topic string, partition int) (int64, error) {

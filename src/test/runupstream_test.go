@@ -15,7 +15,9 @@ type MockKafkaClient struct {
 	HandlerCalled chan struct{}
 }
 
-func (m *MockKafkaClient) SetTLS(certFile, keyFile, caFile string) {}
+func (m *MockKafkaClient) SetTLS(certFile, keyFile, caFile, keyPasswordFile string) error {
+	return nil
+}
 
 func (m *MockKafkaClient) Read(ctx context.Context, name string, offset int,
 	bootstrapServers, topic, group, from string,

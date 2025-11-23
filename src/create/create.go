@@ -108,7 +108,10 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 		Logger.Printf("Reading from Kafka %s", config.bootstrapServers)
 		if configuration.certFile != "" || configuration.keyFile != "" || configuration.caFile != "" {
 			Logger.Print("Using TLS for Kafka")
-			kafka.SetTLSConfigParameters(configuration.certFile, configuration.keyFile, configuration.caFile)
+			_, err := kafka.SetTLSConfigParameters(configuration.certFile, configuration.keyFile, configuration.caFile, configuration.keyPasswordFile)
+			if err != nil {
+				Logger.Panicf("Failed to configure TLS: %v", err)
+			}
 		}
 
 		// Single thread: read from Kafka and process messages, then exit when done
@@ -116,7 +119,7 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 		// Read all available messages, then exit
 		err = kafkaReader.ReadToEnd(ctx, config.bootstrapServers, config.topic, group, kafkaHandler)
 		if err != nil {
-			Logger.Errorf("Error reading to end of topic: %v", err)
+			Logger.Fatalf("Error reading to end of topic: %v", err)
 		}
 
 		writeResults(lastEntries, config)

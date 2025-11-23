@@ -87,7 +87,7 @@ func getLatestOffsets(kafkaClient KafkaClient, jsonFilter JsonFilter, bootstrapS
 		lastOffset, err := kafkaClient.GetLastOffset(bootstrapServers, result.Topic, result.Partition)
 		if err != nil {
 			if result.Partition != -1 {
-				Logger.Errorf("Failed to get latest offset for topic %s partition %d: %v. If partition is not found, it may be due to the topic not existing or no messages being produced.",
+				Logger.Fatalf("Failed to get latest offset for topic %s partition %d: %v. If partition is not found, it may be due to the topic not existing or no messages being produced.",
 					result.Topic, result.Partition, err)
 			}
 			continue
@@ -382,7 +382,10 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 	// TLS for kafka if needed
 	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
 		Logger.Print("Using TLS for Kafka")
-		kafkaClient.SetTLS(config.certFile, config.keyFile, config.caFile)
+		err := kafkaClient.SetTLS(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
+		if err != nil {
+			Logger.Panicf("Failed to configure TLS: %v", err)
+		}
 	}
 
 	Logger.Debugf("Got %d results from resend filter", len(jsonFilter.Results))

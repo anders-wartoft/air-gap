@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -47,6 +48,7 @@ type TransferConfiguration struct {
 	batchSize            int               // Number of messages to batch together
 	readBufferMultiplier uint16            // Multiplier for the read buffer size
 	rcvBufSize           int               // Size of the OS receive buffer for UDP sockets
+	keyPasswordFile      string            // File containing the password to decrypt the key file
 }
 
 // Builder pattern setters for TransferConfiguration
@@ -304,6 +306,8 @@ func readConfiguration(fileName string, result TransferConfiguration) (TransferC
 			}
 		case "internalTopic":
 			result.topic = value
+		case "keyPasswordFile":
+			result.keyPasswordFile = value
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -453,6 +457,9 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	if internalTopic := os.Getenv(prefix + "INTERNAL_TOPIC"); internalTopic != "" {
 		config.topic = internalTopic
 	}
+	if keyPasswordFile := os.Getenv(prefix + "KEY_PASSWORD_FILE"); keyPasswordFile != "" {
+		config.keyPasswordFile = keyPasswordFile
+	}
 	return config
 }
 
@@ -471,6 +478,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  logFileName: %s", config.logFileName)
 	Logger.Printf("  certFile: %s", config.certFile)
 	Logger.Printf("  keyFile: %s", config.keyFile)
+	Logger.Printf("  keyPasswordFile: %s", config.keyPasswordFile)
 	Logger.Printf("  caFile: %s", config.caFile)
 	Logger.Printf("  topicTranslations: %s", config.topicTranslations)
 	Logger.Printf("  logStatistics: %d", config.logStatistics)
@@ -541,6 +549,15 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		if result.caFile == "" {
 			Logger.Fatalf("Missing required configuration: caFile")
 		}
+	}
+	if result.keyPasswordFile != "" && (result.keyFile != "" || result.certFile != "" || result.caFile != "") {
+		// Make sure this file exists and is readable. If not, print the complete file path for easier debugging
+		absPath, _ := filepath.Abs(result.keyPasswordFile)
+		file, err := os.Open(result.keyPasswordFile)
+		if err != nil {
+			Logger.Fatalf("Cannot open keyPasswordFile '%s' (absolute path: '%s'): %v", result.keyPasswordFile, absPath, err)
+		}
+		defer file.Close()
 	}
 	if result.topicTranslations != "" {
 		if err := json.Unmarshal([]byte(result.topicTranslations), &result.translations); err != nil {

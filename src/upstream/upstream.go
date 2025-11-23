@@ -281,7 +281,10 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 	Logger.Printf("Reading from %s %s", config.source, config.bootstrapServers)
 	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
 		Logger.Print("Using TLS for Kafka")
-		kafkaClient.SetTLS(config.certFile, config.keyFile, config.caFile)
+		err := kafkaClient.SetTLS(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
+		if err != nil {
+			Logger.Panicf("Failed to configure TLS: %v", err)
+		}
 	}
 
 	for _, thread := range config.sendingThreads {

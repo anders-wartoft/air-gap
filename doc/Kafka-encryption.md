@@ -142,11 +142,22 @@ DNS.2 = airgap-downstream-client
 ```
 
 ```bash
-# Client key
+# Client key (generate plaintext first)
 openssl genrsa -out airgap-upstream.key 2048
 openssl genrsa -out airgap-downstream.key 2048
 
-# CSR
+# Encrypt the key files with a passphrase (same format as issuer-provided keys)
+# You will be prompted for a passphrase. The encrypted .enc files will be used in production.
+openssl rsa -aes256 -in airgap-upstream.key -out airgap-upstream.key.enc
+openssl rsa -aes256 -in airgap-downstream.key -out airgap-downstream.key.enc
+
+# Store the passphrase in a file for air-gap to use (keep this file secure!)
+# You might want to disable command line history before the following commands, or better yet, use a text editor to enter the text.
+echo "YourPassphrase" > airgap-upstream.key.pass
+echo "YourPassphrase" > airgap-downstream.key.pass
+chmod 600 airgap-upstream.key.pass airgap-downstream.key.pass
+
+# CSR (use the plaintext key for CSR generation)
 openssl req -new -key airgap-upstream.key \
   -out airgap-upstream.csr \
   -config airgap-upstream.cnf
@@ -451,12 +462,28 @@ Congratulations. You can now read from Kafka. To configure downstream for Kafka 
 ```properties
 # Certificate file
 certFile=certs/tmp/airgap-downstream.crt
-# Key file
-keyFile=certs/tmp/airgap-downstream.key
+# Encrypted key file (password-protected)
+keyFile=certs/tmp/airgap-downstream.key.enc
+# Passphrase file for the encrypted key
+keyPassFile=certs/tmp/airgap-downstream.key.pass
 # CA file
 caFile=certs/tmp/kafka-ca.crt
 ```
 
-properties to the downstream property file, or set them as environment variables. 
+properties to the downstream property file, or set them as environment variables.
+
+**Note:** If your key file is **not** encrypted (plaintext `.key` file), omit the `keyPassFile` property and use `keyFile=certs/tmp/airgap-downstream.key` directly. The air-gap application will detect whether the key is encrypted and only use the passphrase file when needed.
+
+For upstream, the equivalent configuration would be:
+```properties
+# Certificate file
+certFile=certs/tmp/airgap-upstream.crt
+# Encrypted key file (password-protected)
+keyFile=certs/tmp/airgap-upstream.key.enc
+# Passphrase file for the encrypted key
+keyPassFile=certs/tmp/airgap-upstream.key.pass
+# CA file
+caFile=certs/tmp/kafka-ca.crt
+``` 
 
 -End

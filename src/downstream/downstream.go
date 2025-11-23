@@ -213,8 +213,6 @@ func Main(build string) {
 		Logger.Print("Log to file started up")
 	}
 
-	logConfiguration(config)
-
 	if config.mtu == 0 {
 		mtuValue, err := mtu.GetMTU(config.nic, fmt.Sprintf("%s:%d", config.targetIP, config.targetPort))
 		if err != nil {

@@ -13,8 +13,9 @@ import (
 type RandomKafkaAdapter struct {
 }
 
-func (r *RandomKafkaAdapter) SetTLS(certFile, keyFile, caFile string) {
+func (r *RandomKafkaAdapter) SetTLS(certFile, keyFile, caFile, keyPasswordFile string) error {
 	// no-op for random
+	return nil
 }
 
 // Read starts generating messages and calls the handler for each one.

@@ -3,6 +3,7 @@ package create
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ type TransferConfiguration struct {
 	certFile         string // Certificate to use to communicate with Kafka with TLS
 	keyFile          string // Key file to use for TLS
 	caFile           string // CA file to use for TLS
+	keyPasswordFile  string // File containing the password to decrypt the key file
 	logLevel         string // log level: DEBUG, INFO, WARN, ERROR, FATAL
 	limit            string // limit the exported messages: all, first (all means no limit)
 	resendFileName   string // output file name
@@ -111,6 +113,8 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "caFile":
 			result.caFile = value
 			Logger.Printf("caFile: %s", value)
+		case "keyPasswordFile":
+			result.keyPasswordFile = value
 		case "limit":
 			result.limit = strings.ToLower(value)
 		case "resendFileName":
@@ -200,6 +204,8 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				config.keyFile = value
 			case "caFile":
 				config.caFile = value
+			case "keyPasswordFile":
+				config.keyPasswordFile = value
 			case "logLevel":
 				config.logLevel = strings.ToUpper(value)
 			case "limit":
@@ -255,6 +261,15 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 			Logger.Fatalf("Missing required configuration: caFile")
 		}
 	}
+	if result.keyPasswordFile != "" && (result.keyFile != "" || result.certFile != "" || result.caFile != "") {
+		// Make sure this file exists and is readable. If not, print the complete file path for easier debugging
+		absPath, _ := filepath.Abs(result.keyPasswordFile)
+		file, err := os.Open(result.keyPasswordFile)
+		if err != nil {
+			Logger.Fatalf("Cannot open keyPasswordFile '%s' (absolute path: '%s'): %v", result.keyPasswordFile, absPath, err)
+		}
+		defer file.Close()
+	}
 	if result.limit != "all" && result.limit != "first" {
 		Logger.Fatalf("Error in config limit. Illegal value: %s. Legal values are all, first", result.limit)
 	}
@@ -282,6 +297,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  groupID: %s", config.groupID)
 	Logger.Printf("  certFile: %s", config.certFile)
 	Logger.Printf("  keyFile: %s", config.keyFile)
+	Logger.Printf("  keyPasswordFile: %s", config.keyPasswordFile)
 	Logger.Printf("  caFile: %s", config.caFile)
 	Logger.Printf("  limit: %s", config.limit)
 	Logger.Printf("  resendFileName: %s", config.resendFileName)

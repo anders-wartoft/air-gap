@@ -2,8 +2,13 @@ package kafka
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/des"
+	"crypto/md5"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -31,30 +36,220 @@ var (
 var Logger = logging.Logger
 
 type TLSConfiguration struct {
-	CertFile string
-	KeyFile  string
-	CAFile   string
+	CertFile        string
+	KeyFile         string
+	CAFile          string
+	KeyPasswordFile string
 }
 
 func SetVerbose(enabled bool) {
 	verbose = enabled
 }
 
-func SetTLSConfigParameters(certFile, keyFile, caFile string) (*tls.Config, error) {
+func SetTLSConfigParameters(certFile, keyFile, caFile, keyPasswordFile string) (*tls.Config, error) {
 	tlsConfigParameters = &TLSConfiguration{
-		CertFile: certFile,
-		KeyFile:  keyFile,
-		CAFile:   caFile,
+		CertFile:        certFile,
+		KeyFile:         keyFile,
+		CAFile:          caFile,
+		KeyPasswordFile: keyPasswordFile,
 	}
 	return createTLSConfig()
 }
 
-// Creates a new TLS configuration for the Kafka client
-func createTLSConfig() (*tls.Config, error) {
-	// Load client cert
-	cert, err := tls.LoadX509KeyPair(tlsConfigParameters.CertFile, tlsConfigParameters.KeyFile)
+// decryptLegacyPEM decrypts a legacy PEM encrypted private key (the old format with DEK-Info header)
+func decryptLegacyPEM(block *pem.Block, password []byte) ([]byte, error) {
+	// Get encryption info from headers
+	dekInfo := block.Headers["DEK-Info"]
+	if dekInfo == "" {
+		return nil, fmt.Errorf("missing DEK-Info header")
+	}
+
+	// Parse DEK-Info: algorithm,iv
+	parts := strings.Split(dekInfo, ",")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid DEK-Info format")
+	}
+	algorithm := parts[0]
+	ivHex := parts[1]
+
+	// Decode IV from hex
+	iv := make([]byte, len(ivHex)/2)
+	for i := 0; i < len(iv); i++ {
+		fmt.Sscanf(ivHex[i*2:i*2+2], "%02x", &iv[i])
+	}
+
+	var key []byte
+	var blockCipher cipher.Block
+	var err error
+
+	// Derive key based on algorithm
+	switch algorithm {
+	case "AES-256-CBC":
+		key = deriveKey(password, iv[:8], 32)
+		blockCipher, err = aes.NewCipher(key)
+	case "AES-192-CBC":
+		key = deriveKey(password, iv[:8], 24)
+		blockCipher, err = aes.NewCipher(key)
+	case "AES-128-CBC":
+		key = deriveKey(password, iv[:8], 16)
+		blockCipher, err = aes.NewCipher(key)
+	case "DES-EDE3-CBC":
+		key = deriveKey(password, iv[:8], 24)
+		blockCipher, err = des.NewTripleDESCipher(key)
+	default:
+		return nil, fmt.Errorf("unsupported encryption algorithm: %s", algorithm)
+	}
+
 	if err != nil {
 		return nil, err
+	}
+
+	// Decrypt using CBC mode
+	mode := cipher.NewCBCDecrypter(blockCipher, iv)
+	decrypted := make([]byte, len(block.Bytes))
+	mode.CryptBlocks(decrypted, block.Bytes)
+
+	// Remove PKCS#7 padding
+	if len(decrypted) == 0 {
+		return nil, fmt.Errorf("decrypted data is empty")
+	}
+	paddingLen := int(decrypted[len(decrypted)-1])
+	if paddingLen > len(decrypted) || paddingLen == 0 {
+		return nil, fmt.Errorf("invalid padding")
+	}
+	decrypted = decrypted[:len(decrypted)-paddingLen]
+
+	return decrypted, nil
+}
+
+// deriveKey derives a key from password and salt using MD5 (OpenSSL EVP_BytesToKey)
+func deriveKey(password, salt []byte, keyLen int) []byte {
+	var derived []byte
+	var previous []byte
+
+	for len(derived) < keyLen {
+		h := md5.New()
+		h.Write(previous)
+		h.Write(password)
+		h.Write(salt)
+		hash := h.Sum(nil)
+		derived = append(derived, hash...)
+		previous = hash
+	}
+
+	return derived[:keyLen]
+}
+
+// decryptPKCS8 attempts to decrypt a PKCS#8 encrypted private key
+func decryptPKCS8(encryptedPEM []byte, password []byte) ([]byte, error) {
+	// Try to parse as PKCS#8 encrypted key
+	_, err := x509.ParsePKCS8PrivateKey(encryptedPEM)
+	if err == nil {
+		// It's already decrypted or wasn't encrypted
+		return encryptedPEM, nil
+	}
+
+	// Try with password - this is a simplified approach
+	// For full PKCS#8 support, we'd need external library
+	return nil, fmt.Errorf("PKCS#8 decryption not fully supported in this implementation")
+}
+
+// Creates a new TLS configuration for the Kafka client
+func createTLSConfig() (*tls.Config, error) {
+	var cert tls.Certificate
+	var err error
+
+	// Read the key file to check if it's encrypted
+	keyPEM, err := os.ReadFile(tlsConfigParameters.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read key file: %w", err)
+	}
+
+	// Decode the PEM block to check if it's encrypted
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block from key file")
+	}
+
+	Logger.Debugf("DEBUG: PEM block type: '%s'", block.Type)
+	Logger.Debugf("DEBUG: PEM Proc-Type header: '%s'", block.Headers["Proc-Type"])
+	Logger.Debugf("DEBUG: keyPasswordFile: '%s'", tlsConfigParameters.KeyPasswordFile)
+
+	// Check if the key file is encrypted
+	isEncrypted := false
+	if block.Type == "RSA PRIVATE KEY" && block.Headers["Proc-Type"] == "4,ENCRYPTED" {
+		isEncrypted = true
+	} else if block.Type == "ENCRYPTED PRIVATE KEY" {
+		isEncrypted = true
+	}
+
+	// If key is encrypted but no password file provided, fail
+	if isEncrypted && tlsConfigParameters.KeyPasswordFile == "" {
+		return nil, fmt.Errorf("key file '%s' is encrypted but no keyPasswordFile is configured. Please provide keyPasswordFile in configuration", tlsConfigParameters.KeyFile)
+	}
+
+	// Check if we need to decrypt the key file
+	if tlsConfigParameters.KeyPasswordFile != "" {
+		Logger.Printf("Attempting to decrypt encrypted key file: %s", tlsConfigParameters.KeyFile)
+
+		// Read the passphrase from the password file
+		passphrase, err := os.ReadFile(tlsConfigParameters.KeyPasswordFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read key password file: %w", err)
+		}
+		passphraseBytes := []byte(strings.TrimSpace(string(passphrase)))
+
+		var decryptedDER []byte
+		var decryptionMethod string
+
+		// Try legacy PEM format first (RSA PRIVATE KEY with Proc-Type: 4,ENCRYPTED)
+		if block.Type == "RSA PRIVATE KEY" && block.Headers["Proc-Type"] == "4,ENCRYPTED" {
+			Logger.Print("Detected legacy PEM encrypted format (DEK-Info), attempting decryption...")
+			decryptedDER, err = decryptLegacyPEM(block, passphraseBytes)
+			if err == nil {
+				decryptionMethod = "legacy PEM"
+			}
+		}
+
+		// If legacy PEM failed or wasn't detected, try PKCS#8
+		if decryptedDER == nil && block.Type == "ENCRYPTED PRIVATE KEY" {
+			Logger.Print("Detected PKCS#8 encrypted format, attempting decryption...")
+			decryptedDER, err = decryptPKCS8(keyPEM, passphraseBytes)
+			if err == nil {
+				decryptionMethod = "PKCS#8"
+			}
+		}
+
+		// If both methods failed, panic
+		if decryptedDER == nil {
+			Logger.Panicf("Failed to decrypt key file. Tried legacy PEM and PKCS#8 formats. Last error: %v", err)
+		}
+
+		Logger.Printf("Successfully decrypted key using %s format", decryptionMethod)
+
+		// Encode back to PEM format
+		decryptedPEM := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: decryptedDER,
+		})
+
+		// Read the certificate file
+		certPEM, err := os.ReadFile(tlsConfigParameters.CertFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read certificate file: %w", err)
+		}
+
+		// Load certificate and decrypted key
+		cert, err = tls.X509KeyPair(certPEM, decryptedPEM)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load X509 key pair: %w", err)
+		}
+	} else {
+		// No decryption needed - use files directly
+		cert, err = tls.LoadX509KeyPair(tlsConfigParameters.CertFile, tlsConfigParameters.KeyFile)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Load CA cert

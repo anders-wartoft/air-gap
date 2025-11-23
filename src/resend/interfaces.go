@@ -13,7 +13,7 @@ type KafkaClient interface {
 	Read(ctx context.Context, name string, offset int,
 		bootstrapServers, topic, group, from string,
 		handler kafka.KafkaHandler)
-	SetTLS(certFile, keyFile, caFile string)
+	SetTLS(certFile, keyFile, caFile, keyPasswordFile string) error
 	ReadToEndPartition(partition int, ctx context.Context, brokers string, topic string, group string, fromOffset int64,
 		callbackFunction func(string, []byte, time.Time, []byte) bool) error
 	GetLastOffset(bootstrapServers, topic string, partition int) (int64, error)

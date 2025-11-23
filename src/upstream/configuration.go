@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,7 @@ type TransferConfiguration struct {
 	certFile                     string            // Certificate to use to communicate with Kafka with TLS
 	keyFile                      string            // Key file to use for TLS
 	caFile                       string            // CA file to use for TLS
+	keyPasswordFile              string            // File containing the password to decrypt the key file
 	deliverFilter                string            // filter configuration
 	topicTranslations            string            // topic translations in JSON format
 	translations                 map[string]string // map from input topic to output topic (derived from topicTranslations)
@@ -207,6 +209,8 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "caFile":
 			result.caFile = value
 			Logger.Printf("caFile: %s", value)
+		case "keyPasswordFile":
+			result.keyPasswordFile = value
 		case "deliverFilter":
 			result.deliverFilter = value
 			Logger.Printf("deliverFilter: %s", value)
@@ -356,6 +360,9 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		Logger.Print("Overriding caFile with environment variable: " + prefix + "CA_FILE" + " with value: " + caFile)
 		config.caFile = caFile
 	}
+	if keyPasswordFile := os.Getenv(prefix + "KEY_PASSWORD_FILE"); keyPasswordFile != "" {
+		config.keyPasswordFile = keyPasswordFile
+	}
 	if source := os.Getenv(prefix + "SOURCE"); source != "" {
 		Logger.Print("Overriding source with environment variable: " + prefix + "SOURCE" + " with value: " + source)
 		config.source = source
@@ -472,6 +479,15 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 			Logger.Fatalf("Missing required configuration: caFile")
 		}
 	}
+	if result.keyPasswordFile != "" && (result.keyFile != "" || result.certFile != "" || result.caFile != "") {
+		// Make sure this file exists and is readable. If not, print the complete file path for easier debugging
+		absPath, _ := filepath.Abs(result.keyPasswordFile)
+		file, err := os.Open(result.keyPasswordFile)
+		if err != nil {
+			Logger.Fatalf("Cannot open keyPasswordFile '%s' (absolute path: '%s'): %v", result.keyPasswordFile, absPath, err)
+		}
+		defer file.Close()
+	}
 	if result.topicTranslations != "" {
 		if err := json.Unmarshal([]byte(result.topicTranslations), &result.translations); err != nil {
 			Logger.Fatalf("Error in config topicTranslations. Illegal value: %s. Legal values are JSON objects 'from': 'to', ...", result.topicTranslations)
@@ -529,6 +545,7 @@ func logConfiguration(config TransferConfiguration) {
 	}
 	Logger.Printf("  certFile: %s", config.certFile)
 	Logger.Printf("  keyFile: %s", config.keyFile)
+	Logger.Printf("  keyPasswordFile: %s", config.keyPasswordFile)
 	Logger.Printf("  caFile: %s", config.caFile)
 	Logger.Printf("  deliverFilter: %s", config.deliverFilter)
 	Logger.Printf("  logStatistics: %d seconds", config.logStatistics)
