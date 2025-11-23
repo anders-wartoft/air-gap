@@ -240,6 +240,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | sendingThreads           | AIRGAP_UPSTREAM_SENDING_THREADS | {"now": 0} | How many times, and when, whould we send each event? |
 | certFile                 | AIRGAP_UPSTREAM_CERT_FILE |               | For TLS to Kafka, add a certificate pem encoded file here |
 | keyFile                  | AIRGAP_UPSTREAM_KEY_FILE  |               | The private key for the certFile certificate |
+| keyPasswordFile     | AIRGAP_UPSTREAM_KEY_PASSWORD_FILE |       | Path to a file containing the password to decrypt an encrypted keyFile |
 | caFile                   | AIRGAP_UPSTREAM_CA_FILE   |               | The CA that issued the Kafka server's certificate |
 | deliverFilter            | AIRGAP_UPSTREAM_DELIVER_FILTER |               | Filter so not all events from Kafka is sent. Can be used to enable load balancing (see Load Balancing chapter below) |
 | topicTranslations        | AIRGAP_UPSTREAM_TOPIC_TRANSLATIONS |              | If you need to rename a topic before sending the messages you can use this: `{"inputTopic1":"outputTopic1","inputTopic2":"outputTopic2"}`. Here, if the name of a topic upstreams is `inputTopic1` it will be sent as `outputTopic1` from upstream |
@@ -282,6 +283,7 @@ The property privateKeyFiles should point to one or more private key files that 
 | logFileName              | AIRGAP_DOWNSTREAM_LOG_FILE_NAME |          | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
 | certFile                 | AIRGAP_DOWNSTREAM_CERT_FILE |               | For TLS to Kafka, add a certificate pem encoded file here |
 | keyFile                  | AIRGAP_DOWNSTREAM_KEY_FILE  |               | The private key for the certFile certificate |
+| keyPasswordFile     | AIRGAP_UPSTREAM_KEY_PASSWORD_FILE |       | Path to a file containing the password to decrypt an encrypted keyFile |
 | caFile                   | AIRGAP_DOWNSTREAM_CA_FILE   |               | The CA that issued the Kafka server's certificate |
 | internalTopic            | AIRGAP_DOWNSTREAM_INTERNAL_TOPIC    |  airgap-internal  | Topic name in Kafka to write to (internal logging). Topic name for events from the upstream topics will have the same name as the upstream topic, if not translated by the setting AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |
 | topicTranslations        | AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |            | Rename topics with a specified name to another name. Used in multi downstreams setup (see Redundancy and Load Balancing.md) |
