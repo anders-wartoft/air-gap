@@ -370,6 +370,10 @@ The project uses a modular Makefile-based build system that supports building Go
 
 ### Quick Build Commands
 
+## Compile
+
+There is a Makefile that will get the latest tag from git and save in version.go, then build upstream and downstream.
+
 ```bash
 # Build everything (Go + Java)
 make all
@@ -422,6 +426,17 @@ All binaries are built to `target/linux-amd64/` by default, and packages are cre
 ### Manual Build
 
 To build manually without Make:
+
+make            # builds both upstream and downstream as well as building the deduplication Java project
+make upstream   # builds only upstream
+make downstream # builds only downstream
+make clean      # removes binaries and version.go, then performs a make
+```
+
+To build manually, change directory to the application you would like to build (./src/upstream, ...).
+Compile the applications with `go build {filename}`.
+
+Example:
 
 ```bash
 # Go applications
