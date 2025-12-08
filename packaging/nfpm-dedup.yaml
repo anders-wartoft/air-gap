@@ -16,7 +16,7 @@ license: "LGPL-2.1-only"
 contents:
   # Java application
   - src: java-streams/target/air-gap-deduplication-fat-*.jar
-    dst: /opt/airgap/dedup/air-gap-deduplication-fat.jar
+    dst: /opt/airgap/dedup/
     file_info:
       mode: 0644
 
