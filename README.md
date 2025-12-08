@@ -379,6 +379,16 @@ There is a Makefile that will get the latest tag from git and save in version.go
 
 The project uses a modular Makefile-based build system that supports building Go binaries, Java applications, and system packages (RPM, DEB, APK).
 
+### Prerequisites
+
+Before building, ensure you have fetched all git tags (required for version detection):
+
+```bash
+git fetch --tags
+```
+
+The build system uses git tags to determine the version for all artifacts (Go binaries, Java JAR, and system packages).
+
 ### Quick Build Commands
 
 ```bash

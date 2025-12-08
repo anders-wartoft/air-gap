@@ -48,6 +48,7 @@ clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf $(TARGET_DIR)
 	rm -f src/version/version.go
+	rm -f .build-number-incremented
 	cd java-streams && mvn clean || true
 	@echo "✅ Clean complete"
 

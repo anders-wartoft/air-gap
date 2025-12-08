@@ -3,7 +3,7 @@
 # ============================================================================
 
 # Version and Build Info
-GIT_VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)
+GIT_VERSION := $(shell git tag -l --sort=-version:refname | head -1 2>/dev/null || echo 0.0.0)
 GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo local)
 BUILD_NUMBER_FILE := BUILD_NUMBER
 BUILD_NUMBER := $(shell cat $(BUILD_NUMBER_FILE) 2>/dev/null || echo 1)
