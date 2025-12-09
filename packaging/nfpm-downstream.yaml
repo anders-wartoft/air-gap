@@ -1,0 +1,84 @@
+name: ${PACKAGE_NAME}
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: ${RELEASE}
+section: utils
+priority: optional
+maintainer: "Air Gap"
+description: |
+  Air Gap downstream components - UDP receiver with decryption and Kafka writer.
+  Includes downstream (main receiver) and create (resend bundle generator) binaries.
+  Built from commit ${GITHUB_SHA}.
+homepage: "https://github.com/anders-wartoft/air-gap"
+license: "LGPL-2.1-only"
+
+contents:
+  # Binaries
+  - src: target/linux-amd64/downstream
+    dst: /usr/local/bin/airgap-downstream
+    file_info:
+      mode: 0755
+
+  - src: target/linux-amd64/create
+    dst: /usr/local/bin/airgap-create
+    file_info:
+      mode: 0755
+
+  # Systemd services
+  - src: packaging/systemd/airgap-downstream.service
+    dst: /lib/systemd/system/airgap-downstream.service
+    file_info:
+      mode: 0644
+
+  - src: packaging/systemd/airgap-create.service
+    dst: /lib/systemd/system/airgap-create.service
+    file_info:
+      mode: 0644
+
+  # Configuration examples
+  - src: config/downstream.properties
+    dst: /etc/airgap/downstream.properties.example
+    type: config
+    file_info:
+      mode: 0644
+
+  - src: config/create.properties
+    dst: /etc/airgap/create.properties.example
+    type: config
+    file_info:
+      mode: 0644
+
+  - src: config/gap_detector.properties
+    dst: /etc/airgap/gap_detector.properties.example
+    type: config
+    file_info:
+      mode: 0644
+
+  # Documentation
+  - src: README.md
+    dst: /usr/share/doc/airgap-downstream/README.md
+    file_info:
+      mode: 0644
+
+scripts:
+  preinstall: packaging/scripts/airgap-downstream-preinstall.sh
+  postinstall: packaging/scripts/airgap-downstream-postinstall.sh
+  postremove: packaging/scripts/airgap-downstream-postremove.sh
+
+overrides:
+  rpm:
+    depends:
+      - glibc
+      - shadow-utils
+      - systemd
+  deb:
+    depends:
+      - libc6
+      - adduser
+      - systemd
+  apk:
+    depends:
+      - libc6-compat
+      - shadow
+      - openrc

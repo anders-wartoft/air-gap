@@ -1,7 +1,10 @@
 # air-gap Kafka to Kafka Topic Transfer over UDP with Guaranteed Delivery
-This project aims to solve the problem of transferring events from a Kafka topic in near real time over an unsecure UDP connection with guaranteed once-only delivery of the events. This can be useful, e.g., for transmitting log events over a hardware diode. The information leaving the sending side may be encrypted with symmetric keys and the key exchange is automatic with use of public key encryption. 
 
-In Kafka, events may have a key and a value. The key part of events upstreams will be lost in the transmission, since the key part downstream is used for message identification and thus detection of lost messages (gap-detection). 
+This project aims to solve the problem of transferring events from a Kafka topic in near real time over an unsecure UDP connection with guaranteed once-only delivery of the events. This can be useful, e.g., for transmitting log events over a hardware diode. The information leaving the sending side may be encrypted with symmetric keys and the key exchange is automatic with use of public key encryption.
+
+## Overview
+
+In Kafka, events may have a key and a value. The key part of events upstreams will be lost in the transmission, since the key part downstream is used for message identification and thus detection of lost messages (gap-detection).
 
 For resend of lost events that gap-detection identifies, a back channel must be present but can be a manual routine with input from keyboard or from a file transfer. The information is mainly what topic, partition and id to start reading from. The easiest way to do that is to use the create-resend-bundle application that reads the Kafka Gap topic and creates a file with the missing events. The file needs to be copied to upstream and then used with the resend-missing application that reads the missing events and transmits them again to the UDP receiver.
 
@@ -354,31 +357,251 @@ Some problems that may arise are:
 
 ## Service
 
-The applications responds to os signals and can be installed as a service in, e.g., Linux. 
+The applications responds to os signals and can be installed as a service in, e.g., Linux.
+The applications responds to os signals and can be installed as a service in, e.g., Linux.
 See https://fabianlee.org/2022/10/29/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-22-04/
 
 ## Compile
 
 There is a Makefile that will get the latest tag from git and save in version.go, then build upstream and downstream.
 
+## Build System
+
+The project uses a modular Makefile-based build system that supports building Go binaries, Java applications, and system packages (RPM, DEB, APK).
+
+### Quick Build Commands
+
+## Compile
+
+There is a Makefile that will get the latest tag from git and save in version.go, then build upstream and downstream.
+
+## Build System
+
+The project uses a modular Makefile-based build system that supports building Go binaries, Java applications, and system packages (RPM, DEB, APK).
+
+### Prerequisites
+
+Before building, ensure you have fetched all git tags (required for version detection):
+
 ```bash
+git fetch --tags
+```
+
+The build system uses git tags to determine the version for all artifacts (Go binaries, Java JAR, and system packages).
+
+### Quick Build Commands
+
+```bash
+# Build everything (Go + Java)
+make all
+
+# Build only Go components
+make build-go
+
+# Build only Java deduplication application
+make build-java
+
+# Build all packages (RPM, DEB, APK for all components)
+make package-all
+
+# Build specific component packages
+make package-upstream       # All formats (rpm, deb, apk)
+make package-downstream
+make package-dedup
+
+# Build specific package format
+make package-upstream-rpm
+make package-upstream-deb
+make package-downstream-rpm
+# ... etc
+
+# Run tests
+make test                   # Run Go and Java tests
+make test-go               # Go tests only
+make test-java             # Java tests only
+
+# Clean build artifacts
+make clean                 # Remove all build artifacts
+make clean-packages        # Remove only package artifacts
+
+# Show all available targets
+make help
+```
+
+### Build System Architecture
+
+The build system is organized into modular components in the `build/` directory:
+
+- **`build/variables.mk`** - Common variables and paths
+- **`build/go.mk`** - Go binary compilation (upstream, downstream, create, resend)
+- **`build/java.mk`** - Java deduplication application build
+- **`build/package.mk`** - Package creation with nfpm (RPM, DEB, APK)
+- **`build/test.mk`** - Test execution and validation
+
+All binaries are built to `target/linux-amd64/` by default, and packages are created in `target/dist/`.
+
+### Manual Build
+
+To build manually without Make:
+
 make            # builds both upstream and downstream as well as building the deduplication Java project
 make upstream   # builds only upstream
 make downstream # builds only downstream
 make clean      # removes binaries and version.go, then performs a make
 ```
 
-To build manually, change directory to the application you would like to build (./src/upstream, ...). 
+To build manually, change directory to the application you would like to build (./src/upstream, ...).
+To build manually, change directory to the application you would like to build (./src/upstream, ...).
 Compile the applications with `go build {filename}`.
 
 Example:
-
 ```bash
+# Go applications
+# Go applications
 cd src/cmd/upstream
 go build -o upstream main.go
+
+# Java application
+cd java-streams
+mvn clean package
 ```
 
-Now we have a compiled file called `upstream`. We can run the application with `./upstream`, but you will still need a configuration file.
+## Packaging
+
+The project includes production-ready system packages for major Linux distributions using [nfpm](https://nfpm.goreleaser.com/):
+
+### Package Formats
+
+- **RPM** - For RHEL, CentOS, Fedora, Rocky Linux, AlmaLinux
+- **DEB** - For Debian, Ubuntu
+- **APK** - For Alpine Linux
+
+### Package Contents
+
+Each package includes:
+- Compiled binaries installed to `/usr/local/bin/`
+- Systemd service files for easy daemon management
+- User/group creation (`airgap` user)
+- Configuration templates
+- Automatic dependency installation
+
+### Package Testing
+
+Docker-based package testing is available in the `tests/` directory:
+
+```bash
+# Start test containers
+cd tests
+docker-compose up -d
+
+# Test RPM packages on Rocky Linux
+docker-compose exec rocky bash /scripts/test-rpm.sh
+
+# Test DEB packages on Ubuntu
+docker-compose exec ubuntu bash /scripts/test-deb.sh
+
+# Test APK packages on Alpine
+docker-compose exec alpine sh /scripts/test-apk.sh
+
+# Cleanup
+docker-compose down
+```
+
+### Installation
+
+After building packages with `make package-all`, install them on your target system:
+
+**RPM-based systems:**
+```bash
+sudo dnf install target/dist/airgap-upstream-*.rpm
+sudo dnf install target/dist/airgap-downstream-*.rpm
+sudo dnf install target/dist/airgap-dedup-*.rpm
+```
+
+**DEB-based systems:**
+```bash
+sudo apt install ./target/dist/airgap-upstream_*_amd64.deb
+sudo apt install ./target/dist/airgap-downstream_*_amd64.deb
+sudo apt install ./target/dist/airgap-dedup_*_amd64.deb
+```
+
+**Alpine:**
+```bash
+sudo apk add --allow-untrusted target/dist/airgap-upstream-*.apk
+sudo apk add --allow-untrusted target/dist/airgap-downstream-*.apk
+sudo apk add --allow-untrusted target/dist/airgap-dedup-*.apk
+```
+
+# Java application
+cd java-streams
+mvn clean package
+```
+
+## Packaging
+
+The project includes production-ready system packages for major Linux distributions using [nfpm](https://nfpm.goreleaser.com/):
+
+### Package Formats
+
+- **RPM** - For RHEL, CentOS, Fedora, Rocky Linux, AlmaLinux
+- **DEB** - For Debian, Ubuntu
+- **APK** - For Alpine Linux
+
+### Package Contents
+
+Each package includes:
+- Compiled binaries installed to `/usr/local/bin/`
+- Systemd service files for easy daemon management
+- User/group creation (`airgap` user)
+- Configuration templates
+- Automatic dependency installation
+
+### Package Testing
+
+Docker-based package testing is available in the `tests/` directory:
+
+```bash
+# Start test containers
+cd tests
+docker-compose up -d
+
+# Test RPM packages on Rocky Linux
+docker-compose exec rocky bash /scripts/test-rpm.sh
+
+# Test DEB packages on Ubuntu
+docker-compose exec ubuntu bash /scripts/test-deb.sh
+
+# Test APK packages on Alpine
+docker-compose exec alpine sh /scripts/test-apk.sh
+
+# Cleanup
+docker-compose down
+```
+
+### Installation
+
+After building packages with `make package-all`, install them on your target system:
+
+**RPM-based systems:**
+```bash
+sudo dnf install target/dist/airgap-upstream-*.rpm
+sudo dnf install target/dist/airgap-downstream-*.rpm
+sudo dnf install target/dist/airgap-dedup-*.rpm
+```
+
+**DEB-based systems:**
+```bash
+sudo apt install ./target/dist/airgap-upstream_*_amd64.deb
+sudo apt install ./target/dist/airgap-downstream_*_amd64.deb
+sudo apt install ./target/dist/airgap-dedup_*_amd64.deb
+```
+
+**Alpine:**
+```bash
+sudo apk add --allow-untrusted target/dist/airgap-upstream-*.apk
+sudo apk add --allow-untrusted target/dist/airgap-downstream-*.apk
+sudo apk add --allow-untrusted target/dist/airgap-dedup-*.apk
+```
 
 ## Run the upstream and downstream applications as Linux services (systemd)
 
@@ -459,7 +682,8 @@ Environment="AIRGAP_UPSTREAM_VERBOSE=true"
 #Environment="AIRGAP_UPSTREAM_CERT_FILE="
 #Environment="AIRGAP_UPSTREAM_KEY_FILE="
 #Environment="AIRGAP_UPSTREAM_CA_FILE="
-#Environment="AIRGAP_UPSTREAM_DELIVER_FILTER="  
+#Environment="AIRGAP_UPSTREAM_DELIVER_FILTER="
+#Environment="AIRGAP_UPSTREAM_DELIVER_FILTER="
 
 # Set min and max memory (in bytes, e.g., 256M min, 1G max)
 MemoryMin=256M
@@ -542,7 +766,8 @@ See LICENSE file
 
 ### 0.1.4-SNAPSHOT
 
-- Changed the logging for the go applications to include log levels. Monitoring and log updates. 
+- Changed the logging for the go applications to include log levels. Monitoring and log updates.
+- Changed the logging for the go applications to include log levels. Monitoring and log updates.
 - Documented redundancy and load balancing (see doc folder)
 - Documented resend (future updates will implement the new resend algorithm)
 
@@ -560,7 +785,8 @@ See LICENSE file
 - UDP sending have been made more robust
 - Transfer of binary data from upstream to downstream is now supported
 - Sending a sighup to upstream or downstream will now force a re-write of the log file, so you can rotate the log file and then sighup the application to make it log to a new file with the name specified in the upstream or downstream configuration.
-- air-gap now supports TLS and mTLS to Kafka upstream and downstream. 
+- air-gap now supports TLS and mTLS to Kafka upstream and downstream.
+- air-gap now supports TLS and mTLS to Kafka upstream and downstream.
 
 ### 0.1.1-SNAPSHOT
 

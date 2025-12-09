@@ -1,0 +1,43 @@
+[Unit]
+Description=Air Gap Upstream Service - Kafka to UDP Sender
+Documentation=https://github.com/anders-wartoft/air-gap
+Documentation=file:///usr/share/doc/airgap-upstream/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=airgap
+Group=airgap
+
+# Working directory for relative paths in config
+WorkingDirectory=/etc/airgap
+
+# Main execution
+ExecStart=/usr/local/bin/airgap-upstream /etc/airgap/upstream.properties
+
+# Environment file (optional overrides)
+EnvironmentFile=-/etc/default/airgap-upstream
+
+# Restart behavior
+Restart=on-failure
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=1G
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=airgap-upstream
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/airgap/upstream /var/log/airgap
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,71 @@
+name: ${PACKAGE_NAME}
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: ${RELEASE}
+section: utils
+priority: optional
+maintainer: "Air Gap"
+description: |
+  Air Gap deduplication service - Kafka Streams application for event deduplication
+  and gap detection. Processes downstream Kafka topics to ensure exactly-once delivery.
+  Built from commit ${GITHUB_SHA}.
+homepage: "https://github.com/anders-wartoft/air-gap"
+license: "LGPL-2.1-only"
+
+contents:
+  # Java application
+  - src: java-streams/target/air-gap-deduplication-fat-*.jar
+    dst: /opt/airgap/dedup/
+    file_info:
+      mode: 0644
+
+  # Systemd template service
+  - src: packaging/systemd/airgap-dedup@.service
+    dst: /lib/systemd/system/airgap-dedup@.service
+    file_info:
+      mode: 0644
+
+  # Configuration templates
+  - src: config/dedup-template.env
+    dst: /etc/airgap/dedup-template.env
+    type: config
+    file_info:
+      mode: 0644
+
+  - src: config/log4j2.xml
+    dst: /etc/airgap/log4j2.xml
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  # Documentation
+  - src: README.md
+    dst: /usr/share/doc/airgap-dedup/README.md
+    file_info:
+      mode: 0644
+
+scripts:
+  preinstall: packaging/scripts/airgap-dedup-preinstall.sh
+  postinstall: packaging/scripts/airgap-dedup-postinstall.sh
+  postremove: packaging/scripts/airgap-dedup-postremove.sh
+
+overrides:
+  rpm:
+    depends:
+      - glibc
+      - shadow-utils
+      - systemd
+      - java-11-openjdk-headless
+  deb:
+    depends:
+      - libc6
+      - adduser
+      - systemd
+      - openjdk-11-jre-headless
+  apk:
+    depends:
+      - libc6-compat
+      - shadow
+      - openrc
+      - openjdk11-jre-headless

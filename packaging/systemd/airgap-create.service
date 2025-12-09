@@ -1,0 +1,39 @@
+[Unit]
+Description=Air Gap Create Service - Resend Bundle Generator
+Documentation=https://github.com/anders-wartoft/air-gap
+Documentation=file:///usr/share/doc/airgap-downstream/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=airgap
+Group=airgap
+
+# Working directory for relative paths in config
+WorkingDirectory=/etc/airgap
+
+# Main execution
+ExecStart=/usr/local/bin/airgap-create /etc/airgap/create.properties
+
+# Environment file (optional overrides)
+EnvironmentFile=-/etc/default/airgap-create
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=1G
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=airgap-create
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/airgap/downstream /var/log/airgap
+
+[Install]
+WantedBy=multi-user.target
