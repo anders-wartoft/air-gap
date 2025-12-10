@@ -35,6 +35,8 @@ func (k *KafkaAdapter) SetTLS(certFile, keyFile, caFile, keyPasswordFile string)
 }
 
 func (k *KafkaAdapter) GetLastOffset(servers, topic string, partition int) (int64, error) {
+	kafka.ConfigureSaramaLogger()
+
 	config := sarama.NewConfig()
 	bootstrapServers := strings.Split(servers, ",")
 	client, err := sarama.NewClient(bootstrapServers, config)

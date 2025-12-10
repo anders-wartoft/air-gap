@@ -12,6 +12,8 @@ import (
 
 // ReadFromOffset starts a partition consumer at startOffset (inclusive) and forwards messages to callback until ctx is done.
 func ReadFromOffset(ctx context.Context, partition int, startOffset int64, brokers, topic, group, timestamp string, callback func(string, []byte, time.Time, []byte) bool) error {
+	ConfigureSaramaLogger()
+
 	version, err := sarama.ParseKafkaVersion(sarama.DefaultVersion.String())
 	if err != nil {
 		return fmt.Errorf("parse kafka version: %w", err)
@@ -70,6 +72,8 @@ func ReadFromOffset(ctx context.Context, partition int, startOffset int64, broke
 // ReadSingleOffset consumes a partition starting at offset-5 (safety) and stops once the requested offset is returned.
 // It times out after 15 seconds to avoid blocking forever.
 func ReadSingleOffset(ctx context.Context, partition int, offset int64, brokers, topic, group, timestamp string, callback func(string, []byte, time.Time, []byte) bool) error {
+	ConfigureSaramaLogger()
+
 	// Start a bit earlier in case message removed or to be sure we catch it; however ensure not negative
 	start := offset - 5
 	if start < 0 {

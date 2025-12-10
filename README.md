@@ -46,7 +46,7 @@ go run src/cmd/upstream/main.go config/upstream.properties
 - More help for setting up encryption to Kafka can be found here: [Kafka-encryption.md](doc/Kafka-encryption.md)
 - See [Monitoring.md](doc/Monitoring.md) on how to monitor the applications for resource usage etc.
 - To set up reduncancy and/or load balancing, see [Redundancy and Load Balancing.md](doc/Redundancy%20and%20Load%20Balancing.md)
-- Finally, there is a [Resend.md](doc/Resend.md) guide that .
+- Finally, there is a [Resend.md](doc/Resend.md) guide that covers how to resend missing information.
 
 ## Notation
 
@@ -173,7 +173,7 @@ if all of the filenames are covered by the same file glob
 
 The provided solution encrypts data in transit over the UDP connection. If needed, add TLS and authentication to all the Kafka connections. If the event generation is also secured with Kafka TLS, then no part of the event chain needs to be in clear text.
 
-For information about Kafka and TLS, see e.g., https://dev.to/davidsbond/golang-implementing-kafka-consumers-using-sarama-cluster-4fko
+For information about Kafka and TLS, see e.g., <https://dev.to/davidsbond/golang-implementing-kafka-consumers-using-sarama-cluster-4fko>
 
 ## Configuration
 
@@ -359,17 +359,7 @@ Some problems that may arise are:
 
 The applications responds to os signals and can be installed as a service in, e.g., Linux.
 The applications responds to os signals and can be installed as a service in, e.g., Linux.
-See https://fabianlee.org/2022/10/29/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-22-04/
-
-## Compile
-
-There is a Makefile that will get the latest tag from git and save in version.go, then build upstream and downstream.
-
-## Build System
-
-The project uses a modular Makefile-based build system that supports building Go binaries, Java applications, and system packages (RPM, DEB, APK).
-
-### Quick Build Commands
+See <https://fabianlee.org/2022/10/29/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-22-04/>
 
 ## Compile
 
@@ -444,6 +434,7 @@ All binaries are built to `target/linux-amd64/` by default, and packages are cre
 
 To build manually without Make:
 
+```bash
 make            # builds both upstream and downstream as well as building the deduplication Java project
 make upstream   # builds only upstream
 make downstream # builds only downstream
@@ -455,6 +446,7 @@ To build manually, change directory to the application you would like to build (
 Compile the applications with `go build {filename}`.
 
 Example:
+
 ```bash
 # Go applications
 # Go applications
@@ -479,6 +471,7 @@ The project includes production-ready system packages for major Linux distributi
 ### Package Contents
 
 Each package includes:
+
 - Compiled binaries installed to `/usr/local/bin/`
 - Systemd service files for easy daemon management
 - User/group creation (`airgap` user)
@@ -512,6 +505,7 @@ docker-compose down
 After building packages with `make package-all`, install them on your target system:
 
 **RPM-based systems:**
+
 ```bash
 sudo dnf install target/dist/airgap-upstream-*.rpm
 sudo dnf install target/dist/airgap-downstream-*.rpm
@@ -519,6 +513,7 @@ sudo dnf install target/dist/airgap-dedup-*.rpm
 ```
 
 **DEB-based systems:**
+
 ```bash
 sudo apt install ./target/dist/airgap-upstream_*_amd64.deb
 sudo apt install ./target/dist/airgap-downstream_*_amd64.deb
@@ -526,30 +521,35 @@ sudo apt install ./target/dist/airgap-dedup_*_amd64.deb
 ```
 
 **Alpine:**
+
 ```bash
 sudo apk add --allow-untrusted target/dist/airgap-upstream-*.apk
 sudo apk add --allow-untrusted target/dist/airgap-downstream-*.apk
 sudo apk add --allow-untrusted target/dist/airgap-dedup-*.apk
 ```
 
-# Java application
+## Java Application
+
+```bash
 cd java-streams
 mvn clean package
 ```
 
-## Packaging
+## Java Application Packaging
 
 The project includes production-ready system packages for major Linux distributions using [nfpm](https://nfpm.goreleaser.com/):
 
-### Package Formats
+### Java Application Package Formats
 
 - **RPM** - For RHEL, CentOS, Fedora, Rocky Linux, AlmaLinux
 - **DEB** - For Debian, Ubuntu
 - **APK** - For Alpine Linux
 
-### Package Contents
+### Java Application Package Contents
 
 Each package includes:
+
+```bash
 - Compiled binaries installed to `/usr/local/bin/`
 - Systemd service files for easy daemon management
 - User/group creation (`airgap` user)
@@ -578,11 +578,12 @@ docker-compose exec alpine sh /scripts/test-apk.sh
 docker-compose down
 ```
 
-### Installation
+### Java Application  Installation
 
 After building packages with `make package-all`, install them on your target system:
 
 **RPM-based systems:**
+
 ```bash
 sudo dnf install target/dist/airgap-upstream-*.rpm
 sudo dnf install target/dist/airgap-downstream-*.rpm
@@ -590,6 +591,7 @@ sudo dnf install target/dist/airgap-dedup-*.rpm
 ```
 
 **DEB-based systems:**
+
 ```bash
 sudo apt install ./target/dist/airgap-upstream_*_amd64.deb
 sudo apt install ./target/dist/airgap-downstream_*_amd64.deb
@@ -597,6 +599,7 @@ sudo apt install ./target/dist/airgap-dedup_*_amd64.deb
 ```
 
 **Alpine:**
+
 ```bash
 sudo apk add --allow-untrusted target/dist/airgap-upstream-*.apk
 sudo apk add --allow-untrusted target/dist/airgap-downstream-*.apk

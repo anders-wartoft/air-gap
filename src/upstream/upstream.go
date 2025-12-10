@@ -68,6 +68,7 @@ var sentEvents int64
 var totalReceived int64
 var totalSent int64
 var timeStart int64
+var lastUdpErrorLog time.Time
 
 var Logger = logging.Logger
 var BuildNumber = "dev"
@@ -153,7 +154,7 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 		fmt.Appendf(nil, "%s Upstream %s starting up...", protocol.GetTimestamp(), config.id), config.payloadSize)
 	udpErr := udpClient.SendMessage(messages[0])
 	if udpErr != nil {
-		Logger.Errorf("Failed sending startup message: %v", udpErr)
+		Logger.Errorf("Failed sending startup message (will continue): %v", udpErr)
 	}
 
 	// Encryption
@@ -262,7 +263,14 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 			atomic.AddInt64(&sentEvents, int64(len(messages)))
 			atomic.AddInt64(&totalSent, int64(len(messages)))
 		} else {
-			Logger.Errorf("UDP send error: %v", udpErr)
+			// Rate limit UDP error logging to once per minute to avoid log spam
+			// when downstream is not available, but continue sending
+			now := time.Now()
+			if now.Sub(lastUdpErrorLog) >= time.Minute {
+				Logger.Errorf("UDP send error (will retry, logging once per minute): %v", udpErr)
+				lastUdpErrorLog = now
+			}
+			// Note: We don't stop sending, UDP will continue attempting delivery
 		}
 
 		// Key rotation

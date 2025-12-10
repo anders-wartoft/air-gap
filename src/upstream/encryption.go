@@ -107,7 +107,7 @@ func sendNewKey(conn *udp.UDPConn) {
 	if conn != nil {
 		udpErr := conn.SendMessages(messages)
 		if udpErr != nil {
-			Logger.Fatalf("Error sending encryption key: %v", udpErr)
+			Logger.Errorf("Error sending encryption key (will continue): %v", udpErr)
 		}
 	}
 	// Now, we should be using the new key too

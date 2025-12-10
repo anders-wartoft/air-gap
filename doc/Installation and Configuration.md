@@ -224,3 +224,96 @@ rm -rf ~/air-gap
 ```
 
 **Note:** Adjust paths as needed for your installation. If you installed to custom locations, remove those as well.
+
+## Statistics
+
+The air-gap system provides detailed statistics logging to help you monitor throughput, performance, and system health. Statistics are emitted as JSON-formatted log messages with the prefix `STATISTICS:` or `MISSING-REPORT:`.
+
+### Enabling Statistics
+
+To enable statistics logging, configure the `logStatistics` parameter in your upstream or downstream configuration file:
+
+```bash
+logStatistics=60
+```
+
+This configures the application to log statistics every 60 seconds. Set to `0` to disable statistics logging.
+
+You can also override this setting using an environment variable:
+
+```bash
+export UPSTREAM_LOG_STATISTICS=60
+```
+
+### Statistics Fields
+
+#### Upstream and Downstream Statistics
+
+Both upstream and downstream applications emit the following fields in their `STATISTICS:` log entries:
+
+- **`id`**: The identifier of the application instance (from config)
+- **`time`**: Current Unix timestamp (seconds since epoch) when the statistics were logged
+- **`time_start`**: Unix timestamp when the application started (used to calculate uptime)
+- **`interval`**: The configured statistics logging interval in seconds
+- **`received`**: Number of events received during the last interval
+- **`sent`**: Number of events sent during the last interval
+- **`eps`**: Events per second during the last interval (calculated as `received / interval`)
+- **`total_received`**: Total number of events received since application start
+- **`total_sent`**: Total number of events sent since application start
+
+**Example upstream statistics log:**
+
+```json
+STATISTICS: {"id":"Upstream_1","time":1732723200,"time_start":1732720000,"interval":60,"received":3600,"sent":3600,"eps":60,"total_received":72000,"total_sent":72000}
+```
+
+**Example downstream statistics log:**
+
+```json
+STATISTICS: {"id":"Downstream_1","time":1732723200,"time_start":1732720000,"interval":60,"received":3590,"sent":3590,"eps":59,"total_received":71800,"total_sent":71800}
+```
+
+#### Deduplication Statistics
+
+The Java deduplication application emits `MISSING-REPORT:` log entries for each partition, containing:
+
+- **`partition`**: The Kafka partition number
+- **`total_missing`**: Total number of gaps/missing events detected
+- **`delta_missing`**: Number of new gaps detected during the last interval
+- **`total_received`**: Total number of events received on this partition
+- **`delta_received`**: Number of events received during the last interval
+- **`total_emitted`**: Total number of deduplicated events emitted
+- **`delta_emitted`**: Number of events emitted during the last interval
+- **`eps`**: Events per second received during the last interval
+
+**Example deduplication statistics log:**
+
+```json
+[MISSING-REPORT] [{"partition":0,"total_missing":15,"delta_missing":2,"total_received":72000,"delta_received":3600,"total_emitted":71985,"delta_emitted":3598,"eps":60}]
+```
+
+### Using Statistics for Monitoring
+
+Statistics can be used to:
+
+1. **Monitor throughput**: Track `eps` to ensure the system is processing events at the expected rate
+2. **Detect packet loss**: Compare `total_sent` (upstream) with `total_received` (downstream)
+3. **Identify gaps**: Monitor `total_missing` and `delta_missing` in deduplication logs
+4. **Calculate uptime**: Use `time - time_start` to determine how long the application has been running
+5. **Verify deduplication**: Compare `total_received` vs `total_emitted` to see how many duplicates were filtered
+
+### Parsing Statistics Logs
+
+You can extract and analyze statistics using standard log processing tools. For example, to extract statistics from logs:
+
+```bash
+grep "STATISTICS:" /var/log/airgap/upstream.log | jq .
+```
+
+Or to monitor gaps in real-time:
+
+```bash
+tail -f /var/log/airgap/dedup.log | grep "MISSING-REPORT" | jq '.[0].total_missing'
+```
+
+For more comprehensive monitoring solutions using Metricbeat and Jolokia, see `doc/Monitoring.md`.

@@ -208,6 +208,9 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 
 func connectToKafka(config TransferConfiguration) {
 	Logger.Printf("Connecting to %s\n", config.bootstrapServers)
+
+	kafka.ConfigureSaramaLogger()
+
 	// Check if we have TLS to Kafka
 	conf := sarama.NewConfig()
 	// Tell Sarama to use manual partitioning - we provide the partition in the ProducerMessage

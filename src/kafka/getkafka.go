@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -40,6 +41,13 @@ type TLSConfiguration struct {
 	KeyFile         string
 	CAFile          string
 	KeyPasswordFile string
+}
+
+// ConfigureSaramaLogger sets up the Sarama library logger with a [SARAMA] prefix
+// This should be called once at the start of any function that uses Sarama
+func ConfigureSaramaLogger() {
+	saramaLogger := log.New(logging.StdLogger.Writer(), "[SARAMA] ", log.LstdFlags)
+	sarama.Logger = saramaLogger
 }
 
 func SetVerbose(enabled bool) {
@@ -141,18 +149,18 @@ func deriveKey(password, salt []byte, keyLen int) []byte {
 }
 
 // decryptPKCS8 attempts to decrypt a PKCS#8 encrypted private key
-func decryptPKCS8(encryptedPEM []byte, password []byte) ([]byte, error) {
-	// Try to parse as PKCS#8 encrypted key
-	_, err := x509.ParsePKCS8PrivateKey(encryptedPEM)
-	if err == nil {
-		// It's already decrypted or wasn't encrypted
-		return encryptedPEM, nil
-	}
+// func decryptPKCS8(encryptedPEM []byte, _password []byte) ([]byte, error) {
+// 	// Try to parse as PKCS#8 encrypted key
+// 	_, err := x509.ParsePKCS8PrivateKey(encryptedPEM)
+// 	if err == nil {
+// 		// It's already decrypted or wasn't encrypted
+// 		return encryptedPEM, nil
+// 	}
 
-	// Try with password - this is a simplified approach
-	// For full PKCS#8 support, we'd need external library
-	return nil, fmt.Errorf("PKCS#8 decryption not fully supported in this implementation")
-}
+// 	// Try with password - this is a simplified approach
+// 	// For full PKCS#8 support, we'd need external library
+// 	return nil, fmt.Errorf("PKCS#8 decryption not fully supported in this implementation")
+// }
 
 // Creates a new TLS configuration for the Kafka client
 func createTLSConfig() (*tls.Config, error) {
@@ -212,13 +220,13 @@ func createTLSConfig() (*tls.Config, error) {
 		}
 
 		// If legacy PEM failed or wasn't detected, try PKCS#8
-		if decryptedDER == nil && block.Type == "ENCRYPTED PRIVATE KEY" {
-			Logger.Print("Detected PKCS#8 encrypted format, attempting decryption...")
-			decryptedDER, err = decryptPKCS8(keyPEM, passphraseBytes)
-			if err == nil {
-				decryptionMethod = "PKCS#8"
-			}
-		}
+		// if decryptedDER == nil && block.Type == "ENCRYPTED PRIVATE KEY" {
+		// 	Logger.Print("Detected PKCS#8 encrypted format, attempting decryption...")
+		// 	decryptedDER, err = decryptPKCS8(keyPEM, passphraseBytes)
+		// 	if err == nil {
+		// 		decryptionMethod = "PKCS#8"
+		// 	}
+		// }
 
 		// If both methods failed, panic
 		if decryptedDER == nil {
@@ -272,7 +280,7 @@ func createTLSConfig() (*tls.Config, error) {
 func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds int, brokers string, topics string, group string, timestamp string, callbackFunction func(string, []byte, time.Time, []byte) bool) {
 	Logger.Print("Starting a new Sarama consumer (WithContext): " + name + " with offset: " + fmt.Sprintf("%d", offsetSeconds))
 
-	sarama.Logger = logging.StdLogger
+	ConfigureSaramaLogger()
 
 	version, err := sarama.ParseKafkaVersion(version)
 	if err != nil {
@@ -461,6 +469,8 @@ func ReadToEndPartition(partition int, ctx context.Context, brokers string, topi
 	callbackFunction func(string, []byte, time.Time, []byte) bool) error {
 
 	Logger.Printf("Starting ReadToEnd for topic %s and partition %d", topic, partition)
+
+	ConfigureSaramaLogger()
 
 	version, err := sarama.ParseKafkaVersion(sarama.DefaultVersion.String())
 	if err != nil {
