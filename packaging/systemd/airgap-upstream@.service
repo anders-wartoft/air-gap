@@ -1,7 +1,7 @@
 [Unit]
-Description=Air Gap Downstream Service - UDP to Kafka Receiver
+Description=Air Gap Upstream Service - Kafka to UDP Sender
 Documentation=https://github.com/anders-wartoft/air-gap
-Documentation=file:///usr/share/doc/airgap-downstream/README.md
+Documentation=file:///usr/share/doc/airgap-upstream/README.md
 After=network-online.target
 Wants=network-online.target
 
@@ -14,10 +14,10 @@ Group=airgap
 WorkingDirectory=/etc/airgap
 
 # Main execution
-ExecStart=/usr/local/bin/airgap-downstream /etc/airgap/downstream.properties
+ExecStart=/usr/local/bin/airgap-upstream /etc/airgap/upstream-%i.properties
 
 # Environment file (optional overrides)
-EnvironmentFile=-/etc/default/airgap-downstream
+EnvironmentFile=-/etc/default/airgap-upstream
 
 # Restart behavior
 Restart=on-failure
@@ -30,14 +30,14 @@ MemoryMax=1G
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=airgap-downstream
+SyslogIdentifier=airgap-upstream
 
 # Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/airgap/downstream /var/log/airgap
+ReadWritePaths=/var/lib/airgap/upstream /var/log/airgap
 
 [Install]
 WantedBy=multi-user.target

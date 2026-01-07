@@ -33,8 +33,8 @@ package-dedup: package-dedup-rpm package-dedup-deb package-dedup-apk
 
 # Define build dependencies for each component
 build-deps-upstream: upstream resend
-build-deps-downstream: downstream create
-build-deps-dedup: build-java
+build-deps-downstream: downstream
+build-deps-dedup: build-java create
 
 # Pattern rule: package-<component>-<format>
 package-%-rpm package-%-deb package-%-apk: build-deps-% nfpm | $(DIST_DIR)

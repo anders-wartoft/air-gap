@@ -1,5 +1,5 @@
 name: ${PACKAGE_NAME}
-arch: amd64
+arch: ${GOARCH}
 platform: linux
 version: ${VERSION}
 release: ${RELEASE}
@@ -8,7 +8,7 @@ priority: optional
 maintainer: "Air Gap"
 description: |
   Air Gap downstream components - UDP receiver with decryption and Kafka writer.
-  Includes downstream (main receiver) and create (resend bundle generator) binaries.
+  Includes downstream (main receiver) binaries.
   Built from commit ${GITHUB_SHA}.
 homepage: "https://github.com/anders-wartoft/air-gap"
 license: "LGPL-2.1-only"
@@ -20,19 +20,9 @@ contents:
     file_info:
       mode: 0755
 
-  - src: target/linux-amd64/create
-    dst: /usr/local/bin/airgap-create
-    file_info:
-      mode: 0755
-
   # Systemd services
-  - src: packaging/systemd/airgap-downstream.service
-    dst: /lib/systemd/system/airgap-downstream.service
-    file_info:
-      mode: 0644
-
-  - src: packaging/systemd/airgap-create.service
-    dst: /lib/systemd/system/airgap-create.service
+  - src: packaging/systemd/airgap-downstream@.service
+    dst: /lib/systemd/system/airgap-downstream@.service
     file_info:
       mode: 0644
 
@@ -43,11 +33,6 @@ contents:
     file_info:
       mode: 0644
 
-  - src: config/create.properties
-    dst: /etc/airgap/create.properties.example
-    type: config
-    file_info:
-      mode: 0644
 
   - src: config/gap_detector.properties
     dst: /etc/airgap/gap_detector.properties.example

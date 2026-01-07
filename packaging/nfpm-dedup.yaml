@@ -1,5 +1,5 @@
 name: ${PACKAGE_NAME}
-arch: amd64
+arch: noarch
 platform: linux
 version: ${VERSION}
 release: ${RELEASE}
@@ -14,15 +14,24 @@ homepage: "https://github.com/anders-wartoft/air-gap"
 license: "LGPL-2.1-only"
 
 contents:
-  # Java application
-  - src: java-streams/target/air-gap-deduplication-fat-*.jar
-    dst: /opt/airgap/dedup/
+  - src: java-streams/target/air-gap-deduplication-fat.jar
+    dst: /opt/airgap/dedup/air-gap-deduplication-fat.jar
     file_info:
       mode: 0644
+
+  - src: target/linux-amd64/create
+    dst: /usr/local/bin/airgap-create
+    file_info:
+      mode: 0755
 
   # Systemd template service
   - src: packaging/systemd/airgap-dedup@.service
     dst: /lib/systemd/system/airgap-dedup@.service
+    file_info:
+      mode: 0644
+
+  - src: packaging/systemd/airgap-create.service
+    dst: /lib/systemd/system/airgap-create.service
     file_info:
       mode: 0644
 
@@ -36,6 +45,12 @@ contents:
   - src: config/log4j2.xml
     dst: /etc/airgap/log4j2.xml
     type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - src: config/create.properties
+    dst: /etc/airgap/create.properties.example
+    type: config
     file_info:
       mode: 0644
 

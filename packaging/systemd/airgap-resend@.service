@@ -14,7 +14,7 @@ Group=airgap
 WorkingDirectory=/etc/airgap
 
 # Main execution
-ExecStart=/usr/local/bin/airgap-resend /etc/airgap/resend.properties
+ExecStart=/usr/local/bin/airgap-resend /etc/airgap/resend-%i.properties
 
 # Environment file (optional overrides)
 EnvironmentFile=-/etc/default/airgap-resend

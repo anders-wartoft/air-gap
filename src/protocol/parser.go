@@ -117,7 +117,7 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 
 	// verify the checksum
 	calculatedChecksum := CalculateChecksum(payload)
-	if calculatedChecksum != checksum && false {
+	if calculatedChecksum != checksum {
 		// The message was not transmitted properly.
 		// drop
 		return TYPE_ERROR, "", nil, errors.New("invalid checksum")
