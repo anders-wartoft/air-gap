@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,6 +73,10 @@ func readNewKey(message []byte) string {
 	// our public key
 	// The message can look like this:
 	// KEY_UPDATE#(here comes binary data)
+	Logger.Debug("Message length is " + strconv.Itoa(len(message)))
+	if len(message) < 11 {
+		return fmt.Sprintf("Message length for the new key is %d, but it must be more than 11", len(message))
+	}
 	payload := message[11:]
 
 	// Just to be sure, we read the private keys again

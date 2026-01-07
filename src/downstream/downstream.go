@@ -27,6 +27,7 @@ var totalSent int64
 var timeStart int64
 var config TransferConfiguration
 var BuildNumber string
+var kafkaWriter KafkaWriter
 
 func SetConfig(conf TransferConfiguration) {
 	config = conf
@@ -43,7 +44,7 @@ func translateTopic(input string) string {
 }
 
 // RunDownstream runs the downstream process
-func RunDownstream(kafkaWriter KafkaWriter, udpReceiver UDPReceiver, stopChan <-chan struct{}) {
+func RunDownstream(udpReceiver UDPReceiver, stopChan <-chan struct{}) {
 	timeStart = time.Now().Unix()
 
 	if config.mtu == 0 {
@@ -61,73 +62,6 @@ func RunDownstream(kafkaWriter KafkaWriter, udpReceiver UDPReceiver, stopChan <-
 	Logger.Infof("Downstream version: %s", BuildNumber)
 	sendMessage(protocol.TYPE_STATUS, "", config.topic,
 		fmt.Appendf(nil, "Downstream starting UDP server on port %d", config.targetPort))
-
-	handleUdpMessage := func(msg []byte) {
-		messageType, messageID, payload, err := protocol.ParseMessage(msg, cache)
-		if err != nil {
-			Logger.Errorf("Failed to parse UDP message: %v", err)
-			return
-		}
-
-		topic, partitionStr, _, err := protocol.ParseMessageId(messageID)
-		if err != nil {
-			topic = config.topic
-			partitionStr = "0"
-		}
-		topic = translateTopic(topic)
-		partition, _ := strconv.Atoi(partitionStr)
-
-		switch {
-		case protocol.IsMessageType(messageType, protocol.TYPE_CLEARTEXT):
-			if protocol.IsMessageType(messageType, protocol.TYPE_COMPRESSED_GZIP) {
-				payload, err = protocol.DecompressGzip(payload)
-				if err != nil {
-					Logger.Errorf("Decompress error: %v", err)
-					sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
-					return
-				}
-			}
-			kafkaWriter.Write(messageID, topic, int32(partition), payload)
-			atomic.AddInt64(&receivedEvents, 1)
-			atomic.AddInt64(&sentEvents, 1)
-			atomic.AddInt64(&totalReceived, 1)
-			atomic.AddInt64(&totalSent, 1)
-
-		case protocol.IsMessageType(messageType, protocol.TYPE_MESSAGE):
-			decrypted, err := protocol.Decrypt(payload, config.key)
-			if err != nil {
-				Logger.Errorf("Decrypt error: %v", err)
-				sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
-				return
-			}
-			if protocol.IsMessageType(messageType, protocol.TYPE_COMPRESSED_GZIP) {
-				decrypted, err = protocol.DecompressGzip(decrypted)
-				if err != nil {
-					Logger.Errorf("Decompress after decrypt error: %v", err)
-					sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
-					return
-				}
-			}
-			kafkaWriter.Write(messageID, topic, int32(partition), decrypted)
-			atomic.AddInt64(&receivedEvents, 1)
-			atomic.AddInt64(&sentEvents, 1)
-			atomic.AddInt64(&totalReceived, 1)
-			atomic.AddInt64(&totalSent, 1)
-
-		case protocol.IsMessageType(messageType, protocol.TYPE_KEY_EXCHANGE):
-			keyFile := readNewKey(payload)
-			sendMessage(protocol.TYPE_STATUS, "", config.topic, []byte("Updating symmetric key with: "+keyFile))
-
-		case protocol.IsMessageType(messageType, protocol.TYPE_ERROR):
-			sendMessage(protocol.TYPE_ERROR, messageID, config.topic, payload)
-
-		case protocol.IsMessageType(messageType, protocol.TYPE_MULTIPART):
-			return
-
-		default:
-			sendMessage(protocol.TYPE_MESSAGE, "", config.topic, payload)
-		}
-	}
 
 	// Setup UDP receiver
 	udpReceiver.Setup(
@@ -151,7 +85,72 @@ func RunDownstream(kafkaWriter KafkaWriter, udpReceiver UDPReceiver, stopChan <-
 	// Give a small timeout to flush remaining messages
 	time.Sleep(2 * time.Second)
 }
+func handleUdpMessage(msg []byte) {
+	messageType, messageID, payload, err := protocol.ParseMessage(msg, cache)
+	if err != nil {
+		Logger.Errorf("Failed to parse UDP message: %v", err)
+		return
+	}
 
+	topic, partitionStr, _, err := protocol.ParseMessageId(messageID)
+	if err != nil {
+		topic = config.topic
+		partitionStr = "0"
+	}
+	topic = translateTopic(topic)
+	partition, _ := strconv.Atoi(partitionStr)
+
+	switch {
+	case protocol.IsMessageType(messageType, protocol.TYPE_CLEARTEXT):
+		if protocol.IsMessageType(messageType, protocol.TYPE_COMPRESSED_GZIP) {
+			payload, err = protocol.DecompressGzip(payload)
+			if err != nil {
+				Logger.Errorf("Decompress error: %v", err)
+				sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
+				return
+			}
+		}
+		kafkaWriter.Write(messageID, topic, int32(partition), payload)
+		atomic.AddInt64(&receivedEvents, 1)
+		atomic.AddInt64(&sentEvents, 1)
+		atomic.AddInt64(&totalReceived, 1)
+		atomic.AddInt64(&totalSent, 1)
+
+	case protocol.IsMessageType(messageType, protocol.TYPE_MESSAGE):
+		decrypted, err := protocol.Decrypt(payload, config.key)
+		if err != nil {
+			Logger.Errorf("Decrypt error: %v", err)
+			sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
+			return
+		}
+		if protocol.IsMessageType(messageType, protocol.TYPE_COMPRESSED_GZIP) {
+			decrypted, err = protocol.DecompressGzip(decrypted)
+			if err != nil {
+				Logger.Errorf("Decompress after decrypt error: %v", err)
+				sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
+				return
+			}
+		}
+		kafkaWriter.Write(messageID, topic, int32(partition), decrypted)
+		atomic.AddInt64(&receivedEvents, 1)
+		atomic.AddInt64(&sentEvents, 1)
+		atomic.AddInt64(&totalReceived, 1)
+		atomic.AddInt64(&totalSent, 1)
+
+	case protocol.IsMessageType(messageType, protocol.TYPE_KEY_EXCHANGE):
+		keyFile := readNewKey(payload)
+		sendMessage(protocol.TYPE_STATUS, "", config.topic, []byte("Updating symmetric key with: "+keyFile))
+
+	case protocol.IsMessageType(messageType, protocol.TYPE_ERROR):
+		sendMessage(protocol.TYPE_ERROR, messageID, config.topic, payload)
+
+	case protocol.IsMessageType(messageType, protocol.TYPE_MULTIPART):
+		return
+
+	default:
+		sendMessage(protocol.TYPE_MESSAGE, "", config.topic, payload)
+	}
+}
 // logStatistics logs periodic stats about received/sent messages
 func logStatistics(stopChan <-chan struct{}) {
 	interval := time.Duration(config.logStatistics) * time.Second
@@ -229,7 +228,6 @@ func Main(build string) {
 	udpReceiver := NewUDPAdapter(config)
 	defer udpReceiver.Close()
 
-	var kafkaWriter KafkaWriter
 	switch config.target {
 	case "cmd":
 		Logger.Print("Using command line Kafka adapter")
@@ -257,7 +255,7 @@ func Main(build string) {
 	done := make(chan struct{})
 
 	go func() {
-		RunDownstream(kafkaWriter, udpReceiver, stopChan)
+		RunDownstream(udpReceiver, stopChan)
 		close(done)
 	}()
 

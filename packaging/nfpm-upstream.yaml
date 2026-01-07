@@ -1,5 +1,5 @@
 name: ${PACKAGE_NAME}
-arch: amd64
+arch: ${GOARCH}
 platform: linux
 version: ${VERSION}
 release: ${RELEASE}
@@ -26,13 +26,13 @@ contents:
       mode: 0755
 
   # Systemd services
-  - src: packaging/systemd/airgap-upstream.service
-    dst: /lib/systemd/system/airgap-upstream.service
+  - src: packaging/systemd/airgap-upstream@.service
+    dst: /lib/systemd/system/airgap-upstream@.service
     file_info:
       mode: 0644
 
-  - src: packaging/systemd/airgap-resend.service
-    dst: /lib/systemd/system/airgap-resend.service
+  - src: packaging/systemd/airgap-resend@.service
+    dst: /lib/systemd/system/airgap-resend@.service
     file_info:
       mode: 0644
 
