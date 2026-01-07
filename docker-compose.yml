@@ -1,0 +1,72 @@
+services:
+  kafka:
+    networks:
+      - airgap
+    environment:
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+
+    image: confluentinc/confluent-local
+
+  upstream:
+    networks:
+      - airgap
+    depends_on: 
+      - downstream
+    image: rockylinux:9.3
+    volumes:
+      - ./target/dist:/dist:ro
+      - ./config:/config:ro
+    entrypoint: 
+      - /bin/bash
+      - -c
+      - | 
+        dnf install -y /dist/airgap-upstream-0.1.7~SNAPSHOT-303.aarch64.rpm && 
+        /usr/local/bin/airgap-upstream /config/upstream-docker.properties
+
+  downstream:
+    networks:
+      - airgap
+    image: rockylinux:9.3
+    depends_on: 
+      - kafka
+    volumes:
+      - ./target/dist:/dist:ro
+      - ./config:/config:ro
+    entrypoint: 
+      - /bin/bash
+      - -c
+      - | 
+        dnf install -y /dist/airgap-downstream-0.1.7~SNAPSHOT-303.aarch64.rpm && 
+        /usr/local/bin/airgap-downstream /config/downstream-docker.properties
+
+  dedup:
+    networks:
+      - airgap
+    image: rockylinux:9.3
+    depends_on: 
+      - kafka
+    volumes:
+      - ./target/dist:/dist:ro
+      - ./config:/config:ro
+    environment:
+      RAW_TOPICS: downstream
+      CLEAN_TOPIC: dedup
+      GAP_TOPIC: gaps
+      BOOTSTRAP_SERVERS: kafka:9092
+    entrypoint: 
+      - /bin/bash
+      - -c
+      - | 
+        dnf install -y /dist/airgap-dedup-0.1.7~SNAPSHOT-303.noarch.rpm &&
+        java -jar /opt/airgap/dedup/air-gap-deduplication-fat.jar
+
+
+networks:
+  airgap:
+    ipam:
+      config:
+        - subnet: 10.11.12.0/24
+

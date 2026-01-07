@@ -3,6 +3,7 @@ tmp/*
 .DS_Store
 src/.DS_Store
 src/upstream/tmp/upstream.log
+src/downstream/testdata/
 target/
 certs/tmp/
 **/*/.$*

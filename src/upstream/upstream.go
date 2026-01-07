@@ -185,7 +185,43 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 
 	// ----- Kafka handler -----
 	Logger.Debug("Setting up Kafka handler")
-	kafkaHandler := func(id string, _ []byte, t time.Time, received []byte) bool {
+	
+
+	// ----- Source: Kafka or Random or a mock object for unit testing -----
+	Logger.Printf("Reading from %s %s", config.source, config.bootstrapServers)
+	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
+		Logger.Print("Using TLS for Kafka")
+		err := kafkaClient.SetTLS(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
+		if err != nil {
+			Logger.Panicf("Failed to configure TLS: %v", err)
+		}
+	}
+
+	for _, thread := range config.sendingThreads {
+		go func(thread map[string]int) {
+			// Use a token bucket per thread for EPS limiting
+			var bucket *TokenBucket
+			if config.eps > 0 {
+				bucket = NewTokenBucket(int(config.eps))
+			}
+			for name, offset := range thread {
+				group := fmt.Sprintf("%s-%s", config.groupID, name)
+				Logger.Printf("Kafka thread: %s offset %d", name, offset)
+				callbackHandler := func(id string, key []byte, t time.Time, received []byte) bool {
+					if bucket != nil {
+						bucket.Take()
+					}
+					return kafkaHandler(timeFrom, udpClient, id, key, t, received)
+				}
+				Logger.Debugf("Starting Kafka read: %s offset %d", name, offset)
+				kafkaClient.Read(ctx, name, offset,
+					config.bootstrapServers, config.topic, group, config.from,
+					callbackHandler)
+			}
+		}(thread)
+	}
+}
+func kafkaHandler (timeFrom time.Time, udpClient UDPClient, id string, _ []byte, t time.Time, received []byte) bool {
 		atomic.AddInt64(&receivedEvents, 1)
 		atomic.AddInt64(&totalReceived, 1)
 
@@ -284,41 +320,6 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 		}
 		return keepRunning
 	}
-
-	// ----- Source: Kafka or Random or a mock object for unit testing -----
-	Logger.Printf("Reading from %s %s", config.source, config.bootstrapServers)
-	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
-		Logger.Print("Using TLS for Kafka")
-		err := kafkaClient.SetTLS(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
-		if err != nil {
-			Logger.Panicf("Failed to configure TLS: %v", err)
-		}
-	}
-
-	for _, thread := range config.sendingThreads {
-		go func(thread map[string]int) {
-			// Use a token bucket per thread for EPS limiting
-			var bucket *TokenBucket
-			if config.eps > 0 {
-				bucket = NewTokenBucket(int(config.eps))
-			}
-			for name, offset := range thread {
-				group := fmt.Sprintf("%s-%s", config.groupID, name)
-				Logger.Printf("Kafka thread: %s offset %d", name, offset)
-				callbackHandler := func(id string, key []byte, t time.Time, received []byte) bool {
-					if bucket != nil {
-						bucket.Take()
-					}
-					return kafkaHandler(id, key, t, received)
-				}
-				Logger.Debugf("Starting Kafka read: %s offset %d", name, offset)
-				kafkaClient.Read(ctx, name, offset,
-					config.bootstrapServers, config.topic, group, config.from,
-					callbackHandler)
-			}
-		}(thread)
-	}
-}
 
 func Main(build string) {
 	BuildNumber = build

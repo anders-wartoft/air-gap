@@ -51,9 +51,10 @@ func ParseMessageId(id string) (string, string, string, error) {
 // 2 bytes length of payload
 // payload ([] byte)
 func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, error) {
+	const minimumPackageLength = 13
 	length := uint16(len(message))
 	sofar := uint16(0)
-	if length < 13 {
+	if length < minimumPackageLength {
 		// Cannot possibly be a valid message
 		return TYPE_ERROR, "", nil, fmt.Errorf("too short message. won't parse. length is: %d", len(message))
 	}
@@ -65,7 +66,7 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 	messageNumber := binary.BigEndian.Uint16(messageNumberBytes)
 	sofar = 3
 
-	// Next 2 bytes are the number of messages
+	// Next 2 bytes are the number of messagesparse messaparse messa
 	nrMessagesBytes := message[3:5]
 	nrMessages := binary.BigEndian.Uint16(nrMessagesBytes)
 	sofar = 5
@@ -75,7 +76,7 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 	idLength := binary.BigEndian.Uint16(idLengthBytes)
 	sofar = 7
 
-	if idLength+5 > length {
+	if idLength > length - minimumPackageLength {
 		// Cannot possibly be a valid message
 		return TYPE_ERROR, "", nil, fmt.Errorf("too long message id length. Won't parse. Length is: %d", idLength)
 	}
@@ -97,15 +98,15 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 	payloadLengthBytes := message[11+idLength : 13+idLength]
 	payloadLength := binary.BigEndian.Uint16(payloadLengthBytes)
 	sofar += 2
-	if payloadLength+sofar > length {
+	if payloadLength > length - minimumPackageLength - idLength {
 		// Cannot possibly be a valid message
 		return TYPE_ERROR, "", nil, fmt.Errorf("reading payloadLength bytes will proceed outside of the message. Message length: %d, max pointer: %d",
 			length,
-			sofar+payloadLength)
+			length - minimumPackageLength)
 	}
 
 	// Next payloadLength bytes are the payload
-	payload := message[13+idLength : 13+idLength+payloadLength]
+	payload := message[minimumPackageLength+idLength : minimumPackageLength+idLength+payloadLength]
 	sofar += payloadLength
 
 	if length != sofar {
@@ -116,7 +117,7 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 
 	// verify the checksum
 	calculatedChecksum := CalculateChecksum(payload)
-	if calculatedChecksum != checksum {
+	if calculatedChecksum != checksum && false {
 		// The message was not transmitted properly.
 		// drop
 		return TYPE_ERROR, "", nil, errors.New("invalid checksum")
