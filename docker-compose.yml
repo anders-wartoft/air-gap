@@ -23,7 +23,7 @@ services:
       - /bin/bash
       - -c
       - | 
-        dnf install -y /dist/airgap-upstream-0.1.7~SNAPSHOT-303.aarch64.rpm && 
+        dnf install -y /dist/airgap-upstream-1.0.0-303.aarch64.rpm && 
         /usr/local/bin/airgap-upstream /config/upstream-docker.properties
 
   downstream:
@@ -39,7 +39,7 @@ services:
       - /bin/bash
       - -c
       - | 
-        dnf install -y /dist/airgap-downstream-0.1.7~SNAPSHOT-303.aarch64.rpm && 
+        dnf install -y /dist/airgap-downstream-1.0.0-303.aarch64.rpm && 
         /usr/local/bin/airgap-downstream /config/downstream-docker.properties
 
   dedup:
@@ -60,7 +60,7 @@ services:
       - /bin/bash
       - -c
       - | 
-        dnf install -y /dist/airgap-dedup-0.1.7~SNAPSHOT-303.noarch.rpm &&
+        dnf install -y /dist/airgap-dedup-1.0.0-303.noarch.rpm &&
         java -jar /opt/airgap/dedup/air-gap-deduplication-fat.jar
 
 
