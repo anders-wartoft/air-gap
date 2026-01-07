@@ -117,11 +117,13 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 
 	// verify the checksum
 	calculatedChecksum := CalculateChecksum(payload)
-	if calculatedChecksum != checksum {
+	if calculatedChecksum != checksum && shouldValidateChecksum() {
 		// The message was not transmitted properly.
 		// drop
+		panic("In if")
 		return TYPE_ERROR, "", nil, errors.New("invalid checksum")
 	}
+	panic("Out of if")
 
 	if nrMessages > 1 {
 		// Multi part message
