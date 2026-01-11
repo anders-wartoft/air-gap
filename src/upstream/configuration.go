@@ -8,41 +8,48 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"sitia.nu/airgap/src/filter"
+	"sitia.nu/airgap/src/inputfilter"
 )
 
 type TransferConfiguration struct {
-	id                           string            // unique id for this upstream
-	nic                          string            // network interface card
-	targetIP                     string            // target IP address
-	targetPort                   int               // target port
-	bootstrapServers             string            // Kafka bootstrap servers
-	topic                        string            // Kafka topic
-	groupID                      string            // Kafka group ID
-	payloadSize                  uint16            // Maximum Length of payload before fragmentations starts
-	from                         string            // Start time for reading from Kafka
-	encryption                   bool              // encryption on/off
-	key                          []byte            // symmetric key in use
-	newkey                       []byte            // a new symmetric key, when successfully sent, copy the value to key
-	publicKey                    *rsa.PublicKey    // public key for encrypting the symmetric key
-	publicKeyFile                string            // file with the public key
-	source                       string            // source of the messages, kafka or random
-	generateNewSymmetricKeyEvery int               // seconds between key generation
-	logFileName                  string            // log file name, redirect logging to a file from the console
-	sendingThreads               []map[string]int  // array of objects with thread names and offsets
-	certFile                     string            // Certificate to use to communicate with Kafka with TLS
-	keyFile                      string            // Key file to use for TLS
-	caFile                       string            // CA file to use for TLS
-	keyPasswordFile              string            // File containing the password to decrypt the key file
-	deliverFilter                string            // filter configuration
-	topicTranslations            string            // topic translations in JSON format
-	translations                 map[string]string // map from input topic to output topic (derived from topicTranslations)
-	filter                       *filter.Filter    // filter instance
-	eps                          float64           // events per second
-	logLevel                     string            // log level: DEBUG, INFO, WARN, ERROR, FATAL
-	logStatistics                int32             // log statistics every n seconds, 0 means no logging
-	compressWhenLengthExceeds    int               // compress messages when length exceeds this value, 0 means no compression
+	id                           string                   // unique id for this upstream
+	nic                          string                   // network interface card
+	targetIP                     string                   // target IP address
+	targetPort                   int                      // target port
+	transport                    string                   // transport protocol: udp or tcp (default: udp)
+	bootstrapServers             string                   // Kafka bootstrap servers
+	topic                        string                   // Kafka topic
+	groupID                      string                   // Kafka group ID
+	payloadSize                  uint16                   // Maximum Length of payload before fragmentations starts
+	from                         string                   // Start time for reading from Kafka
+	encryption                   bool                     // encryption on/off
+	key                          []byte                   // symmetric key in use
+	newkey                       []byte                   // a new symmetric key, when successfully sent, copy the value to key
+	publicKey                    *rsa.PublicKey           // public key for encrypting the symmetric key
+	publicKeyFile                string                   // file with the public key
+	source                       string                   // source of the messages, kafka or random
+	generateNewSymmetricKeyEvery int                      // seconds between key generation
+	logFileName                  string                   // log file name, redirect logging to a file from the console
+	sendingThreads               []map[string]int         // array of objects with thread names and offsets
+	certFile                     string                   // Certificate to use to communicate with Kafka with TLS
+	keyFile                      string                   // Key file to use for TLS
+	caFile                       string                   // CA file to use for TLS
+	keyPasswordFile              string                   // File containing the password to decrypt the key file
+	deliverFilter                string                   // filter configuration
+	topicTranslations            string                   // topic translations in JSON format
+	translations                 map[string]string        // map from input topic to output topic (derived from topicTranslations)
+	filter                       *filter.Filter           // filter instance
+	inputFilterRules             string                   // input filter rules (file path or inline)
+	inputFilterDefaultAction     string                   // default action when no rules match (allow or deny)
+	inputFilterTimeout           int                      // regex match timeout in milliseconds (default 100)
+	inputFilter                  *inputfilter.InputFilter // input filter instance
+	eps                          float64                  // events per second
+	logLevel                     string                   // log level: DEBUG, INFO, WARN, ERROR, FATAL
+	logStatistics                int32                    // log statistics every n seconds, 0 means no logging
+	compressWhenLengthExceeds    int                      // compress messages when length exceeds this value, 0 means no compression
 }
 
 func DefaultConfiguration() TransferConfiguration {
@@ -60,6 +67,7 @@ func DefaultConfiguration() TransferConfiguration {
 	config.eps = -1                      // default: no throttle
 	config.logStatistics = 0             // default: no statistics
 	config.compressWhenLengthExceeds = 0 // default: no compression
+	config.inputFilterTimeout = 100      // default: 100ms regex timeout
 	return config
 }
 
@@ -143,6 +151,13 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 				}
 			}
 			Logger.Printf("targetPort: %d", result.targetPort)
+		case "transport":
+			transport := strings.ToLower(value)
+			if transport != "udp" && transport != "tcp" {
+				Logger.Fatalf("Error in config transport. Illegal value: %s. Legal values are 'udp' or 'tcp'", value)
+			}
+			result.transport = transport
+			Logger.Printf("transport: %s", result.transport)
 		case "bootstrapServers":
 			result.bootstrapServers = value
 			Logger.Printf("bootstrapServers: %s", value)
@@ -240,6 +255,24 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 					Logger.Printf("compressWhenLengthExceeds: %d", result.compressWhenLengthExceeds)
 				}
 			}
+		case "inputFilterRules":
+			result.inputFilterRules = value
+			Logger.Printf("inputFilterRules: %s", value)
+		case "inputFilterDefaultAction":
+			result.inputFilterDefaultAction = strings.ToLower(value)
+			Logger.Printf("inputFilterDefaultAction: %s", result.inputFilterDefaultAction)
+		case "inputFilterTimeout":
+			tmp, err := strconv.Atoi(value)
+			if err != nil {
+				Logger.Fatalf("Error in config inputFilterTimeout. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
+			} else {
+				if tmp <= 0 {
+					Logger.Fatalf("Error in config inputFilterTimeout. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
+				} else {
+					result.inputFilterTimeout = tmp
+					Logger.Printf("inputFilterTimeout: %d", result.inputFilterTimeout)
+				}
+			}
 		default:
 			Logger.Fatalf("Unknown configuration key: %s", key)
 		}
@@ -292,6 +325,13 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		if port, err := strconv.Atoi(targetPort); err == nil {
 			Logger.Print("Overriding targetPort with environment variable: " + prefix + "TARGET_PORT" + " with value: " + targetPort)
 			config.targetPort = port
+		}
+	}
+	if transport := os.Getenv(prefix + "TRANSPORT"); transport != "" {
+		transport = strings.ToLower(transport)
+		if transport == "udp" || transport == "tcp" {
+			Logger.Print("Overriding transport with environment variable: " + prefix + "TRANSPORT" + " with value: " + transport)
+			config.transport = transport
 		}
 	}
 	if bootstrapServers := os.Getenv(prefix + "BOOTSTRAP_SERVERS"); bootstrapServers != "" {
@@ -388,6 +428,22 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			config.compressWhenLengthExceeds = compressWhenLengthExceedsInt
 		}
 	}
+	if inputFilterRules := os.Getenv(prefix + "INPUT_FILTER_RULES"); inputFilterRules != "" {
+		Logger.Print("Overriding inputFilterRules with environment variable: " + prefix + "INPUT_FILTER_RULES" + " with value: " + inputFilterRules)
+		config.inputFilterRules = inputFilterRules
+	}
+	if inputFilterDefaultAction := os.Getenv(prefix + "INPUT_FILTER_DEFAULT_ACTION"); inputFilterDefaultAction != "" {
+		Logger.Print("Overriding inputFilterDefaultAction with environment variable: " + prefix + "INPUT_FILTER_DEFAULT_ACTION" + " with value: " + inputFilterDefaultAction)
+		config.inputFilterDefaultAction = strings.ToLower(inputFilterDefaultAction)
+	}
+	if inputFilterTimeout := os.Getenv(prefix + "INPUT_FILTER_TIMEOUT"); inputFilterTimeout != "" {
+		if inputFilterTimeoutInt, err := strconv.Atoi(inputFilterTimeout); err == nil {
+			if inputFilterTimeoutInt > 0 {
+				Logger.Print("Overriding inputFilterTimeout with environment variable: " + prefix + "INPUT_FILTER_TIMEOUT" + " with value: " + inputFilterTimeout)
+				config.inputFilterTimeout = inputFilterTimeoutInt
+			}
+		}
+	}
 
 	return config
 }
@@ -422,7 +478,12 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		Logger.Fatal("Missing required configuration: targetIP")
 	}
 	if result.targetPort < 0 || result.targetPort > 65535 {
-		Logger.Fatal("Invalid configuration: targetPort must be between 0 and 65535")
+		Logger.Fatalf("Invalid targetPort: %d. Legal values are 0-65535", result.targetPort)
+	}
+	// Set default transport if not specified
+	if result.transport == "" {
+		result.transport = "udp"
+		Logger.Printf("transport not specified, using default: udp")
 	}
 	if result.source == "kafka" {
 		if result.bootstrapServers == "" {
@@ -516,6 +577,22 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		result.filter = nil
 		Logger.Printf("No filtering is enabled.")
 	}
+
+	// Set up input filtering based on payload content
+	if result.inputFilterRules != "" {
+		var err error
+		timeout := time.Duration(result.inputFilterTimeout) * time.Millisecond
+		result.inputFilter, err = inputfilter.LoadFilterRules(result.inputFilterRules, result.inputFilterDefaultAction, timeout)
+		if err != nil {
+			Logger.Fatalf("Error loading input filter rules: %v", err)
+		}
+		Logger.Printf("Input filtering is enabled")
+		Logger.Print(result.inputFilter.GetRulesSummary())
+	} else {
+		result.inputFilter = nil
+		Logger.Printf("No input filtering is enabled.")
+	}
+
 	return result
 }
 
@@ -527,6 +604,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  logFileName: %s", config.logFileName)
 	Logger.Printf("  targetIP: %s", config.targetIP)
 	Logger.Printf("  targetPort: %d", config.targetPort)
+	Logger.Printf("  transport: %s", config.transport)
 	Logger.Printf("  bootstrapServers: %s", config.bootstrapServers)
 	Logger.Printf("  topic: %s", config.topic)
 	Logger.Printf("  groupID: %s", config.groupID)
@@ -555,4 +633,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  deliverFilter: %s", config.deliverFilter)
 	Logger.Printf("  logStatistics: %d seconds", config.logStatistics)
 	Logger.Printf("  compressWhenLengthExceeds: %d bytes", config.compressWhenLengthExceeds)
+	Logger.Printf("  inputFilterRules: %s", config.inputFilterRules)
+	Logger.Printf("  inputFilterDefaultAction: %s", config.inputFilterDefaultAction)
+	Logger.Printf("  inputFilterTimeout: %dms", config.inputFilterTimeout)
 }

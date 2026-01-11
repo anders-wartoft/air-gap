@@ -53,7 +53,7 @@ func (u *UDPConn) SendMessage(message []byte) error {
 	return err
 }
 
-// SendMessages sends multiple UDP messages using one connection.
+// SendMessages sends multiple messages using one connection.
 func (u *UDPConn) SendMessages(messages [][]byte) error {
 	if u.conn == nil {
 		return net.ErrClosed

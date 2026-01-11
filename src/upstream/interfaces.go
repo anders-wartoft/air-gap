@@ -13,9 +13,12 @@ type KafkaClient interface {
 	SetTLS(certFile, keyFile, caFile, keyPasswordFile string) error
 }
 
-// UDPClient defines the interface for UDP connection
-type UDPClient interface {
+// TransportClient defines the interface for sending messages over a network transport (UDP, TCP, etc.)
+type TransportClient interface {
 	SendMessage(msg []byte) error
 	SendMessages(msgs [][]byte) error
 	Close() error
 }
+
+// UDPClient is deprecated, use TransportClient instead
+type UDPClient = TransportClient

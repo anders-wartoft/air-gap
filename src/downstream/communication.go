@@ -100,6 +100,7 @@ func readNewKey(message []byte) string {
 			}
 		}
 	}
+	Logger.Errorf("Couldn't decrypt the new symmetric key with any of the %v private keys loaded with %s", len(config.keyInfos), config.privateKeyGlob)
 	sendMessage(protocol.TYPE_ERROR, "", config.topic, fmt.Appendf(nil, "Can't decrypt the new symmetric key. Tried all %v private keys\n", len(config.keyInfos)))
 	return "ERROR: No key found that can decrypt the new symmetric key"
 }
@@ -253,8 +254,8 @@ func connectToKafka(config TransferConfiguration) {
 				if err != nil {
 					Logger.Debugf("Error encoding message value: %v", err)
 				} else {
-					if len(valueBytes) > 80 {
-						Logger.Debugf("Message sent: key=%s partition=%d %s ...", string(keyBytes), msg.Partition, string(valueBytes[:80]))
+					if len(valueBytes) > 120 {
+						Logger.Debugf("Message sent: key=%s partition=%d %s ...", string(keyBytes), msg.Partition, string(valueBytes[:120]))
 					} else {
 						Logger.Debugf("Message sent: key=%s partition=%d %s", string(keyBytes), msg.Partition, string(valueBytes))
 					}
@@ -264,6 +265,8 @@ func connectToKafka(config TransferConfiguration) {
 	}()
 	Logger.Printf("Connected to Kafka. Creating startup message...\n")
 	kafka.SetProducer(producer, config.batchSize)
+	// Set error callback to report Kafka errors to status
+	kafka.SetErrorCallback(UpdateKafkaStatus)
 	// Start a new goroutine for sending kafka messages
 	kafka.StartBackgroundThread()
 }

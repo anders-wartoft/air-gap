@@ -20,11 +20,12 @@ type MessageCache struct {
 }
 
 var (
-	cache     = MessageCache{entries: make([]MessageCacheEntry, 0)}
-	producer  sarama.AsyncProducer
-	doneChan  chan struct{}
-	wg        sync.WaitGroup
-	batchSize int
+	cache         = MessageCache{entries: make([]MessageCacheEntry, 0)}
+	producer      sarama.AsyncProducer
+	doneChan      chan struct{}
+	wg            sync.WaitGroup
+	batchSize     int
+	errorCallback func(string) // Optional callback for producer errors
 )
 
 func SetProducer(p sarama.AsyncProducer, cfgBatchSize int) {
@@ -36,6 +37,11 @@ func SetProducer(p sarama.AsyncProducer, cfgBatchSize int) {
 	cache.entries = nil
 	cache.mu.Unlock()
 	StartBackgroundThread()
+}
+
+// SetErrorCallback sets an optional callback to be called when producer errors occur
+func SetErrorCallback(callback func(string)) {
+	errorCallback = callback
 }
 
 func StartBackgroundThread() {
@@ -57,6 +63,13 @@ func StartBackgroundThread() {
 				ticker.Stop()
 				sendBatch()
 				return
+			case err := <-producer.Errors():
+				if err != nil && errorCallback != nil {
+					errorCallback("Kafka producer error: " + err.Err.Error())
+				}
+			case success := <-producer.Successes():
+				// Could track success here if needed, but we don't report per-message
+				_ = success
 			}
 		}
 	}()

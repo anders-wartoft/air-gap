@@ -34,6 +34,7 @@ type TransferConfiguration struct {
 	keyInfos             []KeyInfo // array of private keys
 	privateKeyGlob       string
 	target               string
+	transport            string // Transport protocol: udp or tcp (default: udp)
 	logLevel             string
 	logFileName          string
 	certFile             string
@@ -131,6 +132,7 @@ func defaultConfiguration() TransferConfiguration {
 	config.logLevel = "INFO"
 	config.id = "default_downstream"
 	config.target = "kafka"
+	config.transport = "udp" // default UDP for backward compatibility
 	config.logFileName = ""
 	config.mtu = 0 // default auto
 	config.translations = make(map[string]string)
@@ -231,6 +233,13 @@ func readConfiguration(fileName string, result TransferConfiguration) (TransferC
 				Logger.Printf("target: %s", value)
 			} else {
 				Logger.Fatalf("Unknown target %s", value)
+			}
+		case "transport": // optional - tcp or udp (default: udp)
+			if value == "udp" || value == "tcp" {
+				result.transport = value
+				Logger.Printf("transport: %s", value)
+			} else {
+				Logger.Fatalf("Unknown transport %s. Legal values are: udp, tcp", value)
 			}
 		case "certFile":
 			result.certFile = value
@@ -363,6 +372,14 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	if target := os.Getenv(prefix + "TARGET"); target != "" {
 		Logger.Print("Overriding target with environment variable: " + prefix + "TARGET" + " with value: " + target)
 		config.target = target
+	}
+	if transport := os.Getenv(prefix + "TRANSPORT"); transport != "" {
+		Logger.Print("Overriding transport with environment variable: " + prefix + "TRANSPORT" + " with value: " + transport)
+		if transport == "udp" || transport == "tcp" {
+			config.transport = transport
+		} else {
+			Logger.Fatalf("Error in environment variable AIRGAP_DOWNSTREAM_TRANSPORT. Illegal value: %s. Legal values are: udp, tcp", transport)
+		}
 	}
 	if logLevel := os.Getenv(prefix + "LOG_LEVEL"); logLevel != "" {
 		Logger.Print("Overriding logLevel with environment variable: " + prefix + "LOG_LEVEL" + " with value: " + logLevel)

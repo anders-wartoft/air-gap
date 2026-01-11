@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -45,9 +46,44 @@ type TLSConfiguration struct {
 
 // ConfigureSaramaLogger sets up the Sarama library logger with a [SARAMA] prefix
 // This should be called once at the start of any function that uses Sarama
-func ConfigureSaramaLogger() {
+// Also provides a hook to report errors via callback if provided
+func ConfigureSaramaLogger(errorCallback ...func(string)) {
 	saramaLogger := log.New(logging.StdLogger.Writer(), "[SARAMA] ", log.LstdFlags)
-	sarama.Logger = saramaLogger
+
+	// If an error callback is provided, wrap it to capture certain error patterns
+	if len(errorCallback) > 0 && errorCallback[0] != nil {
+		// Create a custom writer that captures error-like messages
+		originalWriter := logging.StdLogger.Writer()
+		sarama.Logger = log.New(&errorCapturingWriter{
+			originalWriter: originalWriter,
+			errorCallback:  errorCallback[0],
+		}, "[SARAMA] ", log.LstdFlags)
+	} else {
+		sarama.Logger = saramaLogger
+	}
+}
+
+// errorCapturingWriter wraps a writer and captures error messages
+type errorCapturingWriter struct {
+	originalWriter io.Writer
+	errorCallback  func(string)
+}
+
+func (w *errorCapturingWriter) Write(p []byte) (n int, err error) {
+	msg := string(p)
+
+	// Check for error patterns in Sarama logs
+	if strings.Contains(msg, "leaderless") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "dial tcp") ||
+		strings.Contains(msg, "failed") ||
+		strings.Contains(msg, "error") {
+		// Report the error
+		w.errorCallback("Kafka cluster issue: " + strings.TrimSpace(msg))
+	}
+
+	// Always write to original writer
+	return w.originalWriter.Write(p)
 }
 
 func SetVerbose(enabled bool) {
@@ -277,10 +313,19 @@ func createTLSConfig() (*tls.Config, error) {
 
 // This is called for each sending thread
 // ReadFromKafkaWithContext allows external context cancellation (for SIGHUP reloads)
-func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds int, brokers string, topics string, group string, timestamp string, callbackFunction func(string, []byte, time.Time, []byte) bool) {
+// errorCallback is optional and will be called with error messages if provided
+func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds int, brokers string, topics string, group string, timestamp string, callbackFunction func(string, []byte, time.Time, []byte) bool, errorCallback ...func(string)) {
 	Logger.Print("Starting a new Sarama consumer (WithContext): " + name + " with offset: " + fmt.Sprintf("%d", offsetSeconds))
 
-	ConfigureSaramaLogger()
+	// Configure Sarama logger with error callback to capture metadata issues
+	ConfigureSaramaLogger(errorCallback...)
+
+	// Helper function to report errors
+	reportError := func(msg string) {
+		if len(errorCallback) > 0 && errorCallback[0] != nil {
+			errorCallback[0](msg)
+		}
+	}
 
 	version, err := sarama.ParseKafkaVersion(version)
 	if err != nil {
@@ -339,7 +384,17 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 
 	client, err := sarama.NewConsumerGroup(strings.Split(brokers, ","), group, config)
 	if err != nil {
-		Logger.Panicf("Error creating consumer group client: %v", err)
+		errMsg := fmt.Sprintf("Error creating consumer group client: %v", err)
+		Logger.Errorf("%s. Retrying in 5 seconds...", errMsg)
+		reportError(errMsg)
+		// Sleep and continue - will try again in the consumer loop
+		// This allows the consumer to retry if Kafka cluster is temporarily unavailable
+		time.Sleep(5 * time.Second)
+		// Retry once more
+		client, err = sarama.NewConsumerGroup(strings.Split(brokers, ","), group, config)
+		if err != nil {
+			Logger.Panicf("Error creating consumer group client after retry: %v", err)
+		}
 	}
 
 	consumptionIsPaused := false
@@ -347,22 +402,75 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		retryCount := 0
 		for {
 			if err := client.Consume(ctx, strings.Split(topics, ","), &consumer); err != nil {
 				if errors.Is(err, sarama.ErrClosedConsumerGroup) {
 					return
 				}
-				Logger.Panicf("Error from consumer: %v", err)
+				// Log error and retry instead of panicking
+				retryCount++
+				errMsg := fmt.Sprintf("Error from consumer (attempt %d): %v", retryCount, err)
+				Logger.Errorf("%s. Will retry in 5 seconds...", errMsg)
+				reportError(errMsg)
+
+				// Sleep before retrying to avoid busy-wait loop
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Second):
+					// Continue to retry
+				}
+				continue
 			}
 			if ctx.Err() != nil {
 				return
 			}
+			// Success - reset retry counter
+			retryCount = 0
+			// Clear error status on successful connect
+			reportError("running")
 			consumer.ready = make(chan bool)
 		}
 	}()
 
 	<-consumer.ready
 	Logger.Println("Sarama consumer (WithContext) " + name + " up and running!...")
+
+	// Track if we've reported an error recently to avoid spam
+	var lastErrorTime time.Time
+	var lastErrorMsg string
+
+	// Monitor Kafka health with periodic checks
+	go func() {
+		healthCheckTicker := time.NewTicker(10 * time.Second)
+		defer healthCheckTicker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-healthCheckTicker.C:
+				// If we had an error but it's been more than 30 seconds, try to clear it
+				if lastErrorMsg != "" && time.Since(lastErrorTime) > 30*time.Second {
+					// Assume error has resolved if no new errors in last 30 seconds
+					Logger.Infof("Kafka cluster appears to have recovered")
+					reportError("running")
+					lastErrorMsg = ""
+				}
+			case err := <-client.Errors():
+				if err != nil {
+					errMsg := fmt.Sprintf("Kafka error: %v", err)
+					if errMsg != lastErrorMsg {
+						Logger.Errorf("%s", errMsg)
+						reportError(errMsg)
+						lastErrorMsg = errMsg
+						lastErrorTime = time.Now()
+					}
+				}
+			}
+		}
+	}()
 
 	sigusr1 := make(chan os.Signal, 1)
 	signal.Notify(sigusr1, syscall.SIGUSR1)
@@ -445,7 +553,14 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 				fmt.Sprint(message.Partition) + delimiter +
 				fmt.Sprint(message.Offset)
 			keepRunning = consumer.callback(id, message.Key, message.Timestamp, message.Value)
-			session.MarkMessage(message, "")
+
+			// Only mark message as consumed if callback succeeded (returned true)
+			// If callback returns false, the message will be reprocessed on next poll
+			if keepRunning {
+				session.MarkMessage(message, "")
+			} else {
+				Logger.Debugf("Message id=%s not marked as consumed, will be retried", id)
+			}
 		case <-session.Context().Done():
 			return nil
 		default:

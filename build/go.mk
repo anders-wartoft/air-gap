@@ -2,7 +2,7 @@
 # Go Binary Builds
 # ============================================================================
 
-.PHONY: build-go upstream downstream create resend
+.PHONY: build-go build-go-all build-go-linux-amd64 build-go-linux-arm64 build-go-mac-arm64 _build-binaries upstream downstream create resend
 
 GO_BINARIES := upstream downstream create resend
 GO_BUILD_DIR := $(LINUX_AMD64_DIR)
@@ -12,8 +12,32 @@ GO_BUILD_DIR := $(LINUX_AMD64_DIR)
 	@echo $(NEXT_BUILD_NUMBER) > $(BUILD_NUMBER_FILE)
 	@touch .build-number-incremented
 
-build-go: .build-number-incremented $(GO_BINARIES)
-	@echo "✅ Go binaries built"
+build-go: build-go-linux-amd64
+	@echo "✅ Go binaries built (Linux AMD64)"
+
+build-go-all: build-go-linux-amd64 build-go-linux-arm64 build-go-mac-arm64
+	@echo "✅ All Go binaries built"
+
+build-go-linux-amd64: .build-number-incremented $(GO_BINARIES)
+	@echo "✅ Go binaries built (Linux AMD64)"
+
+build-go-linux-arm64: .build-number-incremented src/version/version.go
+	@echo "Building binaries (linux arm64)..."
+	@mkdir -p $(LINUX_ARM64_DIR)
+	@GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(LINUX_ARM64_DIR)/upstream ./src/cmd/upstream
+	@GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(LINUX_ARM64_DIR)/downstream ./src/cmd/downstream
+	@GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(LINUX_ARM64_DIR)/create ./src/cmd/create
+	@GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(LINUX_ARM64_DIR)/resend ./src/cmd/resend
+	@echo "✅ Go binaries built (Linux ARM64)"
+
+build-go-mac-arm64: .build-number-incremented src/version/version.go
+	@echo "Building binaries (darwin arm64)..."
+	@mkdir -p $(MAC_ARM64_DIR)
+	@GOOS=darwin GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(MAC_ARM64_DIR)/upstream ./src/cmd/upstream
+	@GOOS=darwin GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(MAC_ARM64_DIR)/downstream ./src/cmd/downstream
+	@GOOS=darwin GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(MAC_ARM64_DIR)/create ./src/cmd/create
+	@GOOS=darwin GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(MAC_ARM64_DIR)/resend ./src/cmd/resend
+	@echo "✅ Go binaries built (macOS ARM64)"
 
 # Generate version file
 src/version/version.go:

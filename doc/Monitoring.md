@@ -2,6 +2,62 @@
 
 In a production environment, jconsole is not availabe if you run the deduplicator as a service. You can collect metrics with the following guide, where only the system metrics are available for the upstream and downstream but the deduplicator exports some attributes to JMX and can be inspected with Jolokia.
 
+## 0. Monitoring Transport Status
+
+Upstream and downstream applications continuously monitor transport (UDP/TCP) status and report it in periodic statistics.
+
+### Statistics with Transport Status
+
+The statistics output includes a `status` field that shows the current transport state:
+
+```json
+{
+  "id": "Upstream_1",
+  "time": 1704811200,
+  "received": 150,
+  "sent": 150,
+  "eps": 150,
+  "status": "running",
+  "total_sent": 45000,
+  ...
+}
+```
+
+**Status values:**
+
+- `"running"` - Transport is operational and messages are being delivered
+- `"<error message>"` - Transport error (e.g., "connection refused", "connection reset")
+
+### Log Monitoring
+
+Transport status changes are logged at appropriate levels:
+
+**ERROR level** - Status changes to error:
+
+```bash
+[ERROR] Transport status changed to error: connection refused (was: running)
+```
+
+**INFO level** - Status restored:
+
+```bash
+[INFO] Transport status restored to running (was: connection refused)
+```
+
+**WARN level** (UDP only) - Messages sent after transient retries:
+
+```bash
+[WARN] Message id=transfer_3_0 sent after 2 attempt(s) - UDP delivery is not guaranteed (receiver may be down)
+```
+
+### Setting Up Alerts
+
+To alert on transport failures, monitor for:
+
+1. ERROR level logs containing "Transport status changed to error"
+2. Statistics with `status` field not equal to "running"
+3. Frequent WARN messages about UDP delivery uncertainty
+
 ## 1. Install Metricbeat
 
 Follow the [official Elastic documentation](https://www.elastic.co/guide/en/beats/metricbeat/current/metricbeat-installation.html) for your OS, or on Fedora/RHEL:

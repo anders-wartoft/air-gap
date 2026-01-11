@@ -35,6 +35,15 @@ This builds upstream, downstream, and the deduplication Java application.
 
 ## Configuration
 
+### Transport Selection
+
+Air-gap supports both **UDP** (default) and **TCP** transports. Choose based on your network environment:
+
+- **UDP**: For hardware diodes, high throughput, low latency
+- **TCP**: For software connections, unreliable networks, connection state awareness
+
+See [Transport Configuration.md](Transport%20Configuration.md) for detailed transport options and migration guide.
+
 ### Upstream
 
 Edit your upstream config file (e.g., `config/upstream.properties`):
@@ -44,6 +53,8 @@ id=Upstream_1
 nic=en0
 targetIP=127.0.0.1
 targetPort=1234
+# Use TCP instead of UDP (optional, defaults to UDP)
+transport=tcp          
 source=kafka
 bootstrapServers=192.168.153.138:9092
 topic=transfer
@@ -55,6 +66,13 @@ mtu=auto
 
 Override any setting with environment variables (see README for details).
 
+For TCP with environment variable:
+
+```bash
+export AIRGAP_UPSTREAM_TRANSPORT=tcp
+./upstream config/upstream.properties
+```
+
 ### Downstream
 
 Edit your downstream config file (e.g., `config/downstream.properties`):
@@ -64,12 +82,20 @@ id=Downstream_1
 nic=en0
 targetIP=0.0.0.0
 targetPort=1234
+transport=tcp          # Use TCP instead of UDP (optional, defaults to UDP)
 bootstrapServers=192.168.153.138:9092
 topic=log
 privateKeyFiles=certs/private*.pem
 target=kafka
 mtu=auto
 clientId=downstream
+```
+
+For TCP with environment variable:
+
+```bash
+export AIRGAP_DOWNSTREAM_TRANSPORT=tcp
+./downstream config/downstream.properties
 ```
 
 ### Deduplicator (Java)
@@ -257,9 +283,15 @@ Both upstream and downstream applications emit the following fields in their `ST
 - **`interval`**: The configured statistics logging interval in seconds
 - **`received`**: Number of events received during the last interval
 - **`sent`**: Number of events sent during the last interval
+- **`filtered`**: Number of events filtered (blocked) during the last interval (input filter only)
+- **`unfiltered`**: Number of events that passed through the input filter during the last interval
+- **`filter_timeouts`**: Number of regex timeout errors during the last interval (input filter only)
 - **`eps`**: Events per second during the last interval (calculated as `received / interval`)
 - **`total_received`**: Total number of events received since application start
 - **`total_sent`**: Total number of events sent since application start
+- **`total_filtered`**: Total number of events filtered (blocked) since application start (input filter only)
+- **`total_unfiltered`**: Total number of events that passed through the input filter since application start
+- **`total_filter_timeouts`**: Total number of regex timeout errors since application start (input filter only)
 
 **Example upstream statistics log:**
 

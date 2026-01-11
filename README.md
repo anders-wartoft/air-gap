@@ -1,6 +1,6 @@
-# air-gap Kafka to Kafka Topic Transfer over UDP with Guaranteed Delivery
+# air-gap Kafka to Kafka Topic Transfer over UDP/TCP with Guaranteed Delivery
 
-This project aims to solve the problem of transferring events from a Kafka topic in near real time over an unsecure UDP connection with guaranteed once-only delivery of the events. This can be useful, e.g., for transmitting log events over a hardware diode. The information leaving the sending side may be encrypted with symmetric keys and the key exchange is automatic with use of public key encryption.
+This project aims to solve the problem of transferring events from a Kafka topic in near real time over an unsecure UDP or TCP connection with guaranteed once-only delivery of the events. This can be useful, e.g., for transmitting log events over a hardware diode. The information leaving the sending side may be encrypted with symmetric keys and the key exchange is automatic with use of public key encryption.
 
 ## Overview
 
@@ -46,18 +46,20 @@ go run src/cmd/upstream/main.go config/upstream.properties
 - More help for setting up encryption to Kafka can be found here: [Kafka-encryption.md](doc/Kafka-encryption.md)
 - See [Monitoring.md](doc/Monitoring.md) on how to monitor the applications for resource usage etc.
 - To set up reduncancy and/or load balancing, see [Redundancy and Load Balancing.md](doc/Redundancy%20and%20Load%20Balancing.md)
-- Finally, there is a [Resend.md](doc/Resend.md) guide that covers how to resend missing information.
+- There is a [Resend.md](doc/Resend.md) guide that covers how to resend missing information.
+- Finally, frequently asked questions can be found here: [FAQ.md](doc/FAQ.md)
 
 ## Notation
 
-There are four executable files that together constitutes the transfer software.
+There are five executable files that together constitutes the transfer software.
 
 - Upstream - on the sending side of the diode, also used as the name of the program that consumes Kafka events and produces UDP packets
 - Downstream - on the receiving side of the diode, also used as the name of the program that receives UDP packets and produces Kafka events for the receiving Kafka
 - gap-detector - The program that consumes the freshly written Kafka events from Downstream and looks for missing events. This will also deduplicate the events, so if an event is received more than once downstream, only the first of these will be delivered
-- set-timestamp - This progam consumes information from the gap-detector and instructs the sending upstream process to restart at an earlier point in time in the upstream Kafka event stream so the lost events may be sent again
+- create - This progam consumes information from the gap-detector and creates a json-file with information of what to resend. The json-file, or a start date, is transferred to upstream by other means than IP, since there is a diode in between. On the upstream side, the `resend` application is used to actually resend the events, in parallell with the current log event stream from upstream.
+- resend - To resend events, the json file from create can be used, or a start timestamp and optionally a stop timestamp, is used to query the upstream Kafka for those events and `resend` sends those events once more over the diode.
 
-To use guaranteed delivery, you must be able to copy information from the gap-detector that runs downstream to the set-timestamp program that runs upstream. The information that needs to traverse the diode in the wrong direction is basically a topic id, partition id and position for the first lost event. set-timestamp is an application that uses that information, queries Kafka upstream on the last timestamp before that event and configures the upstream application to start reading at that timestamp.
+To use guaranteed delivery, you must be able to copy information from the `create` application to the `resend` application but if file transfer is not allowed, a start timestamp entered on the command line will suffice, but will probably result in more events being delivered over the diode.
 
 ![air-gap flow](doc/img/air-gap%20flow.png)
 
@@ -175,6 +177,16 @@ The provided solution encrypts data in transit over the UDP connection. If neede
 
 For information about Kafka and TLS, see e.g., <https://dev.to/davidsbond/golang-implementing-kafka-consumers-using-sarama-cluster-4fko>
 
+## Input Filtering
+
+Upstream supports content-based filtering of events before transmission. This allows you to control which events are sent across the diode based on regex patterns matching the payload content.
+
+Common use cases include:
+
+Input filtering uses an ordered allow/deny rule system where the first matching rule determines the action. If no rules match, a configurable default action applies. The filter includes built-in protection against ReDoS (Regular Expression Denial of Service) attacks with configurable timeout limits.
+
+For detailed information, configuration options, rule format, and examples, see [InputFilter.md](doc/InputFilter.md).
+
 ## Configuration
 
 ### Upstream Settings
@@ -223,32 +235,36 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 ### All settings for upstream
 
 | Config file property name | Environment variable name | Default value | Description |
-|--------------------------|--------------------------|---------------|-------------|
-| id                       | AIRGAP_UPSTREAM_ID       |               | Name of the instance. Will be used in logging and when sending status messages |
-| logLevel                  | AIRGAP_UPSTREAM_LOG_LEVEL  | info         | debug, info, error, warn, fatal |
-| soruce                  | AIRGAP_UPSTREAM_SOURCE  | random         | Where to get the information to send. kafka or random. Random is just a string with a counter at the end, not really random data. |
-| nic                      | AIRGAP_UPSTREAM_NIC      |               | What nic to use for sending to downstream |
-| targetIP                 | AIRGAP_UPSTREAM_TARGET_IP  |               | Downstream air-gap ip address, if IPv6, enclose the address with brackets, like [::1] |
-| targetPort               | AIRGAP_UPSTREAM_TARGET_PORT |               | Downstream air-gap ip port |
-| bootstrapServers         | AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS |               | Bootstrap url for Kafka, with port |
-| topic                    | AIRGAP_UPSTREAM_TOPIC    |               | Topic name in Kafka to read from |
-| groupID                  | AIRGAP_UPSTREAM_GROUP_ID |               | The prefix for the group to use when reading from Kafka. The complete group id will be this value, concatenated with the name from the sendingThreads. This will give each sending thread a unique group id |
-| payloadSize              | AIRGAP_UPSTREAM_PAYLOAD_SIZE | 0             | 0 - ask the NIC for the MTU and subtract 68 bytes from that (IPv6 + UDP header) or set manually to the payload size (available size of UDP packets, i.e., MTU - headers) |
-| from                     | AIRGAP_UPSTREAM_FROM     |               | Don't read anything from Kafka that was delivered to Kafka before this timestamp |
-| enryption                | AIRGAP_UPSTREAM_ENCRYPTION | false       | true - encrypt all payload when sending to downstream air-gap. Status messages are still in clear text to help configuration and set-up |
-| publicKeyFile            | AIRGAP_UPSTREAM_PUBLIC_KEY_FILE |               | If encryption is on, this is the public key of the receiver |
-| source                   | AIRGAP_UPSTREAM_SOURCE.         | random        | source of the messages, kafka or random. Use random for testing only |
-| generateNewSymmetricKeyEvery | AIRGAP_UPSTREAM_GENERATE_NEW_SYMMETRIC_KEY_EVERY |               | How often should we change the encryption key (symmetric key)? |
-| logFileName              | AIRGAP_UPSTREAM_LOG_FILE_NAME |          | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
-| sendingThreads           | AIRGAP_UPSTREAM_SENDING_THREADS | {"now": 0} | How many times, and when, whould we send each event? |
-| certFile                 | AIRGAP_UPSTREAM_CERT_FILE |               | For TLS to Kafka, add a certificate pem encoded file here |
-| keyFile                  | AIRGAP_UPSTREAM_KEY_FILE  |               | The private key for the certFile certificate |
-| keyPasswordFile     | AIRGAP_UPSTREAM_KEY_PASSWORD_FILE |       | Path to a file containing the password to decrypt an encrypted keyFile |
-| caFile                   | AIRGAP_UPSTREAM_CA_FILE   |               | The CA that issued the Kafka server's certificate |
-| deliverFilter            | AIRGAP_UPSTREAM_DELIVER_FILTER |               | Filter so not all events from Kafka is sent. Can be used to enable load balancing (see Load Balancing chapter below) |
-| topicTranslations        | AIRGAP_UPSTREAM_TOPIC_TRANSLATIONS |              | If you need to rename a topic before sending the messages you can use this: `{"inputTopic1":"outputTopic1","inputTopic2":"outputTopic2"}`. Here, if the name of a topic upstreams is `inputTopic1` it will be sent as `outputTopic1` from upstream |
-| logStatistics                   | AIRGAP_UPSTREAM_LOG_STATISTICS  | 0             | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
-| compressWhenLengthExceeds | AIRGAP_UPSTREAM_COMPRESS_WHEN_LOG_EXCEEDS | 0           | Using compression (gzip) on short events can make them longer. The break-even length is around 100 bytes for the gzip compression. Set this to a value (ideally above 1200) to gzip longer events |
+| ------------------------- | ------------------------- | ------------- | ----------- |
+| id | AIRGAP_UPSTREAM_ID | | Name of the instance. Will be used in logging and when sending status messages |
+| logLevel | AIRGAP_UPSTREAM_LOG_LEVEL | info | debug, info, error, warn, fatal |
+| source | AIRGAP_UPSTREAM_SOURCE | random | Where to get the information to send. kafka or random. Random is just a string with a counter at the end, not really random data. |
+| nic | AIRGAP_UPSTREAM_NIC | | What nic to use for sending to downstream |
+| targetIP | AIRGAP_UPSTREAM_TARGET_IP | | Downstream air-gap ip address, if IPv6, enclose the address with brackets, like [::1] |
+| targetPort | AIRGAP_UPSTREAM_TARGET_PORT | | Downstream air-gap ip port |
+| transport | AIRGAP_UPSTREAM_TRANSPORT | udp | Transport protocol to use: udp or tcp. Use tcp when no diode is needed |
+| bootstrapServers | AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS | | Bootstrap url for Kafka, with port |
+| topic | AIRGAP_UPSTREAM_TOPIC | | Topic name in Kafka to read from |
+| groupID | AIRGAP_UPSTREAM_GROUP_ID | | The prefix for the group to use when reading from Kafka. The complete group id will be this value, concatenated with the name from the sendingThreads. This will give each sending thread a unique group id |
+| payloadSize | AIRGAP_UPSTREAM_PAYLOAD_SIZE | 0 | 0 - ask the NIC for the MTU and subtract 68 bytes from that (IPv6 + UDP header) or set manually to the payload size (available size of UDP packets, i.e., MTU - headers) |
+| from | AIRGAP_UPSTREAM_FROM | | Don't read anything from Kafka that was delivered to Kafka before this timestamp |
+| enryption | AIRGAP_UPSTREAM_ENCRYPTION | false | true - encrypt all payload when sending to downstream air-gap. Status messages are still in clear text to help configuration and set-up |
+| publicKeyFile | AIRGAP_UPSTREAM_PUBLIC_KEY_FILE | | If encryption is on, this is the public key of the receiver |
+| source | AIRGAP_UPSTREAM_SOURCE | random | source of the messages, kafka or random. Use random for testing only |
+| generateNewSymmetricKeyEvery | AIRGAP_UPSTREAM_GENERATE_NEW_SYMMETRIC_KEY_EVERY | | How often should we change the encryption key (symmetric key)? |
+| logFileName | AIRGAP_UPSTREAM_LOG_FILE_NAME | | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
+| sendingThreads | AIRGAP_UPSTREAM_SENDING_THREADS | {"now": 0} | How many times, and when, whould we send each event? |
+| certFile | AIRGAP_UPSTREAM_CERT_FILE | | For TLS to Kafka, add a certificate pem encoded file here |
+| keyFile | AIRGAP_UPSTREAM_KEY_FILE | | The private key for the certFile certificate |
+| keyPasswordFile | AIRGAP_UPSTREAM_KEY_PASSWORD_FILE | | Path to a file containing the password to decrypt an encrypted keyFile |
+| caFile | AIRGAP_UPSTREAM_CA_FILE | | The CA that issued the Kafka server's certificate |
+| deliverFilter | AIRGAP_UPSTREAM_DELIVER_FILTER | | Filter so not all events from Kafka is sent. Can be used to enable load balancing (see Load Balancing chapter below) |
+| topicTranslations | AIRGAP_UPSTREAM_TOPIC_TRANSLATIONS | | If you need to rename a topic before sending the messages you can use this: `{"inputTopic1":"outputTopic1","inputTopic2":"outputTopic2"}`. Here, if the name of a topic upstreams is `inputTopic1` it will be sent as `outputTopic1` from upstream |
+| logStatistics | AIRGAP_UPSTREAM_LOG_STATISTICS | 0 | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
+| compressWhenLengthExceeds | AIRGAP_UPSTREAM_COMPRESS_WHEN_LOG_EXCEEDS | 0 | Using compression (gzip) on short events can make them longer. The break-even length is around 100 bytes for the gzip compression. Set this to a value (ideally above 1200) to gzip longer events |
+| inputFilterRules | AIRGAP_UPSTREAM_INPUT_FILTER_RULES | | Path to file containing ordered allow/deny regex rules, or inline comma-separated rules. Format: `action:regex_pattern` where action is `allow` or `deny`. Rules evaluated in order, first match wins. See [InputFilter.md](doc/InputFilter.md) for details |
+| inputFilterDefaultAction | AIRGAP_UPSTREAM_INPUT_FILTER_DEFAULT_ACTION | allow | Default action when no filter rules match: `allow` or `deny`. Use `deny` for allowlist approach, `allow` for blocklist approach |
+| inputFilterTimeout | AIRGAP_UPSTREAM_INPUT_FILTER_TIMEOUT | 100 | Regex match timeout in milliseconds for input filter rules. Protects against ReDoS attacks. Increase for complex patterns or large payloads |
 
 ### Downstream Settings
 
@@ -272,30 +288,31 @@ The property privateKeyFiles should point to one or more private key files that 
 ### All settings for downstream
 
 | Config file property name | Environment variable name | Default value | Description |
-|--------------------------|--------------------------|---------------|-------------|
-| id                       | AIRGAP_DOWNSTREAM_ID       |               | Name of the instance. Will be used in logging and when sending status messages |
-| logLevel                  | AIRGAP_DOWNSTREAM_LOG_LEVEL  |          |  debug, info, error, warn, fatal  |
-| nic                      | AIRGAP_DOWNSTREAM_NIC      |               | What nic to use for binding the UDP port |
-| targetIP                 | AIRGAP_DOWNSTREAM_TARGET_IP  |               | Ip address to bind to |
-| targetPort               | AIRGAP_DOWNSTREAM_TARGET_PORT |               | Port to bind to |
-| bootstrapServers         | AIRGAP_DOWNSTREAM_BOOTSTRAP_SERVERS |               | Bootstrap url for Kafka, with port |
-| clientId                 | AIRGAP_DOWNSTREAM_CLIENT_ID    |               | Id to use when writing to Kafka |
-| mtu                      | AIRGAP_DOWNSTREAM_MTU      | 0             | 0 - ask the NIC for the MTU, else enter a positive integer |
-| target                   | AIRGAP_DOWNSTREAM_TARGET   | kafka         | kafka, cmd and null are valid values. cmd will print the output to the console, null will just forget the received message but collect statistics of received events to calculate EPS when terminated. |
-| privateKeyFiles          | AIRGAP_DOWNSTREAM_PRIVATE_KEY_FILES |               | Glob covering all private key files to load |
-| logFileName              | AIRGAP_DOWNSTREAM_LOG_FILE_NAME |          | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
-| certFile                 | AIRGAP_DOWNSTREAM_CERT_FILE |               | For TLS to Kafka, add a certificate pem encoded file here |
-| keyFile                  | AIRGAP_DOWNSTREAM_KEY_FILE  |               | The private key for the certFile certificate |
-| keyPasswordFile     | AIRGAP_UPSTREAM_KEY_PASSWORD_FILE |       | Path to a file containing the password to decrypt an encrypted keyFile |
-| caFile                   | AIRGAP_DOWNSTREAM_CA_FILE   |               | The CA that issued the Kafka server's certificate |
-| internalTopic            | AIRGAP_DOWNSTREAM_INTERNAL_TOPIC    |  airgap-internal  | Topic name in Kafka to write to (internal logging). Topic name for events from the upstream topics will have the same name as the upstream topic, if not translated by the setting AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |
-| topicTranslations        | AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |            | Rename topics with a specified name to another name. Used in multi downstreams setup (see Redundancy and Load Balancing.md) |
-| logStatistics            | AIRGAP_DOWNSTREAM_LOG_STATISTICS  | 0             | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
-| numReceivers             | AIRGAP_DOWNSTREAM_NUM_RECEIVERS   | 1             | Number of UDP receivers to start that concurrently binds to the targetPort |
-| channelBufferSize        | AIRGAP_DOWNSTREAM_CHANNEL_BUFFER_SIZE   | 16384   | Size of the buffered Go channel used between the UDP socket reader goroutines and the worker goroutines in the UDP receiver. It determines how many UDP packets can be queued in memory between being read from the socket and being processed. |
-| batchSize                | AIRGAP_DOWNSTREAM_BATCH_SIZE  | 32            | How many messages are grouped together and sent to Kafka in a single batch |
-| readBufferMultiplier     | AIRGAP_DOWNSTREAM_READ_BUFFER_MULTIPLIER | 16     | Size of the user-space buffer allocated for each UDP socket read operation. The buffer size is calculated as: `buffer size = mtu * readBufferMultiplier` |
-| rcvBufSize               | AIRGAP_DOWNSTREAM_RCV_BUF_SIZE              | 4194304 (4MiB) | Size (in bytes) of the OS-level receive buffer for each UDP socket, set via the SO_RCVBUF socket option. It controls how much incoming UDP data the kernel can buffer for the application before packets are dropped due to the application not reading fast enough. |
+| ------------------------- | ------------------------- | ------------- | ----------- |
+| id | AIRGAP_DOWNSTREAM_ID | | Name of the instance. Will be used in logging and when sending status messages |
+| logLevel | AIRGAP_DOWNSTREAM_LOG_LEVEL | | debug, info, error, warn, fatal |
+| nic | AIRGAP_DOWNSTREAM_NIC | | What nic to use for binding the UDP port |
+| targetIP | AIRGAP_DOWNSTREAM_TARGET_IP | | Ip address to bind to |
+| targetPort | AIRGAP_DOWNSTREAM_TARGET_PORT | | Port to bind to |
+| bootstrapServers | AIRGAP_DOWNSTREAM_BOOTSTRAP_SERVERS | | Bootstrap url for Kafka, with port |
+| clientId | AIRGAP_DOWNSTREAM_CLIENT_ID | | Id to use when writing to Kafka |
+| mtu | AIRGAP_DOWNSTREAM_MTU | 0 | 0 - ask the NIC for the MTU, else enter a positive integer |
+| target | AIRGAP_DOWNSTREAM_TARGET | kafka | kafka, cmd and null are valid values. cmd will print the output to the console, null will just forget the received message but collect statistics of received events to calculate EPS when terminated. |
+| transport | AIRGAP_DOWNSTREAM_TRANSPORT | udp | Transport protocol to use: udp or tcp. Use tcp when no diode is needed |
+| privateKeyFiles | AIRGAP_DOWNSTREAM_PRIVATE_KEY_FILES | | Glob covering all private key files to load |
+| logFileName | AIRGAP_DOWNSTREAM_LOG_FILE_NAME | | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
+| certFile | AIRGAP_DOWNSTREAM_CERT_FILE | | For TLS to Kafka, add a certificate pem encoded file here |
+| keyFile | AIRGAP_DOWNSTREAM_KEY_FILE | | The private key for the certFile certificate |
+| keyPasswordFile | AIRGAP_UPSTREAM_KEY_PASSWORD_FILE | | Path to a file containing the password to decrypt an encrypted keyFile |
+| caFile | AIRGAP_DOWNSTREAM_CA_FILE | | The CA that issued the Kafka server's certificate |
+| internalTopic | AIRGAP_DOWNSTREAM_INTERNAL_TOPIC | airgap-internal | Topic name in Kafka to write to (internal logging). Topic name for events from the upstream topics will have the same name as the upstream topic, if not translated by the setting AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |
+| topicTranslations | AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS | | Rename topics with a specified name to another name. Used in multi downstreams setup (see Redundancy and Load Balancing.md) |
+| logStatistics | AIRGAP_DOWNSTREAM_LOG_STATISTICS | 0 | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
+| numReceivers | AIRGAP_DOWNSTREAM_NUM_RECEIVERS | 1 | Number of UDP receivers to start that concurrently binds to the targetPort |
+| channelBufferSize | AIRGAP_DOWNSTREAM_CHANNEL_BUFFER_SIZE | 16384 | Size of the buffered Go channel used between the UDP socket reader goroutines and the worker goroutines in the UDP receiver. It determines how many UDP packets can be queued in memory between being read from the socket and being processed. |
+| batchSize | AIRGAP_DOWNSTREAM_BATCH_SIZE | 32 | How many messages are grouped together and sent to Kafka in a single batch |
+| readBufferMultiplier | AIRGAP_DOWNSTREAM_READ_BUFFER_MULTIPLIER | 16 | Size of the user-space buffer allocated for each UDP socket read operation. The buffer size is calculated as: `buffer size = mtu * readBufferMultiplier` |
+| rcvBufSize | AIRGAP_DOWNSTREAM_RCV_BUF_SIZE | 4194304 (4MiB) | Size (in bytes) of the OS-level receive buffer for each UDP socket, set via the SO_RCVBUF socket option. It controls how much incoming UDP data the kernel can buffer for the application before packets are dropped due to the application not reading fast enough. |
 
 ### Configuration Examples
 
@@ -744,55 +761,4 @@ See LICENSE file
 
 ## Release Notes
 
-### 0.1.7-SNAPSHOT
-
-- Fixed the following issues:
-  - Support encrypted key files for communication with Kafka #5
-
-### 0.1.6-SNAPSHOT
-
-- Removed `topic` configuration from downstream. Downstream uses upstream's topic name, or a translation of that name.
-- Fixed the following issues:
-  - resend will not accept payloadSize=auto #1
-  - Separate internal logging from event stream from Upstream Kafka #2
-  - Dedup can't use TLS to connect to Kafka #3
-
-### 0.1.5-SNAPSHOT
-
-- Multiple sockets with SO_REUSEPORT for faster and more reliable UDP receive in Linux and Mac for downstream. Fallback to single thread in Windows.
-- `create` application to create resend bundle files downstream
-- `resend` application to resend missing events from the resend bundle created by `create`
-- `compressWhenLengthExceeds` setting for upstream and resend to compress messages when length exceeds this value. As of now gzip is the only supported algorithm.
-- More configuration for upstream and downstream for buffer size optimizations
-- Upstream and downstream can translate topic names to other names. Useful in multi source and/or target setups.
-- Statistics logging in upstream, downstream and dedup
-
-### 0.1.4-SNAPSHOT
-
-- Changed the logging for the go applications to include log levels. Monitoring and log updates.
-- Changed the logging for the go applications to include log levels. Monitoring and log updates.
-- Documented redundancy and load balancing (see doc folder)
-- Documented resend (future updates will implement the new resend algorithm)
-
-### 0.1.3-SNAPSHOT
-
-- Added a Kafka Streams Java Application for deduplication and gap detection. Gap detection not finished.
-- Added upstreams filter to filter on the offset number for each partition (used in redundancy an load balancing setups)
-- Added a topic name mapping in downstream so a topic with a specified name upstream can be written to another topic downstream (used in redundancy an load balancing setups)
-- Added documentation for the new features.
-- Added JMX monitoring of the deduplication application. Added system monitoring documentation
-
-### 0.1.2-SNAPSHOT
-
-- All configuration from files can be overridden by environment variables. See Configuration Upstream
-- UDP sending have been made more robust
-- Transfer of binary data from upstream to downstream is now supported
-- Sending a sighup to upstream or downstream will now force a re-write of the log file, so you can rotate the log file and then sighup the application to make it log to a new file with the name specified in the upstream or downstream configuration.
-- air-gap now supports TLS and mTLS to Kafka upstream and downstream.
-- air-gap now supports TLS and mTLS to Kafka upstream and downstream.
-
-### 0.1.1-SNAPSHOT
-
-#### Several sending threads
-
-air-gap now supports several sending threads that all have a specified time offset, so you can start one thread that consumes everything from Kafka as soon as it's available, one that inspects Kafka content that was added for an hour ago and so on. See Automatic resend above.
+Release notes have been moved to a separate document: [Release-Notes.md](Release-Notes.md)

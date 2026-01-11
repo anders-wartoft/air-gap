@@ -15,7 +15,7 @@ include build/test.mk
 
 .PHONY: all clean help
 
-all: build-go build-java
+all: build-go-all build-java
 	@echo "✅ All components built successfully"
 
 help:
@@ -23,8 +23,12 @@ help:
 	@echo "===================="
 	@echo ""
 	@echo "Build Targets:"
-	@echo "  make all                    - Build everything (Go + Java)"
-	@echo "  make build-go               - Build all Go binaries"
+	@echo "  make all                    - Build everything (Go all archs + Java)"
+	@echo "  make build-go               - Build Go binaries (Linux AMD64)"
+	@echo "  make build-go-all           - Build Go binaries (all architectures)"
+	@echo "  make build-go-linux-amd64   - Build Go binaries (Linux AMD64)"
+	@echo "  make build-go-linux-arm64   - Build Go binaries (Linux ARM64)"
+	@echo "  make build-go-mac-arm64     - Build Go binaries (macOS ARM64)"
 	@echo "  make build-java             - Build Java deduplication JAR"
 	@echo ""
 	@echo "Package Targets:"

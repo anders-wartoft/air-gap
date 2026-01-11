@@ -4,7 +4,7 @@
   <groupId>nu.sitia.airgap.streams</groupId>
   <artifactId>air-gap-deduplication</artifactId>
   <packaging>jar</packaging>
-  <version>1</version>
+  <version>0.1.7-SNAPSHOT</version>
   <name>air-gap Deduplication</name>
   <url>http://maven.apache.org</url>
   <dependencies>

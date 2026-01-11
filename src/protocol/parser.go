@@ -76,7 +76,7 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 	idLength := binary.BigEndian.Uint16(idLengthBytes)
 	sofar = 7
 
-	if idLength > length - minimumPackageLength {
+	if idLength > length-minimumPackageLength {
 		// Cannot possibly be a valid message
 		return TYPE_ERROR, "", nil, fmt.Errorf("too long message id length. Won't parse. Length is: %d", idLength)
 	}
@@ -98,11 +98,11 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 	payloadLengthBytes := message[11+idLength : 13+idLength]
 	payloadLength := binary.BigEndian.Uint16(payloadLengthBytes)
 	sofar += 2
-	if payloadLength > length - minimumPackageLength - idLength {
+	if payloadLength > length-minimumPackageLength-idLength {
 		// Cannot possibly be a valid message
 		return TYPE_ERROR, "", nil, fmt.Errorf("reading payloadLength bytes will proceed outside of the message. Message length: %d, max pointer: %d",
 			length,
-			length - minimumPackageLength)
+			length-minimumPackageLength)
 	}
 
 	// Next payloadLength bytes are the payload
@@ -119,11 +119,8 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 	calculatedChecksum := CalculateChecksum(payload)
 	if calculatedChecksum != checksum && shouldValidateChecksum() {
 		// The message was not transmitted properly.
-		// drop
-		panic("In if")
 		return TYPE_ERROR, "", nil, errors.New("invalid checksum")
 	}
-	panic("Out of if")
 
 	if nrMessages > 1 {
 		// Multi part message

@@ -20,6 +20,7 @@ TARGET_DIR := target
 DIST_DIR := $(TARGET_DIR)/dist
 LINUX_AMD64_DIR := $(TARGET_DIR)/linux-amd64
 LINUX_ARM64_DIR := $(TARGET_DIR)/linux-arm64
+MAC_ARM64_DIR := $(TARGET_DIR)/darwin-arm64
 JAVA_TARGET_DIR := java-streams/target
 
 # nfpm Configuration

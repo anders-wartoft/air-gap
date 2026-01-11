@@ -13,3 +13,4 @@ plan/
 # Build system
 .build-number-incremented
 **/pom.xml.versionsBackup
+src/version/version.go

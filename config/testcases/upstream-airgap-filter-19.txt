@@ -1,0 +1,10 @@
+# Block common PII patterns
+# SSN
+deny:\b\d{3}-\d{2}-\d{4}\b
+# Email (case-insensitive)
+deny:(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}
+# Credit cards
+deny:\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b
+# Credentials
+deny:(?i)(password|passwd|pwd|secret|token|api_key)\s*[:=]
+# Allow everything else

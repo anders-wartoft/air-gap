@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -65,10 +66,25 @@ var keepRunning = true
 
 var receivedEvents int64
 var sentEvents int64
+var filteredEvents int64
+var unfilteredEvents int64
+var filterTimeouts int64
 var totalReceived int64
 var totalSent int64
+var totalFiltered int64
+var totalUnfiltered int64
+var totalFilterTimeouts int64
 var timeStart int64
-var lastUdpErrorLog time.Time
+
+// Transport status tracking
+var transportStatusMu sync.Mutex
+var transportStatus string = "running"         // "running" or error message
+var previousTransportStatus string = "running" // Track previous status for change detection
+
+// Kafka status tracking
+var kafkaStatusMu sync.Mutex
+var kafkaStatus string = "running"         // "running" or error message
+var previousKafkaStatus string = "running" // Track previous status for change detection
 
 var Logger = logging.Logger
 var BuildNumber = "dev"
@@ -85,6 +101,21 @@ func translateTopic(input string) string {
 		return output
 	}
 	return input
+}
+
+// UpdateKafkaStatus updates the Kafka connection status and logs changes
+func UpdateKafkaStatus(newStatus string) {
+	kafkaStatusMu.Lock()
+	if kafkaStatus != newStatus {
+		previousKafkaStatus = kafkaStatus
+		kafkaStatus = newStatus
+		if newStatus == "running" {
+			Logger.Infof("Kafka status restored to running (was: %s)", previousKafkaStatus)
+		} else {
+			Logger.Errorf("Kafka status changed to error: %s (was: %s)", newStatus, previousKafkaStatus)
+		}
+	}
+	kafkaStatusMu.Unlock()
 }
 
 func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
@@ -111,18 +142,42 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 				time.Sleep(interval)
 				recv := atomic.SwapInt64(&receivedEvents, 0)
 				sent := atomic.SwapInt64(&sentEvents, 0)
+				filtered := atomic.SwapInt64(&filteredEvents, 0)
+				unfiltered := atomic.SwapInt64(&unfilteredEvents, 0)
+				filterTimeoutsInterval := atomic.SwapInt64(&filterTimeouts, 0)
 				totalRecv := atomic.LoadInt64(&totalReceived)
 				totalSnt := atomic.LoadInt64(&totalSent)
+				totalFilt := atomic.LoadInt64(&totalFiltered)
+				totalUnfilt := atomic.LoadInt64(&totalUnfiltered)
+				totalFiltTimeouts := atomic.LoadInt64(&totalFilterTimeouts)
+
+				// Get current transport and Kafka status
+				transportStatusMu.Lock()
+				transportStatus := transportStatus
+				transportStatusMu.Unlock()
+
+				kafkaStatusMu.Lock()
+				kafkaStatus := kafkaStatus
+				kafkaStatusMu.Unlock()
+
 				stats := map[string]any{
-					"id":             config.id,
-					"time":           time.Now().Unix(),
-					"time_start":     timeStart,
-					"interval":       config.logStatistics,
-					"received":       recv,
-					"sent":           sent,
-					"eps":            recv / int64(config.logStatistics),
-					"total_received": totalRecv,
-					"total_sent":     totalSnt,
+					"id":                    config.id,
+					"time":                  time.Now().Unix(),
+					"time_start":            timeStart,
+					"interval":              config.logStatistics,
+					"received":              recv,
+					"sent":                  sent,
+					"filtered":              filtered,
+					"unfiltered":            unfiltered,
+					"filter_timeouts":       filterTimeoutsInterval,
+					"eps":                   recv / int64(config.logStatistics),
+					"total_received":        totalRecv,
+					"total_sent":            totalSnt,
+					"total_filtered":        totalFilt,
+					"total_unfiltered":      totalUnfilt,
+					"total_filter_timeouts": totalFiltTimeouts,
+					"transport_status":      transportStatus,
+					"kafka_status":          kafkaStatus,
 				}
 				if Logger.CanLog(logging.INFO) {
 					b, _ := json.Marshal(stats)
@@ -152,9 +207,9 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 	// Send startup status message
 	messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 		fmt.Appendf(nil, "%s Upstream %s starting up...", protocol.GetTimestamp(), config.id), config.payloadSize)
-	udpErr := udpClient.SendMessage(messages[0])
-	if udpErr != nil {
-		Logger.Errorf("Failed sending startup message (will continue): %v", udpErr)
+	transportErr := udpClient.SendMessage(messages[0])
+	if transportErr != nil {
+		Logger.Errorf("Failed sending startup message (will continue): %v", transportErr)
 	}
 
 	// Encryption
@@ -185,7 +240,6 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 
 	// ----- Kafka handler -----
 	Logger.Debug("Setting up Kafka handler")
-	
 
 	// ----- Source: Kafka or Random or a mock object for unit testing -----
 	Logger.Printf("Reading from %s %s", config.source, config.bootstrapServers)
@@ -221,105 +275,170 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 		}(thread)
 	}
 }
-func kafkaHandler (timeFrom time.Time, udpClient UDPClient, id string, _ []byte, t time.Time, received []byte) bool {
-		atomic.AddInt64(&receivedEvents, 1)
-		atomic.AddInt64(&totalReceived, 1)
+func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, t time.Time, received []byte) bool {
+	atomic.AddInt64(&receivedEvents, 1)
+	atomic.AddInt64(&totalReceived, 1)
 
+	if Logger.CanLog(logging.DEBUG) {
+		Logger.Debugf("kafkaHandler called for id=%s, time=%s", id, t.Format(time.RFC3339))
+	}
+	// Discard old messages, before "from"
+	if t.Before(timeFrom) {
 		if Logger.CanLog(logging.DEBUG) {
-			Logger.Debugf("kafkaHandler called for id=%s, time=%s", id, t.Format(time.RFC3339))
+			Logger.Debugf("Discarding old message: %s time %s before from %s", id, t.Format(time.RFC3339), timeFrom.Format(time.RFC3339))
 		}
-		// Discard old messages, before "from"
-		if t.Before(timeFrom) {
+		return keepRunning
+	}
+
+	// Input filtering based on payload content (before topic translation and deliver filter)
+	if config.inputFilter != nil {
+		shouldFilter, err := config.inputFilter.ShouldFilterOut(received)
+		if err != nil {
+			Logger.Errorf("Error applying input filter: %v", err)
+			// Check if it's a timeout error
+			if strings.Contains(err.Error(), "timeout") {
+				atomic.AddInt64(&filterTimeouts, 1)
+				atomic.AddInt64(&totalFilterTimeouts, 1)
+			}
+			// On error, fail open (don't filter)
+		} else if shouldFilter {
+			atomic.AddInt64(&filteredEvents, 1)
+			atomic.AddInt64(&totalFiltered, 1)
 			if Logger.CanLog(logging.DEBUG) {
-				Logger.Debugf("Discarding old message: %s time %s before from %s", id, t.Format(time.RFC3339), timeFrom.Format(time.RFC3339))
+				Logger.Debugf("Input filter blocked message: %s", id)
+			}
+			return keepRunning
+		} else {
+			// Message passed the input filter
+			atomic.AddInt64(&unfilteredEvents, 1)
+			atomic.AddInt64(&totalUnfiltered, 1)
+		}
+	}
+
+	// Filtering and topic name translation
+	if config.filter != nil {
+		parts := strings.Split(id, "_")
+		if len(parts) == 3 {
+			if offset, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
+				if !config.filter.Check(offset) {
+					if Logger.CanLog(logging.DEBUG) {
+						Logger.Debugf("Filtered out message: %s", id)
+					}
+					return keepRunning
+				}
+			}
+			// We might change the topic name here as well
+			parts[0] = translateTopic(parts[0])
+			id = strings.Join(parts, "_")
+		}
+	}
+	// Compress or not
+	var isCompressed = false
+	if config.compressWhenLengthExceeds > 0 && len(received) > config.compressWhenLengthExceeds {
+		compressed, err := protocol.CompressGzip(received)
+		if err != nil {
+			Logger.Errorf("Error compressing data: %s", err)
+		} else {
+			isCompressed = true
+			received = compressed
+		}
+	}
+
+	// Encrypt or not
+	var messages [][]byte
+	var err error
+	var messageType uint8
+	if config.encryption {
+		var ciphertext []byte
+		ciphertext, err = protocol.Encrypt(received, config.key)
+		if isCompressed {
+			messageType = protocol.Merge(protocol.TYPE_MESSAGE, protocol.TYPE_COMPRESSED_GZIP)
+		} else {
+			messageType = protocol.Merge(protocol.TYPE_MESSAGE, 0)
+		}
+		messages = protocol.FormatMessage(messageType, id, ciphertext, config.payloadSize)
+	} else {
+		if isCompressed {
+			messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, protocol.TYPE_COMPRESSED_GZIP)
+		} else {
+			messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, 0)
+		}
+		messages = protocol.FormatMessage(messageType, id, received, config.payloadSize)
+	}
+	if err != nil {
+		Logger.Error(err)
+	}
+
+	if Logger.CanLog(logging.DEBUG) {
+		Logger.Debugf("sending %d %s messages for id=%s", len(messages), config.transport, id)
+	}
+
+	// Send with retry logic - prevents message loss if receiver is temporarily unavailable
+	// We retry aggressively to avoid telling Kafka to reprocess (which causes consumer group rebalancing)
+	const maxRetries = 30       // 30 attempts
+	const retryIntervalMs = 100 // 100ms between attempts = 3 seconds total wait
+	var transportErr error
+	var hadFailure bool
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		transportErr = udpClient.SendMessages(messages)
+		if transportErr == nil {
+			// Success - update counters and status
+			atomic.AddInt64(&sentEvents, int64(len(messages)))
+			atomic.AddInt64(&totalSent, int64(len(messages)))
+
+			// Clear error status if send succeeded
+			transportStatusMu.Lock()
+			if transportStatus != "running" {
+				previousTransportStatus = transportStatus
+				transportStatus = "running"
+				Logger.Infof("Transport status restored to running (was: %s)", previousTransportStatus)
+			}
+			transportStatusMu.Unlock()
+
+			// Log if we had failures but eventually succeeded
+			if hadFailure {
+				// For UDP, transient errors don't guarantee delivery - log with caution
+				if config.transport == "udp" {
+					Logger.Warnf("Message id=%s sent after %d attempt(s) - UDP delivery is not guaranteed (receiver may be down)", id, attempt)
+				} else {
+					Logger.Infof("Message id=%s successfully sent after %d attempt(s)", id, attempt)
+				}
 			}
 			return keepRunning
 		}
 
-		// Filtering and topic name translation
-		if config.filter != nil {
-			parts := strings.Split(id, "_")
-			if len(parts) == 3 {
-				if offset, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
-					if !config.filter.Check(offset) {
-						if Logger.CanLog(logging.DEBUG) {
-							Logger.Debugf("Filtered out message: %s", id)
-						}
-						return keepRunning
-					}
-				}
-				// We might change the topic name here as well
-				parts[0] = translateTopic(parts[0])
-				id = strings.Join(parts, "_")
+		// Send failed - prepare for retry with backoff
+		hadFailure = true
+		if attempt < maxRetries {
+			if Logger.CanLog(logging.DEBUG) && attempt <= 3 {
+				// Only log first 3 attempts to avoid log spam
+				Logger.Debugf("Send attempt %d/%d failed for id=%s: %v, retrying in %dms",
+					attempt, maxRetries, id, transportErr, retryIntervalMs)
 			}
+			time.Sleep(time.Duration(retryIntervalMs) * time.Millisecond)
 		}
-		// Compress or not
-		var isCompressed = false
-		if config.compressWhenLengthExceeds > 0 && len(received) > config.compressWhenLengthExceeds {
-			compressed, err := protocol.CompressGzip(received)
-			if err != nil {
-				Logger.Errorf("Error compressing data: %s", err)
-			} else {
-				isCompressed = true
-				received = compressed
-			}
-		}
-
-		// Encrypt or not
-		var messages [][]byte
-		var err error
-		var messageType uint8
-		if config.encryption {
-			var ciphertext []byte
-			ciphertext, err = protocol.Encrypt(received, config.key)
-			if isCompressed {
-				messageType = protocol.Merge(protocol.TYPE_MESSAGE, protocol.TYPE_COMPRESSED_GZIP)
-			} else {
-				messageType = protocol.Merge(protocol.TYPE_MESSAGE, 0)
-			}
-			messages = protocol.FormatMessage(messageType, id, ciphertext, config.payloadSize)
-		} else {
-			if isCompressed {
-				messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, protocol.TYPE_COMPRESSED_GZIP)
-			} else {
-				messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, 0)
-			}
-			messages = protocol.FormatMessage(messageType, id, received, config.payloadSize)
-		}
-		if err != nil {
-			Logger.Error(err)
-		}
-
-		if Logger.CanLog(logging.DEBUG) {
-			Logger.Debugf("sending %d UDP messages for id=%s", len(messages), id)
-		}
-
-		udpErr := udpClient.SendMessages(messages)
-		if udpErr == nil {
-			atomic.AddInt64(&sentEvents, int64(len(messages)))
-			atomic.AddInt64(&totalSent, int64(len(messages)))
-		} else {
-			// Rate limit UDP error logging to once per minute to avoid log spam
-			// when downstream is not available, but continue sending
-			now := time.Now()
-			if now.Sub(lastUdpErrorLog) >= time.Minute {
-				Logger.Errorf("UDP send error (will retry, logging once per minute): %v", udpErr)
-				lastUdpErrorLog = now
-			}
-			// Note: We don't stop sending, UDP will continue attempting delivery
-		}
-
-		// Key rotation
-		if config.encryption && config.generateNewSymmetricKeyEvery > 0 &&
-			time.Now().After(nextKeyGeneration) && config.publicKeyFile != "" {
-			if adapter, ok := udpClient.(*UDPAdapter); ok {
-				sendNewKey(adapter.conn)
-			} else {
-				Logger.Error("udpClient is not of type *UDPAdapter")
-			}
-		}
-		return keepRunning
 	}
+
+	// All retries failed - update status and don't consume the message
+	transportStatusMu.Lock()
+	newStatus := transportErr.Error()
+	if transportStatus != newStatus {
+		previousTransportStatus = transportStatus
+		transportStatus = newStatus
+		Logger.Errorf("Transport status changed to error: %s (was: %s)", newStatus, previousTransportStatus)
+	} else if transportStatus != "running" {
+		transportStatus = newStatus
+	}
+	transportStatusMu.Unlock()
+
+	// Return false to prevent this message from being marked as consumed
+	// The message will be reprocessed when the receiver comes back up
+	// Note: This should be rare as we retry for ~3 seconds before giving up
+	Logger.Errorf("Failed to send message id=%s after %d retries (%dms): %v. Message will be retried.",
+		id, maxRetries, maxRetries*retryIntervalMs, transportErr)
+	return false
+}
 
 func Main(build string) {
 	BuildNumber = build
@@ -368,11 +487,27 @@ func Main(build string) {
 	// Log config
 	logConfiguration(config)
 
-	// Create UDP
+	// Create transport adapter (UDP or TCP)
 	address := fmt.Sprintf("%s:%d", config.targetIP, config.targetPort)
-	udpAdapter, err := NewUDPAdapter(address)
-	if err != nil {
-		Logger.Fatalf("Error creating UDP: %v", err)
+	var transportAdapter TransportClient
+
+	switch config.transport {
+	case "tcp":
+		Logger.Printf("Creating TCP transport to %s", address)
+		adapter, errTCP := NewTCPAdapter(address)
+		if errTCP != nil {
+			Logger.Fatalf("Error creating TCP adapter: %v", errTCP)
+		}
+		transportAdapter = adapter
+	case "udp":
+		Logger.Printf("Creating UDP transport to %s", address)
+		adapter, errUDP := NewUDPAdapter(address)
+		if errUDP != nil {
+			Logger.Fatalf("Error creating UDP adapter: %v", errUDP)
+		}
+		transportAdapter = adapter
+	default:
+		Logger.Fatalf("Unknown transport: %s", config.transport)
 	}
 
 	// Choose Kafka adapter
@@ -387,7 +522,7 @@ func Main(build string) {
 	}
 
 	// Run upstream
-	go RunUpstream(kafkaAdapter, udpAdapter)
+	go RunUpstream(kafkaAdapter, transportAdapter)
 
 	// Wait for exit signals
 	for {
@@ -396,8 +531,8 @@ func Main(build string) {
 			Logger.Printf("Received SIGTERM, shutting down")
 			messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 				fmt.Appendf(nil, "%s Upstream %s terminating by signal...", protocol.GetTimestamp(), config.id), config.payloadSize)
-			udpAdapter.SendMessage(messages[0])
-			udpAdapter.Close()
+			transportAdapter.SendMessage(messages[0])
+			transportAdapter.Close()
 			return
 		case <-hup:
 			Logger.Printf("SIGHUP received: reopening logs for logrotate. New name: %s", config.logFileName)
