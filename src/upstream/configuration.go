@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rsa"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -238,6 +239,8 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 			} else {
 				if tmp < 0 {
 					Logger.Fatalf("Error in config logStatistics. Illegal value: %s. Legal values are a non-negative integer", value)
+				} else if tmp > math.MaxInt32 {
+					Logger.Fatalf("Error in config logStatistics. Illegal value: %s. Legal values are a non-negative integer below %d", value, math.MaxInt32)
 				} else {
 					result.logStatistics = int32(tmp)
 					Logger.Printf("logStatistics: %d", result.logStatistics)
@@ -418,6 +421,9 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	}
 	if logStatistics := os.Getenv(prefix + "LOG_STATISTICS"); logStatistics != "" {
 		if logStatisticsInt, err := strconv.Atoi(logStatistics); err == nil {
+			if logStatisticsInt < 0 || logStatisticsInt > math.MaxInt32 {
+				Logger.Fatalf("Error in config LOG_STATISTICS. Illegal value: %s. Legal values are a non-negative integer below %d", logStatistics, math.MaxInt32)
+			}
 			Logger.Print("Overriding logStatistics with environment variable: " + prefix + "LOG_STATISTICS" + " with value: " + logStatistics)
 			config.logStatistics = int32(logStatisticsInt)
 		}
