@@ -362,6 +362,8 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			if mtuInt < 0 || mtuInt > 65535 {
 				Logger.Fatalf("Error in config MTU. Illegal value: %s. Legal values are 'auto' or 0-65535", mtu)
 			}
+			// Safe: mtuInt is checked to fit in uint16 above, and Logger.Fatalf terminates execution if not.
+			// codeql[incorrect-integer-conversion]: value is checked and fatal error terminates on overflow
 			config.mtu = uint16(mtuInt)
 		}
 	}

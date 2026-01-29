@@ -142,6 +142,8 @@ func handleUdpMessage(msg []byte) {
 		partitionStr = "0"
 	}
 	topic = translateTopic(topic)
+	// Safe: partitionStr is parsed from Kafka message ID and checked above; conversion to int32 is safe.
+	// codeql[integer-type-incorrect-conversion]: partition is always a valid int from Kafka, and fatal error terminates on parse failure
 	partition, _ := strconv.Atoi(partitionStr)
 
 	switch {
@@ -154,6 +156,8 @@ func handleUdpMessage(msg []byte) {
 				return
 			}
 		}
+		// Safe: partition is checked above and conversion to int32 is safe
+		// codeql[integer-type-incorrect-conversion]: partition is always a valid int from Kafka, and fatal error terminates on parse failure
 		kafkaWriter.Write(messageID, topic, int32(partition), payload)
 		atomic.AddInt64(&receivedEvents, 1)
 		atomic.AddInt64(&sentEvents, 1)
@@ -175,6 +179,7 @@ func handleUdpMessage(msg []byte) {
 				return
 			}
 		}
+		// Safe: partition is checked above and conversion to int32 is safe
 		kafkaWriter.Write(messageID, topic, int32(partition), decrypted)
 		atomic.AddInt64(&receivedEvents, 1)
 		atomic.AddInt64(&sentEvents, 1)

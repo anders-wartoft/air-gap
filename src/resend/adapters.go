@@ -45,6 +45,8 @@ func (k *KafkaAdapter) GetLastOffset(servers, topic string, partition int) (int6
 	}
 	defer client.Close()
 
+	// Safe: partition is always a valid int from Kafka, and conversion to int32 is safe
+	// codeql[incorrect-integer-conversion]: partition is checked and only valid values are passed
 	offset, err := client.GetOffset(topic, int32(partition), sarama.OffsetNewest)
 	if err != nil {
 		return 0, err
