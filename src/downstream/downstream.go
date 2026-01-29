@@ -156,8 +156,10 @@ func handleUdpMessage(msg []byte) {
 				return
 			}
 		}
-		// Safe: partition is checked above and conversion to int32 is safe
-		// codeql[integer-type-incorrect-conversion]: partition is always a valid int from Kafka, and fatal error terminates on parse failure
+		if partition < 0 || partition > 2147483647 {
+			Logger.Fatalf("Partition out of int32 range: %d", partition)
+			os.Exit(1)
+		}
 		kafkaWriter.Write(messageID, topic, int32(partition), payload)
 		atomic.AddInt64(&receivedEvents, 1)
 		atomic.AddInt64(&sentEvents, 1)
@@ -179,7 +181,10 @@ func handleUdpMessage(msg []byte) {
 				return
 			}
 		}
-		// Safe: partition is checked above and conversion to int32 is safe
+		if partition < 0 || partition > 2147483647 {
+			Logger.Fatalf("Partition out of int32 range: %d", partition)
+			os.Exit(1)
+		}
 		kafkaWriter.Write(messageID, topic, int32(partition), decrypted)
 		atomic.AddInt64(&receivedEvents, 1)
 		atomic.AddInt64(&sentEvents, 1)

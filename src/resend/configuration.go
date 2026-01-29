@@ -371,6 +371,7 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			}
 			if value < 0 || value > 65535 {
 				Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values must fit in uint16 (0-65535)", value)
+				os.Exit(1)
 			}
 			Logger.Print("Overriding payloadSize with environment variable: " + prefix + "PAYLOAD_SIZE" + " with value: " + payloadSize)
 			// Safe: value is checked to fit in uint16 above, and Logger.Fatalf terminates execution if not.
@@ -488,9 +489,9 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				}
 				if payloadSize < 0 || payloadSize > 65535 {
 					Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values must fit in uint16 (0-65535)", payloadSize)
+					os.Exit(1)
 				}
 				// Safe: payloadSize is checked to fit in uint16 above, and Logger.Fatalf terminates execution if not.
-				// codeql[incorrect-integer-conversion]: value is checked and fatal error terminates on overflow
 				config.payloadSize = uint16(payloadSize)
 			case "eps":
 				v, err := strconv.ParseFloat(value, 64)

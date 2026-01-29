@@ -358,6 +358,7 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		} else if payloadSizeInt, err := strconv.Atoi(payloadSize); err == nil {
 			if payloadSizeInt < 0 || payloadSizeInt > 65535 {
 				Logger.Fatalf("Error in config PAYLOAD_SIZE. Illegal value: %s. Legal values are 'auto' or 0-65535", payloadSize)
+				os.Exit(1)
 			}
 			// Safe: payloadSizeInt is checked to fit in uint16 above, and Logger.Fatalf terminates execution if not.
 			// codeql[incorrect-integer-conversion]: value is checked and fatal error terminates on overflow
@@ -427,6 +428,7 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		if logStatisticsInt, err := strconv.Atoi(logStatistics); err == nil {
 			if logStatisticsInt < 0 || logStatisticsInt > math.MaxInt32 {
 				Logger.Fatalf("Error in config LOG_STATISTICS. Illegal value: %s. Legal values are a non-negative integer below %d", logStatistics, math.MaxInt32)
+				os.Exit(1)
 			}
 			Logger.Print("Overriding logStatistics with environment variable: " + prefix + "LOG_STATISTICS" + " with value: " + logStatistics)
 			// Safe: logStatisticsInt is checked to fit in int32 above, and Logger.Fatalf terminates execution if not.
