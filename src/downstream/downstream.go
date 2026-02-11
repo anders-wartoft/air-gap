@@ -146,13 +146,16 @@ func handleUdpMessage(msg []byte) {
 
 	switch {
 	case protocol.IsMessageType(messageType, protocol.TYPE_CLEARTEXT):
+		Logger.Debug("Case cleartext")
 		if protocol.IsMessageType(messageType, protocol.TYPE_COMPRESSED_GZIP) {
-			payload, err = protocol.DecompressGzip(payload)
+			Logger.Debugf("Gzip, payload length", len(payload))
+			payload, err = protocol.DecompressGzip(payload, config.maximumDecompressSize)
 			if err != nil {
 				Logger.Errorf("Decompress error: %v", err)
 				sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
 				return
 			}
+			Logger.Debugf("unzipped, payload length", len(payload))
 		}
 		kafkaWriter.Write(messageID, topic, int32(partition), payload)
 		atomic.AddInt64(&receivedEvents, 1)
@@ -168,7 +171,7 @@ func handleUdpMessage(msg []byte) {
 			return
 		}
 		if protocol.IsMessageType(messageType, protocol.TYPE_COMPRESSED_GZIP) {
-			decrypted, err = protocol.DecompressGzip(decrypted)
+			decrypted, err = protocol.DecompressGzip(decrypted, config.maximumDecompressSize)
 			if err != nil {
 				Logger.Errorf("Decompress after decrypt error: %v", err)
 				sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
@@ -229,10 +232,12 @@ func logStatistics(stopChan <-chan struct{}) {
 				"total_sent":       atomic.LoadInt64(&totalSent),
 				"transport_status": transportStatus,
 				"kafka_status":     kafkaStatus,
+				"cache_entries":    cache.GetCacheSize(),
 			}
 			if Logger.CanLog(logging.INFO) {
 				b, _ := json.Marshal(stats)
 				Logger.Info("STATISTICS: " + string(b))
+
 			}
 		}
 	}

@@ -32,6 +32,12 @@ func (m *MessageCache) GetEntry(id string) (*MessageCacheEntry, error) {
 	return createMessageCacheEntry(), errors.New("no such key")
 }
 
+func (m *MessageCache) GetCacheSize() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.entries)
+}
+
 func (m *MessageCache) AddEntry(id string, messageId uint16, maxMessageId uint16, payload []byte) {
 	m.mu.Lock()
 	entry, ok := m.entries[id]
@@ -53,7 +59,6 @@ func (m *MessageCache) RemoveEntry(id string) {
 func (m *MessageCache) AddEntryValue(id string, messageId uint16, maxMessageId uint16, payload []byte) {
 	entry, _ := m.GetEntry(id)
 	m.mu.Lock()
-	Logger.Debugf("%v Updating cache item: %v slot %d with value: %s", GetTimestamp(), id, messageId, payload)
 	entry.val[messageId] = append([]byte(nil), payload...)
 	m.entries[id] = entry
 	m.mu.Unlock()
@@ -91,10 +96,15 @@ func (m *MessageCache) CleanList() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	start_time := time.Now()
+	Logger.Debugf("Starting cache cleanup task at %v", GetTimestamp())
+	cleaned_up_times := 0
 	for key, entry := range m.entries {
 		if entry.end.Before(time.Now()) {
-			Logger.Debugf("%v Removing cache item: %v", GetTimestamp(), key)
 			delete(m.entries, key)
+			cleaned_up_times++
 		}
 	}
+	Logger.Debugf("Cache cleanup finished after %i seconds. %i items was cleaned", time.Now().UTC().Second() - start_time.UTC().Second(), cleaned_up_times)
+
 }
