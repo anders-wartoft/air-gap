@@ -637,12 +637,3 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  inputFilterDefaultAction: %s", config.inputFilterDefaultAction)
 	Logger.Printf("  inputFilterTimeout: %dms", config.inputFilterTimeout)
 }
-
-func int64Pow(base int64, exp uint) int64 {
-	out := int64(1)
-	for _ = range exp {
-		out = out*base
-	}
-	return out
-}
-

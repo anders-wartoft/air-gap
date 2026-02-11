@@ -313,6 +313,7 @@ The property privateKeyFiles should point to one or more private key files that 
 | batchSize | AIRGAP_DOWNSTREAM_BATCH_SIZE | 32 | How many messages are grouped together and sent to Kafka in a single batch |
 | readBufferMultiplier | AIRGAP_DOWNSTREAM_READ_BUFFER_MULTIPLIER | 16 | Size of the user-space buffer allocated for each UDP socket read operation. The buffer size is calculated as: `buffer size = mtu * readBufferMultiplier` |
 | rcvBufSize | AIRGAP_DOWNSTREAM_RCV_BUF_SIZE | 4194304 (4MiB) | Size (in bytes) of the OS-level receive buffer for each UDP socket, set via the SO_RCVBUF socket option. It controls how much incoming UDP data the kernel can buffer for the application before packets are dropped due to the application not reading fast enough. |
+| maximumDecompressSize | AIRGAP_MAXIMUM_DECOMPRESS_SIZE | 268435456 (256MiB) | The maximum size, in bytes, downstream will try do decompress until it errors and drops the packet. Takes sufixes B, KiB, MiB, GiB or none (defaults to B). Can be set to "-1" for no limit |
 
 ### Configuration Examples
 
