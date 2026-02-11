@@ -373,6 +373,40 @@ Some problems that may arise are:
 - The UDP sending fails. Check that you have static arp (arp -s) and route (ip route add) enabled.
 - If the UDP connection is very unstable, then condider using two instances of upstream/downstream sending the same information over two different hardware diodes to the same Kafka and the same topic. Duplicates should be removed by the gap-detection so the result should be a more stable connection.
 
+### UDP Broadcast Duplication Issue
+
+When using UDP broadcast mode with multiple receiver threads bound to the same port (configured via `numReceivers`), each broadcast message may be received by all threads, resulting in duplicate delivery to Kafka. This occurs because broadcast packets are replicated to all bound sockets by default.
+
+**Solution:** Configure firewall rules to convert broadcast to unicast using DNAT (Destination Network Address Translation):
+
+```bash
+# Allow UDP traffic on your port
+sudo firewall-cmd --permanent --add-port=$PORT/udp
+
+# Convert broadcast to unicast (replace $IP with receiver's IP, $PORT with your UDP port)
+sudo firewall-cmd --permanent --direct --add-rule ipv4 nat PREROUTING 0 \
+  -d 255.255.255.255 -p udp --dport $PORT \
+  -j DNAT --to-destination $IP:$PORT
+
+# Apply the changes
+sudo firewall-cmd --reload
+```
+
+**Example:**
+
+```bash
+PORT=1234
+IP=192.168.1.100
+
+sudo firewall-cmd --permanent --add-port=1234/udp
+sudo firewall-cmd --permanent --direct --add-rule ipv4 nat PREROUTING 0 \
+  -d 255.255.255.255 -p udp --dport 1234 \
+  -j DNAT --to-destination 192.168.1.100:1234
+sudo firewall-cmd --reload
+```
+
+This configuration translates broadcast packets (255.255.255.255) to the specific receiver IP address, ensuring each packet is delivered only once to the application, allowing the kernel's load balancing (via SO_REUSEPORT) to distribute packets across receiver threads efficiently.
+
 ## Service
 
 The applications responds to os signals and can be installed as a service in, e.g., Linux.

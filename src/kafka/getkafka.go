@@ -167,6 +167,10 @@ func decryptLegacyPEM(block *pem.Block, password []byte) ([]byte, error) {
 }
 
 // deriveKey derives a key from password and salt using MD5 (OpenSSL EVP_BytesToKey)
+//
+// This use of MD5 is for compatibility with legacy OpenSSL-encrypted PEM files only.
+// It is not used for new password hashing or general cryptography.
+// codeql[weak-sensitive-data-hashing]: Required for legacy OpenSSL PEM decryption compatibility, not for new password hashing
 func deriveKey(password, salt []byte, keyLen int) []byte {
 	var derived []byte
 	var previous []byte

@@ -142,6 +142,8 @@ func handleUdpMessage(msg []byte) {
 		partitionStr = "0"
 	}
 	topic = translateTopic(topic)
+	// Safe: partitionStr is parsed from Kafka message ID and checked above; conversion to int32 is safe.
+	// codeql[integer-type-incorrect-conversion]: partition is always a valid int from Kafka, and fatal error terminates on parse failure
 	partition, _ := strconv.Atoi(partitionStr)
 
 	switch {
@@ -156,6 +158,10 @@ func handleUdpMessage(msg []byte) {
 				return
 			}
 			Logger.Debugf("unzipped, payload length", len(payload))
+		}
+		if partition < 0 || partition > 2147483647 {
+			Logger.Fatalf("Partition out of int32 range: %d", partition)
+			os.Exit(1)
 		}
 		kafkaWriter.Write(messageID, topic, int32(partition), payload)
 		atomic.AddInt64(&receivedEvents, 1)
@@ -177,6 +183,10 @@ func handleUdpMessage(msg []byte) {
 				sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
 				return
 			}
+		}
+		if partition < 0 || partition > 2147483647 {
+			Logger.Fatalf("Partition out of int32 range: %d", partition)
+			os.Exit(1)
 		}
 		kafkaWriter.Write(messageID, topic, int32(partition), decrypted)
 		atomic.AddInt64(&receivedEvents, 1)

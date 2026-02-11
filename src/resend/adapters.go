@@ -2,6 +2,7 @@ package resend
 
 import (
 	"context"
+	"os"
 	"strings"
 	"time"
 
@@ -45,6 +46,10 @@ func (k *KafkaAdapter) GetLastOffset(servers, topic string, partition int) (int6
 	}
 	defer client.Close()
 
+	if partition < 0 || partition > 2147483647 {
+		Logger.Errorf("Partition out of int32 range: %d", partition)
+		os.Exit(1)
+	}
 	offset, err := client.GetOffset(topic, int32(partition), sarama.OffsetNewest)
 	if err != nil {
 		return 0, err
