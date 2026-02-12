@@ -50,6 +50,7 @@ type TransferConfiguration struct {
 	readBufferMultiplier uint16            // Multiplier for the read buffer size
 	rcvBufSize           int               // Size of the OS receive buffer for UDP sockets
 	keyPasswordFile      string            // File containing the password to decrypt the key file
+	maximumDecompressSize int
 }
 
 // Builder pattern setters for TransferConfiguration
@@ -143,6 +144,7 @@ func defaultConfiguration() TransferConfiguration {
 	config.readBufferMultiplier = 16    // default 16 times mtu as memory buffer
 	config.rcvBufSize = 4 * 1024 * 1024 // default 4MB OS receive buffer for UDP sockets
 	config.topic = "airgap-internal"
+	config.maximumDecompressSize = 256 * 1024 * 1024 // default 256 MiB
 	return config
 }
 
@@ -316,6 +318,11 @@ func readConfiguration(fileName string, result TransferConfiguration) (TransferC
 			result.topic = value
 		case "keyPasswordFile":
 			result.keyPasswordFile = value
+		case "maximumDecompressSize":
+			result.maximumDecompressSize, err = convertUnitSufix(value)
+			if err != nil {
+				Logger.Fatalf("Error converting maximumDecompressSize \"%s\" to integer value", value)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -479,6 +486,13 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	if keyPasswordFile := os.Getenv(prefix + "KEY_PASSWORD_FILE"); keyPasswordFile != "" {
 		config.keyPasswordFile = keyPasswordFile
 	}
+	if maximumDecompressSize := os.Getenv(prefix + "MAXIMUM_DECOMPRESS_SIZE"); maximumDecompressSize != "" {
+		var err error
+		config.maximumDecompressSize, err = convertUnitSufix(maximumDecompressSize)
+		if err != nil {
+			Logger.Fatalf("Error converting maximumDecompressSize \"%s\" to integer value", maximumDecompressSize)
+		}
+	}
 	return config
 }
 
@@ -507,9 +521,11 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  readBufferMultiplier: %d", config.readBufferMultiplier)
 	Logger.Printf("  rcvBufSize: %d", config.rcvBufSize)
 	Logger.Printf("  internalTopic: %s", config.topic)
+	Logger.Printf("  internalTopic: %s", config.topic)
 	if len(config.translations) > 0 {
 		Logger.Printf("  topicTranslations: %s", config.topicTranslations)
 	}
+	Logger.Printf("  maximumDecompressSize: %s", config.maximumDecompressSize)
 }
 
 // Check the configuration. On fail, will terminate the application
@@ -599,4 +615,57 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	logConfiguration(result)
 	Logger.Print("Configuration OK")
 	return result
+}
+func intPow(base int, exp uint) int {
+	out := 1
+	for _ = range exp {
+		out = out*base
+	}
+	return out
+}
+func convertUnitSufix(size string) (int, error) {
+	Logger.Debugf("Size is ", size)
+	if num, found := strings.CutSuffix(size, "B"); found {
+		Logger.Debugf("Found B")
+		mult := 1
+		out, err := strconv.Atoi(num)
+		if err == nil {
+			return out * mult , nil
+		}
+	}
+	if num, found := strings.CutSuffix(size, "KiB"); found {
+		Logger.Debugf("Found KiB")
+		mult := intPow(2, 10)
+		out, err := strconv.Atoi(num)
+		if err == nil {
+			return out * mult , nil
+		}
+	}
+	if num, found := strings.CutSuffix(size, "MiB"); found {
+		Logger.Debugf("Found MiB")
+		mult := intPow(2, 20)
+		out, err := strconv.Atoi(num)
+		if err == nil {
+			return out * mult , nil
+		}
+	}
+	if num, found := strings.CutSuffix(size, "GiB"); found {
+		mult := intPow(2, 30)
+		out, err := strconv.Atoi(num)
+		if err == nil {
+			return out * mult , nil
+		}
+	}
+	if num, found := strings.CutSuffix(size, "TiB"); found {
+		mult := intPow(2, 40)
+		out, err := strconv.Atoi(num)
+		if err == nil {
+			return out * mult , nil
+		}
+	}
+	out, err := strconv.Atoi(size)
+	if err != nil {
+		return 0, err 
+	}
+	return out, nil
 }

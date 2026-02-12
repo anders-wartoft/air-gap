@@ -21,7 +21,9 @@ func CompressGzip(payload []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func DecompressGzip(payload []byte) ([]byte, error) {
+// Decompress payload with a max decompressed size of maxReturnSize bytes
+// Put maxReturnSize < 0 to disable the size check
+func DecompressGzip(payload []byte, maxReturnSize int) ([]byte, error) {
 	if len(payload) == 0 {
 		return nil, fmt.Errorf("empty payload")
 	}
@@ -30,9 +32,19 @@ func DecompressGzip(payload []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	decompressed, err := io.ReadAll(reader)
+	if maxReturnSize < 0 {
+		decompressed, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, err
+		}
+		return decompressed, nil
+	}
+	decompressed, err := io.ReadAll(io.LimitReader(reader, int64(maxReturnSize)+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(decompressed) > maxReturnSize {
+		return nil, fmt.Errorf("Decompressed size is larger than maximum size")
 	}
 	return decompressed, nil
 }
