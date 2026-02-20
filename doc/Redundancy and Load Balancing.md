@@ -96,9 +96,11 @@ Environment="AIRGAP_UPSTREAM_DELIVER_FILTER=2,3,5,6,8,9"
 Environment="AIRGAP_UPSTREAM_DELIVER_FILTER=3,4,6,7,9,10"
 ```
 
-Here, each event will be delivered by two upstreams, so only two need to be running at the same time. Also, each node only needs to send 2/3 of the data. The deduplicator can now merge the three topics downstream and deduplicate each partition at a time. 
+Here, each event will be delivered by two upstreams, so only two need to be running at the same time. Also, each node only needs to send 2/3 of the data. The deduplicator can now merge the three topics downstream and deduplicate each partition at a time.
 
 You can now configure hardware and air-gap to achieve your preferred level of redundancy and load balancing at the same time.
+
+There's a nice util, contributed by a Tobias Wennberg, to calculate the filters for you: `utils/loadbalance.py`. Just run it and specify the number of upstreams and the level of redundancy you want. It will print the filters for you.
 
 ## Drawbacks with Redundancy and Load Balancing
 
