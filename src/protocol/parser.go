@@ -124,32 +124,17 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 
 	if nrMessages > 1 {
 		// Multi part message
-		cachedItem, ok := cache.GetEntry(id)
-		if ok == nil {
-			// cache contains messageId
-			// log.Printf("Received part %d of %d for message id %s: %s\n", messageNumber, nrMessages, id, payload)
-			cache.AddEntryValue(id, messageNumber, nrMessages, payload)
-			if uint16(len(cachedItem.val)) >= nrMessages {
-				// try to re-assemble the message
-				// log.Print("Trying to assemble message")
-				assembled, ok := assembleMessage(*cachedItem)
-				if ok == nil {
-					// We are done with this one
-					cache.RemoveEntry(id)
-					// log.Printf("Assembled complete message for id %s: %s\n", id, assembled)
-					return messageType, id, assembled, nil
-				}
+		snapshot, complete := cache.AddPartAndSnapshot(id, messageNumber, nrMessages, payload)
+		if complete {
+			assembled, err := assembleMessage(snapshot)
+			if err == nil {
+				cache.RemoveEntry(id)
+				return messageType, id, assembled, nil
 			}
-			return TYPE_MULTIPART, "", nil, nil
-		} else {
-			// log.Printf("Adding cache for part %d of %d for message id %s\n", messageNumber, nrMessages, id)
-			// cache does not contain messageId
-			cache.AddEntry(id, messageNumber, nrMessages, payload)
-			// Discard the part (but keep in the cache)
-			// Will return the message when all parts
-			// have arrived.
-			return TYPE_MULTIPART, "", nil, nil
 		}
+		// Discard the part (but keep in the cache). The completed message is
+		// returned only when all parts have arrived and assembled successfully.
+		return TYPE_MULTIPART, "", nil, nil
 	} else {
 		// Only single message
 		return messageType, id, payload, nil

@@ -36,8 +36,8 @@ func SetTimestamp(newTime time.Time) {
 // Return a copy of one Gaps instance, specified
 // by the key
 func GetAllGaps(key string) Gaps {
+	mu.RLock()
 	holder := allGaps[key]
-	mu.Lock() // We don't want partly updated state
 	result := Gaps{
 		ExpectedNumber: holder.ExpectedNumber,
 		Gaps:           []Gap{},
@@ -51,7 +51,7 @@ func GetAllGaps(key string) Gaps {
 		}
 		result.Gaps = append(result.Gaps, copy)
 	}
-	mu.Unlock()
+	mu.RUnlock()
 	return result
 }
 
@@ -60,6 +60,8 @@ func GetAllGaps(key string) Gaps {
 func CheckNextNumber(key string, number int64) bool {
 	var returnValue bool = false
 	Logger.Debugf("checkNextNumber %s %d", key, number)
+	mu.Lock()
+	defer mu.Unlock()
 	currentGaps, ok := allGaps[key]
 	if ok == false {
 		Logger.Debugf("Adding new currentGaps with key %s", key)
@@ -84,10 +86,8 @@ func CheckNextNumber(key string, number int64) bool {
 			Timestamp: time.Now(),
 		}
 		Logger.Debugf("Gap detected. Adding from %d to %d", gap.From, gap.To)
-		mu.Lock()
 		currentGaps.Gaps = append(currentGaps.Gaps, gap)
 		currentGaps.ExpectedNumber = number + 1
-		mu.Unlock()
 	} else {
 		// the number is less than the expected number. This
 		// Might be a duplicate, or it might be a previously
@@ -100,23 +100,17 @@ func CheckNextNumber(key string, number int64) bool {
 				Logger.Debugf("Number is this gap, remove gap")
 				// Gap was missing just this number
 				// remove the gap
-				mu.Lock()
 				currentGaps.Gaps = append(currentGaps.Gaps[:gapNumber], currentGaps.Gaps[gapNumber+1:]...)
-				mu.Unlock()
 			} else if number == gap.From && number != gap.To {
 				// just remove the from. There are other missing numbers too
 				Logger.Debugf("Number is the start of this gap, adding from")
 				gap.From += 1
-				mu.Lock()
 				currentGaps.Gaps[gapNumber] = gap
-				mu.Unlock()
 			} else if number != gap.From && number == gap.To {
 				// missing just the last one
 				Logger.Debugf("Number is the end of this gap, subtracting to")
 				gap.To -= 1
-				mu.Lock()
 				currentGaps.Gaps[gapNumber] = gap
-				mu.Unlock()
 			} else {
 				// The gap is more than 2 long and the received item is in the middle of the gap
 				// Split the gap into two gaps with from .. number-1, number+1 .. to
@@ -128,11 +122,9 @@ func CheckNextNumber(key string, number int64) bool {
 				}
 				gap.To = number - 1
 				// add the gap
-				mu.Lock()
 				// The line above setting gap.To won't update the array item
 				currentGaps.Gaps[gapNumber] = gap
 				currentGaps.Gaps = append(currentGaps.Gaps, newGap)
-				mu.Unlock()
 			}
 		} else {
 			// The return value is not in any gap and less than the expected one
@@ -140,9 +132,7 @@ func CheckNextNumber(key string, number int64) bool {
 			returnValue = true
 		}
 	}
-	mu.Lock()
 	allGaps[key] = currentGaps
-	mu.Unlock()
 	return returnValue
 }
 
