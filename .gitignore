@@ -15,3 +15,4 @@ plan/
 **/pom.xml.versionsBackup
 src/version/version.go
 .github/
+tests/chaos-testing/gaps.json

@@ -1,30 +1,94 @@
----
-
 services:
   kafka:
     networks:
       - airgap
     environment:
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:29093
-    ports:
-      - 9092:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
 
     image: confluentinc/confluent-local
 
-  dedup:
-    image: rockylinux:9.3
+  upstream:
     networks:
       - airgap
+    depends_on:
+      - downstream
+    image: rockylinux:9.3
+    volumes:
+      - ../../dist:/dist:ro
+      - ../../:/dist:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        sleep 1m &&
+        /dist/target/linux-amd64/upstream /dist/tests/chaos-testing/upstream.properties
+
+  resend:
+    networks:
+      - airgap
+    depends_on:
+      - downstream
+    image: rockylinux:9.3
+    volumes:
+      - ../../dist:/dist:ro
+      - ../../:/dist:ro
+      - ./:/gaps
+    restart: always
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        sleep 1m &&
+        /dist/target/linux-amd64/resend /dist/tests/chaos-testing/resend.properties
+
+  create:
+    networks:
+      - airgap
+    depends_on:
+      - downstream
+    image: rockylinux:9.3
+    volumes:
+      - ../../dist:/dist:ro
+      - ../../:/dist:ro
+      - ./:/gaps
+    restart: always
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        sleep 1m && 
+        /dist/target/linux-amd64/create /dist/tests/chaos-testing/create.properties
+
+
+  downstream:
+    networks:
+      - airgap
+    image: rockylinux:9.3
+    depends_on:
+      - kafka
+    volumes:
+      - ../../:/dist:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        sleep 1m &&
+        /dist/target/linux-amd64/downstream /dist/tests/chaos-testing/downstream.properties
+
+  dedup:
+    networks:
+      - airgap
+    image: rockylinux:9.3
     depends_on:
       - kafka
     volumes:
       - ../../target/dist:/dist:ro
       - ../../config:/config:ro
     environment:
-      RAW_TOPICS: receive
+      RAW_TOPICS: downstream
       CLEAN_TOPIC: dedup
       GAP_TOPIC: gaps
       BOOTSTRAP_SERVERS: kafka:9092
@@ -32,9 +96,39 @@ services:
       - /bin/bash
       - -c
       - |
+        sleep 1m &&
         dnf install -y /dist/airgap-dedup-1.0.0-325.noarch.rpm &&
+        export RAW_TOPICS=receive &&
+        export CLEAN_TOPIC=dedup &&
+        export GAP_TOPIC=gaps &&
+        export BOOTSTRAP_SERVERS=kafka:9092 &&
         java -jar /opt/airgap/dedup/air-gap-deduplication-fat.jar
 
+  chaos:
+    networks:
+      - airgap
+    image: rockylinux:9.3
+    depends_on:
+      - kafka
+    volumes:
+      - ../../:/dist:ro
+    environment:
+      RAW_TOPICS: downstream
+      CLEAN_TOPIC: dedup
+      GAP_TOPIC: gaps
+      BOOTSTRAP_SERVERS: kafka:9092
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        sleep 1m &&
+        dnf install -y golang &&
+        cd /dist &&
+        go run /dist/tests/chaos-testing/main.go
 
 networks:
   airgap:
+    ipam:
+      config:
+
+        - subnet: 10.11.12.0/24

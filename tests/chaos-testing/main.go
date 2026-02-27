@@ -35,12 +35,12 @@ var FORWARDED uint32 = 0
 var UNKNOWN uint32 = 0
 
 var MITM_PORT = 1234
-var MITM_DEST_ADDR = "127.0.0.1:1235"
-var MITM_DROP_PROBABILITY = 0.05
+var MITM_DEST_ADDR = "downstream:1235"
+var MITM_DROP_PROBABILITY = 0.22
 
 var PRODUCER_SLEEP_TIME_MS = 10
 
-var KAFKA_ADDR = []string{ "127.0.0.1:9092" }
+var KAFKA_ADDR = []string{ "kafka:9092" }
 var KAFKA_PRODUCE_TOPIC = "send"
 var KAFKA_CONSUME_TOPIC = "dedup"
 //var KAFKA_CONSUME_TOPIC = "receive"
@@ -71,7 +71,8 @@ func randomBytes(n int) []byte {
 }
 
 func generate_message() []byte {
-	max_length := 1048576
+	//max_length := 1048576
+	max_length := 104857
 	length := rand.Intn(max_length)
 	bytes := randomBytes(length)
 	return bytes
@@ -138,7 +139,7 @@ func mitm() {
 			atomic.AddUint32(&DROPPED, 1)
 			continue 
 		}
-		atomic.AddUint32(&FORWARDED, 1)
+		FORWARDED+=1
 		sender_conn, err := net.DialUDP("udp", nil, sender_addr)
 		if err != nil {
 			log.Panicln("Unable to start mitm dialup: ", err.Error())
@@ -184,27 +185,27 @@ func consume() {
 				DATA_MUTEX.Lock()
 				DATA[message_hash].Received = time.Now()
 				DATA_MUTEX.Unlock()
-				RECEIVED+=1
+				atomic.AddUint32(&RECEIVED, 1)
 			case Received:
 				DATA_MUTEX.Lock()
 				current_sate.Duplicated = time.Now()
 				DATA_MUTEX.Unlock()
-				DUPLICATED+=1
+				atomic.AddUint32(&DUPLICATED, 1)
 			case Duplicated:
 				DATA_MUTEX.Lock()
 				current_sate.Duplicated = time.Now()
 				DATA_MUTEX.Unlock()
-				DUPLICATED+=1
+				atomic.AddUint32(&DUPLICATED, 1)
 			case Unknown:
 				DATA_MUTEX.Lock()
 				current_sate.Unknown = time.Now()
 				DATA_MUTEX.Unlock()
-				UNKNOWN+=1
+				atomic.AddUint32(&UNKNOWN, 1)
 			default:
 				DATA_MUTEX.Lock()
 				current_sate.Unknown = time.Now()
 				DATA_MUTEX.Unlock()
-				UNKNOWN+=1
+				atomic.AddUint32(&UNKNOWN, 1)
 			}
 		}
 	}
