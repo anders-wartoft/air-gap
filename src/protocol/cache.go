@@ -22,6 +22,37 @@ type MessageCache struct {
 	entries map[string]*MessageCacheEntry
 }
 
+// AddPartAndSnapshot adds/updates one multipart payload fragment and returns a
+// detached snapshot of the message entry together with a completion flag.
+// The returned snapshot can be safely read without holding cache locks.
+func (m *MessageCache) AddPartAndSnapshot(id string, messageId uint16, maxMessageId uint16, payload []byte) (MessageCacheEntry, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entry, ok := m.entries[id]
+	if !ok {
+		entry = createMessageCacheEntry()
+		entry.len = maxMessageId
+		m.entries[id] = entry
+	} else if entry.len == 0 {
+		entry.len = maxMessageId
+	}
+
+	entry.val[messageId] = append([]byte(nil), payload...)
+
+	snapshot := MessageCacheEntry{
+		end: entry.end,
+		len: entry.len,
+		val: make(map[uint16][]byte, len(entry.val)),
+	}
+	for k, v := range entry.val {
+		snapshot.val[k] = append([]byte(nil), v...)
+	}
+
+	isComplete := snapshot.len > 0 && uint16(len(snapshot.val)) >= snapshot.len
+	return snapshot, isComplete
+}
+
 func (m *MessageCache) GetEntry(id string) (*MessageCacheEntry, error) {
 	m.mu.Lock()
 	cachedItem, ok := m.entries[id]
@@ -105,6 +136,6 @@ func (m *MessageCache) CleanList() {
 			cleaned_up_times++
 		}
 	}
-	Logger.Debugf("Cache cleanup finished after %i seconds. %i items was cleaned", time.Now().UTC().Second() - start_time.UTC().Second(), cleaned_up_times)
+	Logger.Debugf("Cache cleanup finished after %i seconds. %i items was cleaned", time.Now().UTC().Second()-start_time.UTC().Second(), cleaned_up_times)
 
 }
