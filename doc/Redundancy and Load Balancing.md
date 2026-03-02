@@ -8,9 +8,9 @@ The most simple case of redundancy is if you have two streams of data from Kafka
 
 ![air-gap redundancy](img/air-gap%20redundancy.png)
 
-Here, we configure both air-gap upstreams to read the same topic: "input". They both send to a dedicated downstream. Since Kafka only allows one client at a time to write to a partition and we use partitions for the deduplication process, both downstream can't write to the same topic. The solution is that they write to different topics: "transfer1" and "transfer2". This is achieved by adding the property 
+Here, we configure both air-gap upstreams to read the same topic: "input". They both send to a dedicated downstream. Since Kafka only allows one client at a time to write to a partition and we use partitions for the deduplication process, both downstream can't write to the same topic. The solution is that they write to different topics: "transfer1" and "transfer2". This is achieved by adding the property topicTranslations to the downstream configuration. This property is a JSON object that maps topic names to other topic names. In this case, we map "input" to "transfer1" and "input" to "transfer2" in the respective downstreams.
 
-The downstream receivers can set the property: topicTranslations to 
+The downstream receivers can set the property: topicTranslations:
 
 ```bash
 topicTranslations={"input": "transfer1"}
@@ -35,6 +35,54 @@ If the input topic has $n$ partitions, then both the transfer1 and transfer2 par
 Example: say you have $n$ partitions in the upstream topic. Then, create the downstream topic with $n$ partitions. If you would like to have a couple of dedup instances as hot stand-by (say $m$ number of hot stand-by), then you should assign $n+m$ partitions to _both_ the CLEAN_TOPIC and GAP_TOPIC.
 
 **Note:** If your events use GUIDs or other non-partitioned keys (i.e., keys that do not follow the `topic_partition_offset` scheme), these events are still supported. They will be delivered and deduplicated, but are not tied to a specific partition or deduplication instance. Instead, they are distributed among the available instances based on their key value. This allows mixed key types in the same deployment.
+
+### Single downstream with same topic name from two clusters
+
+For the same setup in the main configuration guide, see [README.md](../README.md#example-use-case-two-clusters-same-topic-name-no-topic-rename-possible).
+
+If you have two upstream Kafka clusters with the same topic name (for example `transfer`) and want to merge both streams into one downstream topic with one deduplicator, you can use `partitionStartValue` in one upstream.
+
+Example:
+
+```bash
+# Upstream A
+topic=transfer
+partitionStartValue=0
+
+# Upstream B
+topic=transfer
+partitionStartValue=100
+```
+
+Result:
+
+- Upstream A keeps partitions `0..99`
+- Upstream B is remapped to partitions `100..199`
+- Both streams can be written to the same downstream topic name while deduplication still works independently per partition
+
+Partition sizing rule:
+
+- The downstream topic must have at least the highest mapped partition index + 1 partitions.
+- In the example above, that means at least `200` partitions.
+- If a source has `10` partitions and you set `partitionStartValue=100`, the downstream topic must have at least `110` partitions.
+
+Three-cluster example (same topic name in all clusters):
+
+| Cluster | Source partitions | `partitionStartValue` | Downstream partitions |
+| ------- | ----------------- | --------------------- | --------------------- |
+| A       | `0..4`            | `0`                   | `0..4`                |
+| B       | `0..4`            | `10`                  | `10..14`              |
+| C       | `0..4`            | `20`                  | `20..24`              |
+
+Matching resend setup per cluster:
+
+- Cluster A resend: `partitionStartValue=0`, `partitionStopValue=5`
+- Cluster B resend: `partitionStartValue=10`, `partitionStopValue=5`
+- Cluster C resend: `partitionStartValue=20`, `partitionStopValue=5`
+
+This pattern scales to any number of clusters as long as downstream partition windows are disjoint.
+
+Empty partitions are not a deduplication problem, but they still count toward required topic partition capacity.
 
 ## Load balancing
 

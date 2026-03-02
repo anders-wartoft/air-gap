@@ -2,7 +2,7 @@
 # Go Binary Builds
 # ============================================================================
 
-.PHONY: build-go build-go-all build-go-linux-amd64 build-go-linux-arm64 build-go-mac-arm64 _build-binaries upstream downstream create resend
+.PHONY: build-go build-go-all build-go-linux-amd64 build-go-linux-arm64 build-go-mac-arm64 _build-binaries upstream downstream create resend FORCE
 
 GO_BINARIES := upstream downstream create resend
 GO_BUILD_DIR := $(LINUX_AMD64_DIR)
@@ -40,12 +40,14 @@ build-go-mac-arm64: .build-number-incremented src/version/version.go
 	@echo "✅ Go binaries built (macOS ARM64)"
 
 # Generate version file
-src/version/version.go:
+src/version/version.go: FORCE
 	@echo "Generating version file..."
 	@mkdir -p src/version
 	@echo 'package version' > $@
 	@echo '' >> $@
 	@echo 'var GitVersion = "$(GIT_VERSION)"' >> $@
+
+FORCE:
 
 # Individual binary targets with explicit rules
 upstream: src/version/version.go .build-number-incremented

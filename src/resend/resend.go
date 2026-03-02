@@ -34,7 +34,108 @@ type JsonFilter struct {
 	Results []GapResult `json:"results"`
 }
 
+func hasUsableGaps(filterType string, result GapResult) bool {
+	switch filterType {
+	case "first", "manual":
+		return len(result.Gaps) > 0 && len(result.Gaps[0]) > 0
+	case "all":
+		for _, gap := range result.Gaps {
+			if len(gap) > 0 {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
+}
+
+func isPartitionInConfiguredRange(partition int, partitionStartValue int, partitionStopValue int) bool {
+	if partition == -1 {
+		return partitionStopValue == 0
+	}
+	if partition < partitionStartValue {
+		return false
+	}
+	if partitionStopValue == 0 {
+		return true
+	}
+	return partition < partitionStartValue+partitionStopValue
+}
+
+func filterJsonFilterByPartitionRange(jsonFilter JsonFilter, partitionStartValue int, partitionStopValue int) JsonFilter {
+	if partitionStopValue == 0 {
+		return jsonFilter
+	}
+
+	filtered := make([]GapResult, 0, len(jsonFilter.Results))
+	for _, result := range jsonFilter.Results {
+		if isPartitionInConfiguredRange(result.Partition, partitionStartValue, partitionStopValue) {
+			if !hasUsableGaps(jsonFilter.Type, result) {
+				Logger.Debugf("Skipping partition %d due to empty gaps for filter type %s", result.Partition, jsonFilter.Type)
+				continue
+			}
+			filtered = append(filtered, result)
+		} else {
+			Logger.Debugf("Skipping partition %d due to configured range start=%d stop=%d",
+				result.Partition, partitionStartValue, partitionStopValue)
+		}
+	}
+
+	jsonFilter.Results = filtered
+	return jsonFilter
+}
+
+func getStartOffsetForResult(filterType string, result GapResult) int64 {
+	switch filterType {
+	case "first":
+		if len(result.Gaps) > 0 && len(result.Gaps[0]) > 0 {
+			return result.Gaps[0][0]
+		}
+	case "all":
+		return 0
+	case "manual":
+		if len(result.Gaps) > 0 && len(result.Gaps[0]) > 0 {
+			return result.Gaps[0][0]
+		}
+	}
+
+	return 0
+}
+
+func mapDownstreamToUpstreamPartition(downstreamPartition int, partitionStartValue int) (int, error) {
+	if downstreamPartition == -1 {
+		return -1, nil
+	}
+	upstreamPartition := downstreamPartition - partitionStartValue
+	if upstreamPartition < 0 {
+		return 0, fmt.Errorf("downstream partition %d maps to negative upstream partition with partitionStartValue %d", downstreamPartition, partitionStartValue)
+	}
+	return upstreamPartition, nil
+}
+
+func mapUpstreamToDownstreamPartition(upstreamPartition int, partitionStartValue int) int {
+	if upstreamPartition == -1 {
+		return -1
+	}
+	return upstreamPartition + partitionStartValue
+}
+
 func parseFile(fileName string, config TransferConfiguration) (JsonFilter, error) {
+	if fileName != "" {
+		file, err := os.Open(fileName)
+		if err != nil {
+			return JsonFilter{}, err
+		}
+		defer file.Close()
+
+		var result JsonFilter
+		if err := json.NewDecoder(file).Decode(&result); err != nil {
+			return JsonFilter{}, err
+		}
+		return result, nil
+	}
+
 	if config.topic != "" && config.partition >= 0 && config.offsetFrom >= 0 && config.offsetTo >= -1 {
 		jsonFilter := JsonFilter{
 			Type: "manual",
@@ -67,34 +168,28 @@ func parseFile(fileName string, config TransferConfiguration) (JsonFilter, error
 		return jsonFilter, nil
 	}
 
-	file, err := os.Open(fileName)
-	if err != nil {
-		return JsonFilter{}, err
-	}
-	defer file.Close()
-
-	var result JsonFilter
-	if err := json.NewDecoder(file).Decode(&result); err != nil {
-		return JsonFilter{}, err
-	}
-	return result, nil
+	return JsonFilter{}, fmt.Errorf("no resend input specified: provide resendFileName or manual topic/partition/from settings")
 }
 
 // getLatestOffsets updates each GapResult in a JsonFilter with the latest offset
 // from Kafka for its topic and partition.
-func getLatestOffsets(kafkaClient KafkaClient, jsonFilter JsonFilter, bootstrapServers string) (JsonFilter, error) {
+func getLatestOffsets(kafkaClient KafkaClient, jsonFilter JsonFilter, bootstrapServers string, partitionStartValue int) (JsonFilter, error) {
 	for i, result := range jsonFilter.Results {
-		lastOffset, err := kafkaClient.GetLastOffset(bootstrapServers, result.Topic, result.Partition)
+		upstreamPartition, mapErr := mapDownstreamToUpstreamPartition(result.Partition, partitionStartValue)
+		if mapErr != nil {
+			return jsonFilter, mapErr
+		}
+		lastOffset, err := kafkaClient.GetLastOffset(bootstrapServers, result.Topic, upstreamPartition)
 		if err != nil {
 			if result.Partition != -1 {
 				Logger.Fatalf("Failed to get latest offset for topic %s partition %d: %v. If partition is not found, it may be due to the topic not existing or no messages being produced.",
-					result.Topic, result.Partition, err)
+					result.Topic, upstreamPartition, err)
 			}
 			continue
 		}
 		jsonFilter.Results[i].LastOffset = lastOffset
-		Logger.Debugf("Topic %s partition %d latest offset: %d",
-			result.Topic, result.Partition, lastOffset)
+		Logger.Debugf("Topic %s downstream partition %d (upstream partition %d) latest offset: %d",
+			result.Topic, result.Partition, upstreamPartition, lastOffset)
 	}
 	return jsonFilter, nil
 }
@@ -120,8 +215,11 @@ func filter(jsonFilter JsonFilter, topic string, partition int, offset int64) bo
 		gaps := jsonFilter.Results
 		for _, g := range gaps {
 			if g.Topic == topic && g.Partition == partition {
+				if len(g.Gaps) == 0 || len(g.Gaps[0]) == 0 {
+					return false
+				}
 				// Just look at the first gap
-				first := g.Gaps[0][0] + g.WindowMin
+				first := g.Gaps[0][0]
 				// Send everything from first and onwards
 				return offset >= first
 			}
@@ -149,12 +247,18 @@ func filter(jsonFilter JsonFilter, topic string, partition int, offset int64) bo
 	case "manual":
 		// Manual mode: only one result with one gap, specifying from_offset and to_offset
 		// We have no gaps, but from_offset and to_offset, partition and topic. Use those for resend:
+		if len(jsonFilter.Results) == 0 || len(jsonFilter.Results[0].Gaps) == 0 || len(jsonFilter.Results[0].Gaps[0]) == 0 {
+			return false
+		}
 		if jsonFilter.Results[0].Topic == topic && jsonFilter.Results[0].Partition == partition {
 			Logger.Debugf("Manual mode: checking if offset %d is between from_offset %d and to_offset %d", offset, jsonFilter.Results[0].Gaps[0][0], jsonFilter.Results[0].Gaps[0][1])
 			return offset >= jsonFilter.Results[0].Gaps[0][0] && (offset <= jsonFilter.Results[0].Gaps[0][1] || jsonFilter.Results[0].Gaps[0][1] == -1)
 		}
 	case "time-range":
 		// Time-range mode: only one result with one gap, specifying from and to time, partition and topic. From and to are handled above in kafkaHandler.
+		if len(jsonFilter.Results) == 0 {
+			return false
+		}
 		if jsonFilter.Results[0].Topic == topic && (jsonFilter.Results[0].Partition == partition || jsonFilter.Results[0].Partition == -1) {
 			// We don't have offsets to compare here, so we just return true to send everything in this partition.
 			return true
@@ -213,7 +317,15 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 		Logger.Fatalf("Failed parsing filter file: %v", err)
 		return
 	}
-	jsonFilter, _ = getLatestOffsets(kafkaClient, jsonFilter, config.bootstrapServers)
+	jsonFilter = filterJsonFilterByPartitionRange(jsonFilter, config.partitionStartValue, config.partitionStopValue)
+	if len(jsonFilter.Results) == 0 {
+		Logger.Warnf("No resend bundle partitions match configured range start=%d stop=%d",
+			config.partitionStartValue, config.partitionStopValue)
+	}
+	jsonFilter, err = getLatestOffsets(kafkaClient, jsonFilter, config.bootstrapServers, config.partitionStartValue)
+	if err != nil {
+		Logger.Fatalf("Failed applying partitionStartValue mapping for resend: %v", err)
+	}
 	Logger.Tracef("Resend filter content length: %d", len(jsonFilter.Results))
 
 	// Encryption setup (unchanged)
@@ -266,19 +378,25 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 		// Determine topic/partition/offset from id
 		parts := strings.Split(id, "_")
 		var topic string
-		var partition int
+		var upstreamPartition int
 		var offset int64
 		if len(parts) == 3 {
 			topic = parts[0]
 			p, err := strconv.Atoi(parts[1])
 			if err == nil {
-				partition = p
+				upstreamPartition = p
 			}
 			if off, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
 				offset = off
 			}
 		}
-		Logger.Tracef("kafkaHandler called for id=%s, topic=%s, partition=%d, offset=%d, time=%s", id, topic, partition, offset, t.Format(time.RFC3339))
+		downstreamPartition := mapUpstreamToDownstreamPartition(upstreamPartition, config.partitionStartValue)
+		sendID := id
+		if len(parts) == 3 {
+			parts[1] = strconv.Itoa(downstreamPartition)
+			sendID = strings.Join(parts, "_")
+		}
+		Logger.Tracef("kafkaHandler called for id=%s, topic=%s, upstreamPartition=%d, downstreamPartition=%d, offset=%d, time=%s", id, topic, upstreamPartition, downstreamPartition, offset, t.Format(time.RFC3339))
 
 		// Discard old messages, before "from"
 		if t.Before(fromTime) {
@@ -289,17 +407,17 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 		// Discard messages after "to"
 		if t.After(toTime) {
 			Logger.Tracef("Discarding message: %s time %s after to %s", id, t.Format(time.RFC3339), toTime.Format(time.RFC3339))
-			markFinished(partition)
+			markFinished(downstreamPartition)
 			// return false to indicate consumer can stop this claim (adapter may honor it)
 			return false
 		}
 
 		// Filtering: skip messages that are not in the resend filter
-		shouldSend := filter(jsonFilter, topic, partition, offset)
+		shouldSend := filter(jsonFilter, topic, downstreamPartition, offset)
 		if !shouldSend {
 			// If message is not to be sent but it's equal-or-after lastOffset, we still consider partition finished.
-			if isLast(jsonFilter, topic, partition, offset) {
-				markFinished(partition)
+			if isLast(jsonFilter, topic, downstreamPartition, offset) {
+				markFinished(downstreamPartition)
 				// returning false signals the consumer to stop processing this message stream if the adapter honors it.
 				return false
 			}
@@ -308,7 +426,7 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 		}
 
 		// If this is the last message that we will send for this partition, mark finished after sending.
-		last := isLast(jsonFilter, topic, partition, offset)
+		last := isLast(jsonFilter, topic, downstreamPartition, offset)
 
 		// Compress or not
 		var isCompressed = false
@@ -334,14 +452,14 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 			} else {
 				messageType = protocol.Merge(protocol.TYPE_MESSAGE, 0)
 			}
-			messages = protocol.FormatMessage(messageType, id, ciphertext, config.payloadSize)
+			messages = protocol.FormatMessage(messageType, sendID, ciphertext, config.payloadSize)
 		} else {
 			if isCompressed {
 				messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, protocol.TYPE_COMPRESSED_GZIP)
 			} else {
 				messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, 0)
 			}
-			messages = protocol.FormatMessage(messageType, id, received, config.payloadSize)
+			messages = protocol.FormatMessage(messageType, sendID, received, config.payloadSize)
 		}
 		if err != nil {
 			Logger.Error(err)
@@ -371,7 +489,7 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 
 		// If this was last, mark it finished and possibly cancel
 		if last {
-			markFinished(partition)
+			markFinished(downstreamPartition)
 			// return false to indicate consumer can stop this claim (adapter may honor it)
 			return false
 		}
@@ -396,22 +514,28 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 		wg.Add(1)
 		go func(res GapResult) {
 			defer wg.Done()
+			upstreamPartition, mapErr := mapDownstreamToUpstreamPartition(res.Partition, config.partitionStartValue)
+			if mapErr != nil {
+				Logger.Errorf("Invalid partition mapping for topic %s downstream partition %d: %v", res.Topic, res.Partition, mapErr)
+				return
+			}
 			// name per partition + timestamp
 			timestamp := time.Now().Format("20060102150405")
 			name := fmt.Sprintf("%s-%d-%s", config.groupID, res.Partition, timestamp)
 
 			// The adapter's Read must accept ctx and return eventually (ReadFromKafkaWithContext does).
 			// We call Read with "from" as configured earlier; adapters should internally honor ctx.
-			Logger.Debugf("Starting Kafka read for partition %d with name %s with bootstrapServers: %s", res.Partition, name, config.bootstrapServers)
-			fromOffset := int64(0)
-			kafkaClient.ReadToEndPartition(res.Partition, ctx, config.bootstrapServers, res.Topic, name, fromOffset,
+			Logger.Debugf("Starting Kafka read for downstream partition %d (upstream partition %d) with name %s with bootstrapServers: %s", res.Partition, upstreamPartition, name, config.bootstrapServers)
+			fromOffset := getStartOffsetForResult(jsonFilter.Type, res)
+			Logger.Debugf("Using start offset %d for downstream partition %d", fromOffset, res.Partition)
+			kafkaClient.ReadToEndPartition(upstreamPartition, ctx, config.bootstrapServers, res.Topic, name, fromOffset,
 				kafkaHandler)
 			// // If we exit the read loop without having marked finished, do it now.
 			// if _, ok := finished.Load(res.Partition); !ok {
 			// 	markFinished(res.Partition)
 			// }
 			// When Read returns, it means the consumer was stopped (ctx cancelled or adapter finished).
-			Logger.Debugf("Kafka reader for partition %d returned", res.Partition)
+			Logger.Debugf("Kafka reader for downstream partition %d (upstream partition %d) returned", res.Partition, upstreamPartition)
 		}(r)
 	}
 

@@ -101,6 +101,8 @@ The `resend` application takes similar parameters as the `create` application:
 - limit={limit the created file to just the first missing (`first`) or include all gaps (`all`)}
 - compressWhenLengthExceeds={compress messages when length in bytes exceeds this value, 0 means no compression}
 - partition={partition to read from}
+- partitionStartValue={partition shift used by upstream when writing to downstream; resend maps downstream->upstream for reads and upstream->downstream for sent IDs}
+- partitionStopValue={number of downstream partitions handled by this resend instance, starting at partitionStartValue; 0 means no upper bound}
 - offsetFrom={offset to start reading from}
 - offsetTo={offset to stop reading at}
 
@@ -109,6 +111,13 @@ When started, the `resend` will read and emit the events as fast as possible, wi
 The setting `limit` can be used if a lot of gaps are present. Instead of writing all the gaps to the resend file, only the first gap for each partition is recorded and the `resend` application will resend that gap and all events after that for each partition.
 
 In case file copy to upstream is not feasable, the command line overrides can be used to resend events.
+
+If `partitionStartValue` was used in upstream, set the same `partitionStartValue` in resend.
+This is important because gap files contain downstream partition IDs. With this setting, resend will read from the corresponding upstream partition and still send IDs with the downstream partition ID expected by deduplication.
+
+If a resend bundle contains partitions for multiple clusters, set `partitionStopValue` to limit which downstream partition range this resend instance should handle.
+Example: `partitionStartValue=10` and `partitionStopValue=5` handles only downstream partitions `10..14`.
+This pattern works for any number of clusters as long as each cluster uses a disjoint downstream partition window.
 
 #### Command line overrides
 
@@ -122,6 +131,12 @@ To resend for a topic: topicName, partition: 1 and offset: 12345678:
 
 ```bash
 ./resend upstream.properties --topic=topicName --partition=1 --offsetFrom=12345678
+```
+
+If your downstream partition is shifted (for example, downstream partition 105 came from upstream partition 5 with `partitionStartValue=100`), run:
+
+```bash
+./resend upstream.properties --topic=topicName --partition=105 --partitionStartValue=100 --offsetFrom=12345678
 ```
 
 The resend will not write any log files during sending. If you have a lot of events in the normal event stream, you can slow down the resend by adding an argument:

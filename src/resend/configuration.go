@@ -43,6 +43,8 @@ type TransferConfiguration struct {
 	logStatistics                int            // log statistics interval in seconds, 0 means no logging
 	compressWhenLengthExceeds    int            // compress messages when length exceeds this value, 0 means no compression
 	partition                    int            // Kafka partition to read from. Can only read from one partition at a time when manually configured
+	partitionStartValue          int            // value added to source partition number when sending message IDs downstream
+	partitionStopValue           int            // number of downstream partitions to serve, starting from partitionStartValue (0 = no upper bound)
 	offsetFrom                   int64          // offset to start reading from
 	offsetTo                     int64          // offset to stop reading at
 }
@@ -93,6 +95,8 @@ func defaultConfiguration() TransferConfiguration {
 	// Command line overrides
 	config.topic = ""
 	config.partition = -1
+	config.partitionStartValue = 0
+	config.partitionStopValue = 0
 	config.offsetFrom = -1
 	config.offsetTo = -1
 
@@ -241,6 +245,26 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 					Logger.Printf("compressWhenLengthExceeds: %d", result.compressWhenLengthExceeds)
 				}
 			}
+		case "partitionStartValue":
+			v, err := strconv.Atoi(value)
+			if err != nil {
+				Logger.Fatalf("Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
+			}
+			if v < 0 {
+				Logger.Fatalf("Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
+			}
+			result.partitionStartValue = v
+			Logger.Printf("partitionStartValue: %d", result.partitionStartValue)
+		case "partitionStopValue":
+			v, err := strconv.Atoi(value)
+			if err != nil {
+				Logger.Fatalf("Error in config partitionStopValue. Illegal value: %s. Legal values are a non-negative integer", value)
+			}
+			if v < 0 {
+				Logger.Fatalf("Error in config partitionStopValue. Illegal value: %s. Legal values are a non-negative integer", value)
+			}
+			result.partitionStopValue = v
+			Logger.Printf("partitionStopValue: %d", result.partitionStopValue)
 		default:
 			Logger.Printf("Unknown configuration key: %s", key)
 		}
@@ -396,6 +420,28 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			config.compressWhenLengthExceeds = compressWhenLengthExceedsInt
 		}
 	}
+	if partitionStartValue := os.Getenv(prefix + "PARTITION_START_VALUE"); partitionStartValue != "" {
+		value, err := strconv.Atoi(partitionStartValue)
+		if err != nil {
+			Logger.Fatalf("Error parsing PARTITION_START_VALUE environment variable: %v", err)
+		}
+		if value < 0 {
+			Logger.Fatalf("Error parsing PARTITION_START_VALUE environment variable: %s must be a non-negative integer", partitionStartValue)
+		}
+		Logger.Print("Overriding partitionStartValue with environment variable: " + prefix + "PARTITION_START_VALUE" + " with value: " + partitionStartValue)
+		config.partitionStartValue = value
+	}
+	if partitionStopValue := os.Getenv(prefix + "PARTITION_STOP_VALUE"); partitionStopValue != "" {
+		value, err := strconv.Atoi(partitionStopValue)
+		if err != nil {
+			Logger.Fatalf("Error parsing PARTITION_STOP_VALUE environment variable: %v", err)
+		}
+		if value < 0 {
+			Logger.Fatalf("Error parsing PARTITION_STOP_VALUE environment variable: %s must be a non-negative integer", partitionStopValue)
+		}
+		Logger.Print("Overriding partitionStopValue with environment variable: " + prefix + "PARTITION_STOP_VALUE" + " with value: " + partitionStopValue)
+		config.partitionStopValue = value
+	}
 
 	return config
 }
@@ -535,6 +581,24 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 					Logger.Fatalf("Error parsing offsetTo command line argument: %s must be >= -1", value)
 				}
 				config.offsetTo = v
+			case "partitionStartValue":
+				v, err := strconv.Atoi(value)
+				if err != nil {
+					Logger.Fatalf("Error parsing partitionStartValue command line argument: %v", err)
+				}
+				if v < 0 {
+					Logger.Fatalf("Error parsing partitionStartValue command line argument: %s must be a non-negative integer", value)
+				}
+				config.partitionStartValue = v
+			case "partitionStopValue":
+				v, err := strconv.Atoi(value)
+				if err != nil {
+					Logger.Fatalf("Error parsing partitionStopValue command line argument: %v", err)
+				}
+				if v < 0 {
+					Logger.Fatalf("Error parsing partitionStopValue command line argument: %s must be a non-negative integer", value)
+				}
+				config.partitionStopValue = v
 			default:
 				found = false
 				Logger.Warnf("Unknown command line override: %s", key)
@@ -648,6 +712,12 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	if result.eps < -1 {
 		Logger.Fatalf("Error in config eps. Illegal value: %d. Legal values are -1 or higher", result.eps)
 	}
+	if result.partitionStartValue < 0 {
+		Logger.Fatalf("Error in config partitionStartValue. Illegal value: %d. Legal values are 0 or higher", result.partitionStartValue)
+	}
+	if result.partitionStopValue < 0 {
+		Logger.Fatalf("Error in config partitionStopValue. Illegal value: %d. Legal values are 0 or higher", result.partitionStopValue)
+	}
 
 	return result
 }
@@ -681,6 +751,8 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  payloadSize: %d", config.payloadSize)
 	Logger.Printf("  compressWhenLengthExceeds: %d bytes", config.compressWhenLengthExceeds)
 	Logger.Printf("  partition: %d", config.partition)
+	Logger.Printf("  partitionStartValue: %d", config.partitionStartValue)
+	Logger.Printf("  partitionStopValue: %d", config.partitionStopValue)
 	Logger.Printf("  offsetFrom: %d", config.offsetFrom)
 	Logger.Printf("  offsetTo: %d", config.offsetTo)
 }
