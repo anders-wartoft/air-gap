@@ -1,14 +1,18 @@
 package main
 
 import (
-	"crypto/sha1"
+	"bufio"
+	"context"
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
+
 	"github.com/IBM/sarama"
 )
 type DATA_STATE int 
@@ -17,16 +21,37 @@ const (
 	Received
 	Duplicated
 	Unknown
+	UnknownDuplicated
 )
+func (d DATA_STATE) String() string {
+	switch d {
+	case Duplicated:
+		return "DUPLICATED"
+	case Received:
+		return "RECEIVED"
+	case Sent:
+		return "SENT"
+	case Unknown:
+		return "UNKNOWN"
+	case UnknownDuplicated:
+		return "UNKNOWN_DUPLICATED"
+	default:
+		panic(fmt.Sprintf("unexpected main.DATA_STATE: %#v", d))
+	}
+}
 type DATA_CONTENT struct {
 	State DATA_STATE
 	Created time.Time
 	Received time.Time
 	Duplicated time.Time
+	Duplicated_times uint16
 	Unknown time.Time
 }
-var DATA map[[20]byte]*DATA_CONTENT
-var DATA_MUTEX sync.RWMutex
+type DATA_struct struct {
+	Data map[[32]byte]*DATA_CONTENT
+	Mutex sync.RWMutex
+}
+var DATA DATA_struct
 var PRODUCED uint32 = 0
 var RECEIVED uint32 = 0
 var DUPLICATED uint32 = 0
@@ -36,28 +61,35 @@ var UNKNOWN uint32 = 0
 
 var MITM_PORT = 1234
 var MITM_DEST_ADDR = "downstream:1235"
-var MITM_DROP_PROBABILITY = 0.22
+var MITM_DROP_PROBABILITY = 0.01
 
-var PRODUCER_SLEEP_TIME_MS = 10
+var PRODUCER_SLEEP_TIME_MS = 1
+var PRODUCER_MAX_PACKET_SIZE = 10000
 
 var KAFKA_ADDR = []string{ "kafka:9092" }
 var KAFKA_PRODUCE_TOPIC = "send"
-var KAFKA_CONSUME_TOPIC = "dedup"
-//var KAFKA_CONSUME_TOPIC = "receive"
+var KAFKA_CONSUME_TOPIC = []string{"dedup"}
+//var KAFKA_CONSUME_TOPIC = []string{"receive"}
+
+var FILE_PATH = "/out/stats.csv"
 
 func main() {
-	DATA = make(map[[20]byte]*DATA_CONTENT)
+	DATA = DATA_struct{
+		Data: make(map[[32]byte]*DATA_CONTENT),
+		Mutex: sync.RWMutex{},
+	}
 
 	go mitm()
 	go produce()
 	go consume()
 	for {
 		write_stats()
+		write_file()
 		time.Sleep(time.Second*5)
 	}
 }
 
-func randomBytes(n int) []byte {
+func randomBytes(n int) []byte  {
 	b := make([]byte, n)
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for i := 0; i < n; i += 8 {
@@ -70,15 +102,14 @@ func randomBytes(n int) []byte {
 	return b
 }
 
-func generate_message() []byte {
-	//max_length := 1048576
-	max_length := 104857
-	length := rand.Intn(max_length)
-	bytes := randomBytes(length)
-	return bytes
+var message_count uint64 = 0
+func generate_message() string {
+	current_count := atomic.AddUint64(&message_count, 1)
+	length := rand.Intn(PRODUCER_MAX_PACKET_SIZE)+1
+	payload := randomBytes(length)
+	return fmt.Sprint(string(payload), current_count)
 }
 func produce() {
-	count := 0
 	config := sarama.NewConfig()
 	config.Producer.Return.Successes = true
 	producer, err := sarama.NewSyncProducer(KAFKA_ADDR, config)
@@ -87,8 +118,7 @@ func produce() {
 	}
 	defer producer.Close()
 	for {
-		msg := string(generate_message())
-		count += 1
+		msg := generate_message()
 		message := &sarama.ProducerMessage{
 			Topic: KAFKA_PRODUCE_TOPIC,
 			Value: sarama.StringEncoder(msg),
@@ -97,17 +127,20 @@ func produce() {
 		if err != nil {
 			log.Println("Failed to produce message: ", err.Error())
 		}
-		sum := sha1.Sum([]byte(msg))
+		sum := sha256.Sum256([]byte(msg))
 		atomic.AddUint32(&PRODUCED, 1)
-		DATA_MUTEX.Lock()
-		DATA[sum] = &DATA_CONTENT{
+		DATA.Mutex.Lock()
+		if _, exist := DATA.Data[sum]; exist {
+			panic("An message was generated with already known hash")
+		}
+		DATA.Data[sum] = &DATA_CONTENT{
 			Created:    time.Now(),
 			Received:   time.Time{},
 			Duplicated: time.Time{},
 			Unknown:    time.Time{},
 			State:      Sent,
 		}
-		DATA_MUTEX.Unlock()
+		DATA.Mutex.Unlock()
 		time.Sleep(time.Millisecond*time.Duration(PRODUCER_SLEEP_TIME_MS))
 	}
 }
@@ -152,64 +185,66 @@ func mitm() {
 func consume() {
 	config := sarama.NewConfig()
 	config.Producer.Return.Successes = true
-	consumer, err := sarama.NewConsumer(KAFKA_ADDR, config)
+	consumer_group, err := sarama.NewConsumerGroup(KAFKA_ADDR, "chaos", config)
 	if err != nil {
 		log.Panicln(err)
 	}
-	defer consumer.Close()
-	consumer_parition, err := consumer.ConsumePartition(KAFKA_CONSUME_TOPIC, 0, sarama.OffsetNewest)
-	if err != nil {
-		log.Panicln(err)
-	}
-	defer consumer_parition.Close()
+	defer consumer_group.Close()
+	cw := context.Background()
 	for {
-		for message := range consumer_parition.Messages() {
-			message_hash := sha1.Sum(message.Value)
-			DATA_MUTEX.RLock()
-			current_sate, exists := DATA[message_hash]
-			DATA_MUTEX.RUnlock()
-			if !exists {
-				DATA_MUTEX.Lock()
-				DATA[message_hash] = &DATA_CONTENT {
-					Created:    time.Time{},
-					Received:   time.Time{},
-					Duplicated: time.Time{},
-					Unknown:    time.Now(),
-					State:      Unknown,
-				}
-				DATA_MUTEX.Unlock()
-				continue
-			}
-			switch  current_sate.State {
-			case Sent:
-				DATA_MUTEX.Lock()
-				DATA[message_hash].Received = time.Now()
-				DATA_MUTEX.Unlock()
-				atomic.AddUint32(&RECEIVED, 1)
-			case Received:
-				DATA_MUTEX.Lock()
-				current_sate.Duplicated = time.Now()
-				DATA_MUTEX.Unlock()
-				atomic.AddUint32(&DUPLICATED, 1)
-			case Duplicated:
-				DATA_MUTEX.Lock()
-				current_sate.Duplicated = time.Now()
-				DATA_MUTEX.Unlock()
-				atomic.AddUint32(&DUPLICATED, 1)
-			case Unknown:
-				DATA_MUTEX.Lock()
-				current_sate.Unknown = time.Now()
-				DATA_MUTEX.Unlock()
-				atomic.AddUint32(&UNKNOWN, 1)
-			default:
-				DATA_MUTEX.Lock()
-				current_sate.Unknown = time.Now()
-				DATA_MUTEX.Unlock()
-				atomic.AddUint32(&UNKNOWN, 1)
-			}
+		err := consumer_group.Consume(cw, KAFKA_CONSUME_TOPIC, &handler{})
+		if err != nil {
+			log.Println("COULDN'T CONSUME!!")
 		}
 	}
+}
+type handler struct{}
 
+func (h *handler) Setup(s sarama.ConsumerGroupSession) error   { return nil }
+func (h *handler) Cleanup(s sarama.ConsumerGroupSession) error { return nil }
+
+func (h *handler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    for message := range claim.Messages() {
+	message_hash := sha256.Sum256(message.Value)
+	consume_message(message_hash)
+    }
+    return nil
+}
+func consume_message(message_hash [32]byte) {
+	DATA.Mutex.Lock()
+	defer DATA.Mutex.Unlock()
+	current_sate, exists := DATA.Data[message_hash]
+	if !exists {
+		DATA.Data[message_hash] = &DATA_CONTENT {
+			Created:    time.Time{},
+			Received:   time.Time{},
+			Duplicated: time.Time{},
+			Unknown:    time.Now(),
+			State:      Unknown,
+		}
+		return
+	}
+	switch  current_sate.State {
+	case Sent:
+		current_sate.State = Received
+		DATA.Data[message_hash].Received = time.Now()
+		atomic.AddUint32(&RECEIVED, 1)
+	case Received:
+		current_sate.State = Duplicated
+		current_sate.Duplicated = time.Now()
+		current_sate.Duplicated_times += 1
+		atomic.AddUint32(&DUPLICATED, 1)
+	case Duplicated:
+		current_sate.State = Duplicated
+		current_sate.Duplicated = time.Now()
+		current_sate.Duplicated_times += 1
+		atomic.AddUint32(&DUPLICATED, 1)
+	case Unknown, UnknownDuplicated:
+		current_sate.State = UnknownDuplicated
+		current_sate.Duplicated_times += 1
+	default:
+		panic(fmt.Sprintf("unexpected main.DATA_STATE: %#v", current_sate.State))
+	}
 }
 
 func write_stats() {
@@ -220,4 +255,34 @@ func write_stats() {
 	forwarded := atomic.LoadUint32(&FORWARDED)
 	unknown := atomic.LoadUint32(&UNKNOWN)
 	fmt.Println("PRODUCED: ", produced, " | RECEIVED: ", received, " | DUPLICATED: ", duplicated, " | DROPPED: ", dropped, " | FORWARDED: ", forwarded, " | UNKNOWN: ", unknown)
+}
+func write_file() {
+	DATA.Mutex.RLock()
+	defer DATA.Mutex.RUnlock()
+	start_time := time.Now()
+	defer fmt.Println("It took: ", (time.Now().Second() - start_time.Second()), "s to create the statistics file" )
+
+	file, err := os.Create(FILE_PATH)
+	if err != nil {
+		log.Println("ERROR CREATING STATISTICS FILE: ", err.Error())
+		return
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	fmt.Fprintln(writer, "ID,STATE,CREATED,RECEIVED,DUPLICATED,DUPLICATED_TIMES, UNKNOWN")
+	for hash, packet := range(DATA.Data) {
+		fmt.Fprintf(writer, "%x,%s,%v,%v,%v,%d,%v\n", 
+			hash, 
+			packet.State, 
+			packet.Created, 
+			packet.Received,
+			packet.Duplicated, 
+			packet.Duplicated_times, 
+			packet.Unknown)
+	}
+	err = writer.Flush()
+	if err != nil {
+		log.Println("Error flushing statistics file: ", err.Error())
+	}
 }

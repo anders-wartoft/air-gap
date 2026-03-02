@@ -23,45 +23,45 @@ services:
       - /bin/bash
       - -c
       - |
-        sleep 1m &&
+        sleep 10 &&
         /dist/target/linux-amd64/upstream /dist/tests/chaos-testing/upstream.properties
 
-  resend:
-    networks:
-      - airgap
-    depends_on:
-      - downstream
-    image: rockylinux:9.3
-    volumes:
-      - ../../dist:/dist:ro
-      - ../../:/dist:ro
-      - ./:/gaps
-    restart: always
-    entrypoint:
-      - /bin/bash
-      - -c
-      - |
-        sleep 1m &&
-        /dist/target/linux-amd64/resend /dist/tests/chaos-testing/resend.properties
-
-  create:
-    networks:
-      - airgap
-    depends_on:
-      - downstream
-    image: rockylinux:9.3
-    volumes:
-      - ../../dist:/dist:ro
-      - ../../:/dist:ro
-      - ./:/gaps
-    restart: always
-    entrypoint:
-      - /bin/bash
-      - -c
-      - |
-        sleep 1m && 
-        /dist/target/linux-amd64/create /dist/tests/chaos-testing/create.properties
-
+#  resend:
+#    networks:
+#      - airgap
+#    depends_on:
+#      - downstream
+#    image: rockylinux:9.3
+#    volumes:
+#      - ../../dist:/dist:ro
+#      - ../../:/dist:ro
+#      - ./:/gaps
+#    restart: always
+#    entrypoint:
+#      - /bin/bash
+#      - -c
+#      - |
+#        sleep 10 &&
+#        /dist/target/linux-amd64/resend /dist/tests/chaos-testing/resend.properties
+#
+#  create:
+#    networks:
+#      - airgap
+#    depends_on:
+#      - downstream
+#    image: rockylinux:9.3
+#    volumes:
+#      - ../../dist:/dist:ro
+#      - ../../:/dist:ro
+#      - ./:/gaps
+#    restart: always
+#    entrypoint:
+#      - /bin/bash
+#      - -c
+#      - |
+#        sleep 10 &&
+#        /dist/target/linux-amd64/create /dist/tests/chaos-testing/create.properties
+#
 
   downstream:
     networks:
@@ -75,7 +75,7 @@ services:
       - /bin/bash
       - -c
       - |
-        sleep 1m &&
+        sleep 10 &&
         /dist/target/linux-amd64/downstream /dist/tests/chaos-testing/downstream.properties
 
   dedup:
@@ -87,16 +87,11 @@ services:
     volumes:
       - ../../target/dist:/dist:ro
       - ../../config:/config:ro
-    environment:
-      RAW_TOPICS: downstream
-      CLEAN_TOPIC: dedup
-      GAP_TOPIC: gaps
-      BOOTSTRAP_SERVERS: kafka:9092
     entrypoint:
       - /bin/bash
       - -c
       - |
-        sleep 1m &&
+        sleep 10 &&
         dnf install -y /dist/airgap-dedup-1.0.0-325.noarch.rpm &&
         export RAW_TOPICS=receive &&
         export CLEAN_TOPIC=dedup &&
@@ -112,16 +107,12 @@ services:
       - kafka
     volumes:
       - ../../:/dist:ro
-    environment:
-      RAW_TOPICS: downstream
-      CLEAN_TOPIC: dedup
-      GAP_TOPIC: gaps
-      BOOTSTRAP_SERVERS: kafka:9092
+      - ./:/out:rw
     entrypoint:
       - /bin/bash
       - -c
       - |
-        sleep 1m &&
+        sleep 1 &&
         dnf install -y golang &&
         cd /dist &&
         go run /dist/tests/chaos-testing/main.go
