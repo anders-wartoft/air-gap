@@ -64,7 +64,8 @@ var MITM_DEST_ADDR = "downstream:1235"
 var MITM_DROP_PROBABILITY = 0.01
 
 var PRODUCER_SLEEP_TIME_MS = 1
-var PRODUCER_MAX_PACKET_SIZE = 10000
+//var PRODUCER_MAX_PACKET_SIZE = 1000000
+var PRODUCER_MAX_PACKET_SIZE = 100
 
 var KAFKA_ADDR = []string{ "kafka:9092" }
 var KAFKA_PRODUCE_TOPIC = "send"
@@ -78,7 +79,6 @@ func main() {
 		Data: make(map[[32]byte]*DATA_CONTENT),
 		Mutex: sync.RWMutex{},
 	}
-
 	go mitm()
 	go produce()
 	go consume()
@@ -101,13 +101,12 @@ func randomBytes(n int) []byte  {
 	}
 	return b
 }
-
 var message_count uint64 = 0
 func generate_message() string {
-	current_count := atomic.AddUint64(&message_count, 1)
-	length := rand.Intn(PRODUCER_MAX_PACKET_SIZE)+1
-	payload := randomBytes(length)
-	return fmt.Sprint(string(payload), current_count)
+       current_count := atomic.AddUint64(&message_count, 1)
+       length := rand.Intn(PRODUCER_MAX_PACKET_SIZE)+1
+       payload := randomBytes(length)
+       return fmt.Sprint(string(payload), " number is : ", current_count)
 }
 func produce() {
 	config := sarama.NewConfig()
@@ -134,11 +133,12 @@ func produce() {
 			panic("An message was generated with already known hash")
 		}
 		DATA.Data[sum] = &DATA_CONTENT{
-			Created:    time.Now(),
-			Received:   time.Time{},
-			Duplicated: time.Time{},
-			Unknown:    time.Time{},
-			State:      Sent,
+			Created:          time.Now(),
+			Received:         time.Time{},
+			Duplicated:       time.Time{},
+			Unknown:          time.Time{},
+			State:            Sent,
+			Duplicated_times: 0,
 		}
 		DATA.Mutex.Unlock()
 		time.Sleep(time.Millisecond*time.Duration(PRODUCER_SLEEP_TIME_MS))
@@ -159,12 +159,16 @@ func mitm() {
 	if err != nil {
 		log.Panicln("Unable to start mitm resolver: ", err.Error())
 	}
+	sender_conn, err := net.DialUDP("udp", nil, sender_addr)
+	if err != nil {
+		log.Panicln("Unable to start mitm dial: ", err.Error())
+	}
 
 	buffer := make([]byte, 1024)
 	for {
 		n, _, err := listen_conn.ReadFromUDP(buffer)
 		if err != nil {
-			log.Println("Error reding udp: ", err.Error())
+			log.Println("Error reading udp: ", err.Error())
 			continue
 		}
 		r := rand.Float64()
@@ -173,10 +177,6 @@ func mitm() {
 			continue 
 		}
 		FORWARDED+=1
-		sender_conn, err := net.DialUDP("udp", nil, sender_addr)
-		if err != nil {
-			log.Panicln("Unable to start mitm dialup: ", err.Error())
-		}
 		sender_conn.Write(buffer[:n])
 		sender_conn.Close()
 	}
@@ -207,6 +207,7 @@ func (h *handler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama
     for message := range claim.Messages() {
 	message_hash := sha256.Sum256(message.Value)
 	consume_message(message_hash)
+	session.MarkMessage(message, "")
     }
     return nil
 }
@@ -216,11 +217,12 @@ func consume_message(message_hash [32]byte) {
 	current_sate, exists := DATA.Data[message_hash]
 	if !exists {
 		DATA.Data[message_hash] = &DATA_CONTENT {
-			Created:    time.Time{},
-			Received:   time.Time{},
-			Duplicated: time.Time{},
-			Unknown:    time.Now(),
-			State:      Unknown,
+			Created:          time.Time{},
+			Received:         time.Time{},
+			Duplicated:       time.Time{},
+			Unknown:          time.Now(),
+			State:            Unknown,
+			Duplicated_times: 0,
 		}
 		return
 	}

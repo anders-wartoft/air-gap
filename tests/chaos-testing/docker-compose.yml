@@ -2,6 +2,8 @@ services:
   kafka:
     networks:
       - airgap
+    ports:
+      - 9092:9092
     environment:
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
