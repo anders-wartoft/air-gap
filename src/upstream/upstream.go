@@ -103,6 +103,29 @@ func translateTopic(input string) string {
 	return input
 }
 
+func transformMessageID(id string) string {
+	parts := strings.Split(id, "_")
+	if len(parts) != 3 {
+		return id
+	}
+
+	parts[0] = translateTopic(parts[0])
+
+	partition, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return strings.Join(parts, "_")
+	}
+
+	partition += config.partitionStartValue
+	if partition < 0 || partition > 2147483647 {
+		Logger.Fatalf("Partition out of int32 range after partitionStartValue is applied: %d", partition)
+		os.Exit(1)
+	}
+	parts[1] = strconv.Itoa(partition)
+
+	return strings.Join(parts, "_")
+}
+
 // UpdateKafkaStatus updates the Kafka connection status and logs changes
 func UpdateKafkaStatus(newStatus string) {
 	kafkaStatusMu.Lock()
@@ -315,7 +338,6 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 		}
 	}
 
-	// Filtering and topic name translation
 	if config.filter != nil {
 		parts := strings.Split(id, "_")
 		if len(parts) == 3 {
@@ -327,11 +349,10 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 					return keepRunning
 				}
 			}
-			// We might change the topic name here as well
-			parts[0] = translateTopic(parts[0])
-			id = strings.Join(parts, "_")
 		}
 	}
+
+	id = transformMessageID(id)
 	// Compress or not
 	var isCompressed = false
 	if config.compressWhenLengthExceeds > 0 && len(received) > config.compressWhenLengthExceeds {

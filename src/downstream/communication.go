@@ -241,8 +241,29 @@ func connectToKafka(config TransferConfiguration) {
 		Logger.Panicf("Error creating producer: %v\n", err)
 	}
 	go func() {
-		for err := range producer.Errors() {
-			Logger.Println("Failed to send message:", err)
+		for producerErr := range producer.Errors() {
+			topic := ""
+			partition := int32(-1)
+			key := "<nil>"
+
+			if producerErr != nil && producerErr.Msg != nil {
+				topic = producerErr.Msg.Topic
+				partition = producerErr.Msg.Partition
+				if producerErr.Msg.Key != nil {
+					keyBytes, keyErr := producerErr.Msg.Key.Encode()
+					if keyErr != nil {
+						key = fmt.Sprintf("<key encode error: %v>", keyErr)
+					} else {
+						key = string(keyBytes)
+					}
+				}
+			}
+
+			if producerErr != nil {
+				Logger.Errorf("Failed to send message: topic=%s partition=%d key=%s error=%v", topic, partition, key, producerErr.Err)
+			} else {
+				Logger.Errorf("Failed to send message: unknown producer error")
+			}
 		}
 	}()
 	go func() {

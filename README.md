@@ -260,11 +260,62 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | caFile | AIRGAP_UPSTREAM_CA_FILE | | The CA that issued the Kafka server's certificate |
 | deliverFilter | AIRGAP_UPSTREAM_DELIVER_FILTER | | Filter so not all events from Kafka is sent. Can be used to enable load balancing (see Load Balancing chapter below) |
 | topicTranslations | AIRGAP_UPSTREAM_TOPIC_TRANSLATIONS | | If you need to rename a topic before sending the messages you can use this: `{"inputTopic1":"outputTopic1","inputTopic2":"outputTopic2"}`. Here, if the name of a topic upstreams is `inputTopic1` it will be sent as `outputTopic1` from upstream |
+| partitionStartValue | AIRGAP_UPSTREAM_PARTITION_START_VALUE | 0 | Adds a fixed value to each source partition before sending. Example: source partitions `0..99` with `partitionStartValue=100` become downstream partitions `100..199`. |
 | logStatistics | AIRGAP_UPSTREAM_LOG_STATISTICS | 0 | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
 | compressWhenLengthExceeds | AIRGAP_UPSTREAM_COMPRESS_WHEN_LOG_EXCEEDS | 0 | Using compression (gzip) on short events can make them longer. The break-even length is around 100 bytes for the gzip compression. Set this to a value (ideally above 1200) to gzip longer events |
 | inputFilterRules | AIRGAP_UPSTREAM_INPUT_FILTER_RULES | | Path to file containing ordered allow/deny regex rules, or inline comma-separated rules. Format: `action:regex_pattern` where action is `allow` or `deny`. Rules evaluated in order, first match wins. See [InputFilter.md](doc/InputFilter.md) for details |
 | inputFilterDefaultAction | AIRGAP_UPSTREAM_INPUT_FILTER_DEFAULT_ACTION | allow | Default action when no filter rules match: `allow` or `deny`. Use `deny` for allowlist approach, `allow` for blocklist approach |
 | inputFilterTimeout | AIRGAP_UPSTREAM_INPUT_FILTER_TIMEOUT | 100 | Regex match timeout in milliseconds for input filter rules. Protects against ReDoS attacks. Increase for complex patterns or large payloads |
+
+### Example use case: Two clusters, same topic name, no topic rename possible
+
+For the same scenario in the redundancy/load-balancing guide, see [Redundancy and Load Balancing.md](doc/Redundancy%20and%20Load%20Balancing.md#single-downstream-with-same-topic-name-from-two-clusters).
+
+If two upstream Kafka clusters both have a topic with the same name (for example `transfer`), and you cannot rename one or both topics in upstream, you can still use two upstream instances into one downstream + one deduplicator by configuring one upstream with `partitionStartValue`.
+
+Example setup:
+
+- Upstream A: `topic=transfer`, `partitionStartValue=0`
+- Upstream B: `topic=transfer`, `partitionStartValue=100`
+
+Result:
+
+- Stream A keeps partition IDs `0..99`
+- Stream B is remapped to partition IDs `100..199`
+- Both streams can be written to the same downstream topic name and still be deduplicated independently (dedup key space stays unique by topic+partition+offset)
+- This allows one downstream and one deduplicator to handle both clusters even when upstream topic names must remain unchanged
+
+Operator checklist:
+
+- Keep the original topic name unchanged in both upstream instances (for example `topic=transfer`).
+- Configure unique partition ranges per upstream using `partitionStartValue` (for example `0` and `100`).
+- Ensure the downstream target topic has enough partitions for the highest mapped partition ID.
+- Run one deduplicator that reads the shared downstream topic (normal single-topic setup).
+- If resend is used, configure the same `partitionStartValue` in resend as in the corresponding upstream stream.
+
+Important sizing rule:
+
+- The downstream topic must have enough partitions for the highest mapped partition ID.
+- Example above requires at least `200` partitions.
+- If a source has `10` partitions and uses `partitionStartValue=100`, the downstream topic must have at least `110` partitions.
+
+Three-cluster example (same topic name in all clusters):
+
+| Cluster | Source partitions | `partitionStartValue` | Downstream partitions |
+| ------- | ----------------- | --------------------- | --------------------- |
+| A       | `0..4`            | `0`                   | `0..4`                |
+| B       | `0..4`            | `10`                  | `10..14`              |
+| C       | `0..4`            | `20`                  | `20..24`              |
+
+Matching resend setup per cluster:
+
+- Cluster A resend: `partitionStartValue=0`, `partitionStopValue=5`
+- Cluster B resend: `partitionStartValue=10`, `partitionStopValue=5`
+- Cluster C resend: `partitionStartValue=20`, `partitionStopValue=5`
+
+This pattern scales to any number of clusters as long as downstream partition windows are disjoint.
+
+Empty partitions are not a deduplication problem, but they still count toward topic partition capacity.
 
 ### Downstream Settings
 
@@ -785,6 +836,10 @@ The `create` application is used to create resend bundle files that contain info
 ### Resend
 
 The `resend` application is used to either consume resend bundles created by the `create` application, or resend everything from a specified timestamp. The application can not be run as a service. The application will terminate when the information has been resent for all partitions.
+
+If `partitionStartValue` was used in upstream, set the same `partitionStartValue` in resend. Gap bundles contain downstream partition IDs, and resend must map those back to upstream partitions when reading from Kafka while preserving downstream partition IDs in sent message IDs.
+
+See [Resend.md](doc/Resend.md) for resend parameter details and examples.
 
 ## Dependencies
 

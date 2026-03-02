@@ -47,6 +47,7 @@ type TransferConfiguration struct {
 	inputFilterDefaultAction     string                   // default action when no rules match (allow or deny)
 	inputFilterTimeout           int                      // regex match timeout in milliseconds (default 100)
 	inputFilter                  *inputfilter.InputFilter // input filter instance
+	partitionStartValue          int                      // value added to source partition number before sending
 	eps                          float64                  // events per second
 	logLevel                     string                   // log level: DEBUG, INFO, WARN, ERROR, FATAL
 	logStatistics                int32                    // log statistics every n seconds, 0 means no logging
@@ -69,6 +70,7 @@ func DefaultConfiguration() TransferConfiguration {
 	config.logStatistics = 0             // default: no statistics
 	config.compressWhenLengthExceeds = 0 // default: no compression
 	config.inputFilterTimeout = 100      // default: 100ms regex timeout
+	config.partitionStartValue = 0
 	return config
 }
 
@@ -278,6 +280,18 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 					Logger.Printf("inputFilterTimeout: %d", result.inputFilterTimeout)
 				}
 			}
+		case "partitionStartValue":
+			tmp, err := strconv.Atoi(value)
+			if err != nil {
+				Logger.Fatalf("Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
+			} else {
+				if tmp < 0 {
+					Logger.Fatalf("Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
+				} else {
+					result.partitionStartValue = tmp
+					Logger.Printf("partitionStartValue: %d", result.partitionStartValue)
+				}
+			}
 		default:
 			Logger.Fatalf("Unknown configuration key: %s", key)
 		}
@@ -458,6 +472,15 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			}
 		}
 	}
+	if partitionStartValue := os.Getenv(prefix + "PARTITION_START_VALUE"); partitionStartValue != "" {
+		if partitionStartValueInt, err := strconv.Atoi(partitionStartValue); err == nil {
+			if partitionStartValueInt < 0 {
+				Logger.Fatalf("Error in environment variable AIRGAP_UPSTREAM_PARTITION_START_VALUE. Illegal value: %s. Legal values are a non-negative integer", partitionStartValue)
+			}
+			Logger.Print("Overriding partitionStartValue with environment variable: " + prefix + "PARTITION_START_VALUE" + " with value: " + partitionStartValue)
+			config.partitionStartValue = partitionStartValueInt
+		}
+	}
 
 	return config
 }
@@ -573,6 +596,9 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 			Logger.Fatalf("Error in config topicTranslations. Illegal value: %s. Legal values are JSON objects 'from': 'to', ...", result.topicTranslations)
 		}
 	}
+	if result.partitionStartValue < 0 {
+		Logger.Fatalf("Error in config partitionStartValue. Illegal value: %d. Legal values are a non-negative integer", result.partitionStartValue)
+	}
 	// Set up a filtering scheme, if configured. You can filter every other, third, fifth message etc
 	// by setting filterConfig to a string like "2,3,22,23,42,43". This will send messages 2 and 3
 	// of every group of 23 messages. The last group (42,43) is just to verify that the user has
@@ -650,4 +676,5 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  inputFilterRules: %s", config.inputFilterRules)
 	Logger.Printf("  inputFilterDefaultAction: %s", config.inputFilterDefaultAction)
 	Logger.Printf("  inputFilterTimeout: %dms", config.inputFilterTimeout)
+	Logger.Printf("  partitionStartValue: %d", config.partitionStartValue)
 }
