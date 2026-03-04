@@ -24,6 +24,13 @@ export BOOTSTRAP_SERVERS=localhost:9092
 export STATE_DIR_CONFIG=/tmp/dedup_state_a/
 export GAP_EMIT_INTERVAL_SEC=60
 export PERSIST_INTERVAL_MS=10000
+export FAIL_FAST=false
+export FAIL_FAST_STARTUP_TIMEOUT_MS=30000
+export FAIL_FAST_CHECK_INTERVAL_MS=10000
+export FAIL_FAST_CHECK_TIMEOUT_MS=5000
+export RETRY_BACKOFF_MS=5000
+export RETRY_BACKOFF_MAX_MS=60000
+export RETRY_BACKOFF_JITTER_PCT=20
 
 # For TLS connections, also add
 export KAFKA_SECURITY_PROTOCOL=SSL
@@ -52,19 +59,30 @@ java -jar java-streams/target/air-gap-deduplication-fat-<version>.jar
 
 ## Environment Variables
 
-| Variable                | Description                                                        | Example Value                |
-|-------------------------|--------------------------------------------------------------------|------------------------------|
-| `WINDOW_SIZE`           | Number of events each window can hold                              | `1000`                       |
-| `MAX_WINDOWS`           | Maximum number of windows to keep in memory                        | `10`                         |
-| `RAW_TOPICS`            | Input topic to read from. See the documentation on Redundancy and Load Balancing for more details | `transfer`                   |
-| `CLEAN_TOPIC`           | Output topic for deduplicated events                               | `output`                     |
-| `GAP_TOPIC`             | Topic to write gaps to                                             | `gaps`                       |
-| `BOOTSTRAP_SERVERS`     | Kafka connection URL                                               | `localhost:9092`             |
-| `STATE_DIR_CONFIG`      | Path to writable directory for local state                         | `/tmp/dedup_state_a/`        |
-| `GAP_EMIT_INTERVAL_SEC` | How often to emit gaps to GAP_TOPIC (in seconds)                   | `60`                         |
-| `PERSIST_INTERVAL_MS`   | How often to sync local state with Kafka (in milliseconds)         | `10000`                      |
+| Variable                       | Description                                                                                     | Default Value                       |
+| ------------------------------ | ----------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `WINDOW_SIZE`                  | Number of events each window can hold                                                           | `1000`                              |
+| `MAX_WINDOWS`                  | Maximum number of windows to keep in memory                                                     | `5`                                 |
+| `RAW_TOPICS`                   | Input topic(s) to read from                                                                     | `transfer`                          |
+| `CLEAN_TOPIC`                  | Output topic for deduplicated events                                                            | `dedup`                             |
+| `GAP_TOPIC`                    | Topic to write gaps to                                                                          | `gaps`                              |
+| `BOOTSTRAP_SERVERS`            | Kafka bootstrap servers                                                                         | `kafka-downstream.sitia.nu:9092`    |
+| `STATE_DIR_CONFIG`             | Writable directory for local state                                                              | `/tmp/var/lib/kafka-streams/state`  |
+| `GAP_EMIT_INTERVAL_SEC`        | How often to emit gaps to `GAP_TOPIC` (seconds)                                                 | `60`                                |
+| `PERSIST_INTERVAL_MS`          | How often local state is synchronized with Kafka (milliseconds)                                 | `5000`                              |
+| `FAIL_FAST`                    | If `true`, terminate on Kafka startup/connectivity failures                                     | `false`                             |
+| `FAIL_FAST_STARTUP_TIMEOUT_MS` | Max time to reach `RUNNING` state in fail-fast mode (milliseconds)                              | `30000`                             |
+| `FAIL_FAST_CHECK_INTERVAL_MS`  | Interval between runtime Kafka connectivity checks in fail-fast mode (milliseconds)             | `10000`                             |
+| `FAIL_FAST_CHECK_TIMEOUT_MS`   | Timeout for each runtime Kafka connectivity check in fail-fast mode (milliseconds)              | `5000`                              |
+| `RETRY_BACKOFF_MS`             | Base delay before restart/retry when `FAIL_FAST=false` (milliseconds)                           | `5000`                              |
+| `RETRY_BACKOFF_MAX_MS`         | Upper bound for exponential retry backoff when `FAIL_FAST=false` (milliseconds)                 | `60000`                             |
+| `RETRY_BACKOFF_JITTER_PCT`     | Jitter percentage applied to retry delays to avoid synchronized retries (`0`-`100`)             | `20`                                |
 
-One of the benefits of this software is that, ideally, it should be able to support exactly-once-delivery. Since upstream can be configured to send the same events several times, we need a mechanism to de-duplicate the received data stream. 
+When `FAIL_FAST=true`, the process exits with a non-zero status code on Kafka startup/connectivity problems. This mode is intended for environments where a supervisor (for example systemd, Kubernetes, or another process monitor) restarts the service automatically.
+
+When `FAIL_FAST=false`, the process stays alive and retries with exponential backoff and jitter. On startup, if source topics are temporarily unavailable, startup is delayed and retried using the same backoff settings.
+
+One of the benefits of this software is that, ideally, it should be able to support exactly-once-delivery. Since upstream can be configured to send the same events several times, we need a mechanism to de-duplicate the received data stream.
 
 The data stream works like this:
 
@@ -73,6 +91,8 @@ The data stream works like this:
 Events from Kafka upstream are read by upstream and sent via UDP do downstream. Downstream will write the events to Kafka downstream with the same topic name and partition as Kafka upstream has. The order of events and keys are changed. The keys downstream will be a triple: [topic]_[partition]_[offset] where the values are taken from Kafka upstream.
 
 ## Deduplication
+
+If deduplication appears to forward records that look like duplicates, see [FAQ.md](FAQ.md#the-deduplication-only-moves-messages-from-the-input-topic-to-the-output-topic-but-doesnt-remove-duplicates).
 
 Deduplication is performed by inspecting each event in the downstream receive topic. Details of how the Gap detector functions are given below. The topic name, partition and offset are used in the GapDetector code to get one of the following results:
 
@@ -189,6 +209,13 @@ Topics:
 Kafka:
 
 - BOOTSTRAP_SERVERS - The Kafka connection url.
+- FAIL_FAST - If true, terminate immediately when Kafka cannot be reached at startup or during runtime checks.
+- FAIL_FAST_STARTUP_TIMEOUT_MS - Maximum startup wait time before fail-fast termination.
+- FAIL_FAST_CHECK_INTERVAL_MS - How often runtime connectivity checks are executed in fail-fast mode.
+- FAIL_FAST_CHECK_TIMEOUT_MS - Timeout for each runtime connectivity check in fail-fast mode.
+- RETRY_BACKOFF_MS - Base retry delay in milliseconds when FAIL_FAST is false.
+- RETRY_BACKOFF_MAX_MS - Maximum retry delay in milliseconds when FAIL_FAST is false.
+- RETRY_BACKOFF_JITTER_PCT - Retry jitter percentage (0-100) applied to retry delays when FAIL_FAST is false.
 
 State:
 
@@ -215,6 +242,13 @@ BOOTSTRAP_SERVERS=192.168.153.148:9092
 STATE_DIR_CONFIG=/tmp/dedup_state_a/
 GAP_EMIT_INTERVAL_SEC=60
 PERSIST_INTERVAL_MS=10000
+FAIL_FAST=false
+FAIL_FAST_STARTUP_TIMEOUT_MS=30000
+FAIL_FAST_CHECK_INTERVAL_MS=10000
+FAIL_FAST_CHECK_TIMEOUT_MS=5000
+RETRY_BACKOFF_MS=5000
+RETRY_BACKOFF_MAX_MS=60000
+RETRY_BACKOFF_JITTER_PCT=20
 ```
 
 The command to start the deduplicator is:
