@@ -109,7 +109,7 @@ services:
         export PERSIST_INTERVAL_MS=10000 &&
         export BOOTSTRAP_SERVERS=kafka:9092 &&
         export FAIL_FAST=true &&
-        export FAIL_FAST_STARTUP_TIMEOUT_MS=10000 &&
+        export FAIL_FAST_STARTUP_TIMEOUT_MS=30000 &&
         export FAIL_FAST_CHECK_INTERVAL_MS=1000 &&
         export FAIL_FAST_CHECK_TIMEOUT_MS=2000 &&
         java -jar /opt/airgap/dedup/air-gap-deduplication-fat.jar
