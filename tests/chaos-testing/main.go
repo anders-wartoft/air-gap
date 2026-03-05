@@ -60,12 +60,13 @@ var FORWARDED uint32 = 0
 var UNKNOWN uint32 = 0
 
 var MITM_PORT = 1234
-var MITM_DEST_ADDR = "downstream:1235"
-var MITM_DROP_PROBABILITY = 0.01
+var MITM_DEST_ADDR = "downstream:1234"
+var MITM_DROP_PROBABILITY = 0.21
 
 var PRODUCER_SLEEP_TIME_MS = 1
 //var PRODUCER_MAX_PACKET_SIZE = 1000000
-var PRODUCER_MAX_PACKET_SIZE = 100
+var PRODUCER_MAX_PACKET_SIZE =   10000
+//var PRODUCER_MAX_PACKET_SIZE = 100
 
 var KAFKA_ADDR = []string{ "kafka:9092" }
 var KAFKA_PRODUCE_TOPIC = "send"
@@ -177,9 +178,12 @@ func mitm() {
 			continue 
 		}
 		FORWARDED+=1
-		sender_conn.Write(buffer[:n])
-		sender_conn.Close()
+		_, err = sender_conn.Write(buffer[:n])
+		if err != nil {
+			log.Println("Failed to forward message: ", err.Error())
+		}
 	}
+	sender_conn.Close()
 }
 
 func consume() {

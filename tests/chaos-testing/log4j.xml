@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+  <Appenders>
+    <RollingFile name="FileAppender"
+        fileName="/var/log/airgap/dedup/dedup-${env:INSTANCE_ID}.log"
+        filePattern="/var/log/airgap/dedup/dedup-${env:INSTANCE_ID}-%d{yyyy-MM-dd}.log.gz">
+      <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} %-5p - %m%n"/>
+      <Policies>
+        <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+      </Policies>
+    </RollingFile>
+
+    <Console name="Console" target="SYSTEM_OUT">
+      <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} %-5p - %m%n"/>
+    </Console>
+  </Appenders>
+
+  <Loggers>
+    <!-- Application logs -->
+    <Root level="warn">
+      <AppenderRef ref="FileAppender"/>
+      <AppenderRef ref="Console"/>
+    </Root>
+
+    <!-- Kafka logs (even quieter if desired) -->
+    <Logger name="org.apache.kafka" level="error" additivity="false">
+      <AppenderRef ref="FileAppender"/>
+    </Logger>
+
+    <Logger name="org.apache.kafka.streams" level="error" additivity="false">
+      <AppenderRef ref="FileAppender"/>
+    </Logger>
+  </Loggers>
+</Configuration>

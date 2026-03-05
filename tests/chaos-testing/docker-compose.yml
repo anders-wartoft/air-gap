@@ -1,5 +1,6 @@
 services:
   kafka:
+    restart: unless-stopped
     networks:
       - airgap
     ports:
@@ -13,6 +14,7 @@ services:
     image: confluentinc/confluent-local
 
   upstream:
+    restart: unless-stopped
     networks:
       - airgap
     depends_on:
@@ -66,6 +68,7 @@ services:
 #
 
   downstream:
+    restart: unless-stopped
     networks:
       - airgap
     image: rockylinux:9.3
@@ -81,6 +84,7 @@ services:
         /dist/target/linux-amd64/downstream /dist/tests/chaos-testing/downstream.properties
 
   dedup:
+    restart: unless-stopped
     networks:
       - airgap
     image: rockylinux:9.3
@@ -89,19 +93,30 @@ services:
     volumes:
       - ../../target/dist:/dist:ro
       - ../../config:/config:ro
+      - ./:/this:ro
     entrypoint:
       - /bin/bash
       - -c
       - |
         sleep 10 &&
         dnf install -y /dist/airgap-dedup-1.0.0-325.noarch.rpm &&
+        export LOG4J_CONFIGURATION_FILE=/this/log4j2.xml &&
         export RAW_TOPICS=receive &&
         export CLEAN_TOPIC=dedup &&
         export GAP_TOPIC=gaps &&
         export BOOTSTRAP_SERVERS=kafka:9092 &&
+        export WINDOW_SIZE=100000
+        export MAX_WINDOWS=100000
+        export RAW_TOPICS=receive
+        export CLEAN_TOPIC=dedup
+        export GAP_TOPIC=gaps
+        export GAP_EMIT_INTERVAL_SEC=60
+        export PERSIST_INTERVAL_MS=10000
+        export BOOTSTRAP_SERVERS=kafka:9092
         java -jar /opt/airgap/dedup/air-gap-deduplication-fat.jar
 
   chaos:
+    restart: unless-stopped
     networks:
       - airgap
     image: rockylinux:9.3
