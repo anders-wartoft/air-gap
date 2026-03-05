@@ -137,6 +137,18 @@ If a message is read but not delivered (because the thread is sleeping) and the 
 
 This is covered in the [Deduplication.md](doc/Deduplication.md) documentation
 
+For production operation of the Java deduplicator, these environment variables control startup/recovery behavior:
+
+- `FAIL_FAST` (`true`/`false`) - If `true`, the process exits with non-zero status when Kafka startup/connectivity checks fail (recommended with systemd/Kubernetes restart policy).
+- `FAIL_FAST_STARTUP_TIMEOUT_MS` - Max time to reach `RUNNING` before fail-fast termination.
+- `FAIL_FAST_CHECK_INTERVAL_MS` - Interval for runtime connectivity checks in fail-fast mode.
+- `FAIL_FAST_CHECK_TIMEOUT_MS` - Timeout per runtime connectivity check.
+- `RETRY_BACKOFF_MS` - Base retry delay when `FAIL_FAST=false`.
+- `RETRY_BACKOFF_MAX_MS` - Maximum exponential retry delay when `FAIL_FAST=false`.
+- `RETRY_BACKOFF_JITTER_PCT` - Retry jitter percentage (`0-100`) applied to avoid synchronized restarts.
+
+See [Deduplication.md](doc/Deduplication.md) for defaults and full tuning guidance.
+
 ### Using Gap Detection Events to Resend from Upstream
 
 See [Resend.md](doc/Resend.md) for details regarding the create and resend applications.

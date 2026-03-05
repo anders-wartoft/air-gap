@@ -23,10 +23,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.Topology;
+import org.apache.kafka.streams.errors.MissingSourceTopicException;
+import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Named;
@@ -40,6 +44,8 @@ import org.apache.kafka.streams.processor.Cancellable;
 import nu.sitia.airgap.gapdetector.GapDetector;
 
 import java.time.Duration;
+import java.net.InetAddress;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -47,6 +53,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -83,6 +97,22 @@ public class PartitionDedupApp {
     // Persistence interval in milliseconds (configurable)
     public static final long PERSIST_INTERVAL_MS = Long
             .parseLong(System.getenv().getOrDefault("PERSIST_INTERVAL_MS", "5000"));
+
+        // If true, terminate process when Kafka connectivity cannot be established or is lost
+        public static final boolean FAIL_FAST = Boolean
+            .parseBoolean(System.getenv().getOrDefault("FAIL_FAST", "false"));
+        public static final long FAIL_FAST_STARTUP_TIMEOUT_MS = Long
+            .parseLong(System.getenv().getOrDefault("FAIL_FAST_STARTUP_TIMEOUT_MS", "30000"));
+        public static final long FAIL_FAST_CHECK_INTERVAL_MS = Long
+            .parseLong(System.getenv().getOrDefault("FAIL_FAST_CHECK_INTERVAL_MS", "10000"));
+        public static final long FAIL_FAST_CHECK_TIMEOUT_MS = Long
+            .parseLong(System.getenv().getOrDefault("FAIL_FAST_CHECK_TIMEOUT_MS", "5000"));
+        public static final long RETRY_BACKOFF_MS = Long
+            .parseLong(System.getenv().getOrDefault("RETRY_BACKOFF_MS", "5000"));
+        public static final long RETRY_BACKOFF_MAX_MS = Long
+            .parseLong(System.getenv().getOrDefault("RETRY_BACKOFF_MAX_MS", "60000"));
+        public static final int RETRY_BACKOFF_JITTER_PCT = Integer
+            .parseInt(System.getenv().getOrDefault("RETRY_BACKOFF_JITTER_PCT", "20"));
 
     // Add environment variable for missing event reporting interval
     public static final long MISSING_REPORT_INTERVAL_SEC = Long
@@ -307,6 +337,8 @@ public class PartitionDedupApp {
             }
         }
 
+        validateRuntimeConfiguration();
+
         LOG.info("Starting PartitionDedupApp with config: {}", props);
         ;
         LOG.info("BOOTSTRAP_SERVERS={}", BOOTSTRAP_SERVERS);
@@ -318,6 +350,13 @@ public class PartitionDedupApp {
         LOG.info("MAX_WINDOWS={}", MAX_WINDOWS);
         LOG.info("GAP_EMIT_INTERVAL_SEC={}", GAP_EMIT_INTERVAL_SEC);
         LOG.info("PERSIST_INTERVAL_MS={}", PERSIST_INTERVAL_MS);
+        LOG.info("FAIL_FAST={}", FAIL_FAST);
+        LOG.info("FAIL_FAST_STARTUP_TIMEOUT_MS={}", FAIL_FAST_STARTUP_TIMEOUT_MS);
+        LOG.info("FAIL_FAST_CHECK_INTERVAL_MS={}", FAIL_FAST_CHECK_INTERVAL_MS);
+        LOG.info("FAIL_FAST_CHECK_TIMEOUT_MS={}", FAIL_FAST_CHECK_TIMEOUT_MS);
+        LOG.info("RETRY_BACKOFF_MS={}", RETRY_BACKOFF_MS);
+        LOG.info("RETRY_BACKOFF_MAX_MS={}", RETRY_BACKOFF_MAX_MS);
+        LOG.info("RETRY_BACKOFF_JITTER_PCT={}", RETRY_BACKOFF_JITTER_PCT);
         LOG.info("Application ID: {}", props.get(StreamsConfig.APPLICATION_ID_CONFIG));
         LOG.info("Num Stream Threads: {}", props.get(StreamsConfig.NUM_STREAM_THREADS_CONFIG));
         LOG.info("Num Standby Replicas: {}", props.get(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG));
@@ -330,37 +369,449 @@ public class PartitionDedupApp {
         JmxSupport.registerPropsMBean(props, RAW_TOPICS, CLEAN_TOPIC, GAP_TOPIC, APPLICATION_ID, assignedRawPartitions,
                 WINDOW_SIZE, MAX_WINDOWS);
 
-        // Build topology
-        Topology topology = buildTopology();
-        try (KafkaStreams streams = new KafkaStreams(topology, props)) {
-            // Add shutdown hook
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                LOG.info("Shutdown hook triggered: closing Kafka Streams...");
-                streams.close(Duration.ofSeconds(10));
-                LOG.info("Kafka Streams closed.");
-            }));
+        AtomicBoolean terminateRequested = new AtomicBoolean(false);
+        AtomicReference<KafkaStreams> currentStreamsRef = new AtomicReference<>();
+        AtomicInteger processExitCode = new AtomicInteger(0);
 
-            streams.start();
-            LOG.info(
-                    "PartitionDedupApp started and running. Main thread will now exit, process will be kept alive by Kafka Streams threads.");
-            // Optionally, print store metadata for debugging
-            Collection<org.apache.kafka.streams.StreamsMetadata> storeMetadata = streams
-                    .streamsMetadataForStore(STORE_GAP);
-            LOG.info("All metadata for store {}: {}", STORE_GAP, storeMetadata);
-
-            // Block main thread until shutdown
-            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
-            Runtime.getRuntime().addShutdownHook(new Thread("streams-shutdown-hook") {
-                @Override
-                public void run() {
-                    latch.countDown();
+        Thread shutdownHook = new Thread(() -> {
+            terminateRequested.set(true);
+            KafkaStreams currentStreams = currentStreamsRef.get();
+            if (currentStreams != null) {
+                try {
+                    currentStreams.close(Duration.ofSeconds(10));
+                } catch (Exception e) {
+                    LOG.warn("Error while closing Kafka Streams in JVM shutdown hook", e);
                 }
-            });
-            try {
-                latch.await();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
             }
+        }, "streams-shutdown-hook");
+
+        try {
+            Runtime.getRuntime().addShutdownHook(shutdownHook);
+
+            int restartAttempt = 0;
+            while (!terminateRequested.get()) {
+                restartAttempt++;
+
+                if (!FAIL_FAST) {
+                    List<String> missingSourceTopics = getMissingSourceTopics(props);
+                    if (!missingSourceTopics.isEmpty()) {
+                        long retryDelayMs = applyJitter(Math.max(0L, RETRY_BACKOFF_MS));
+                        LOG.warn("Source topics missing: {}. Delaying startup and retrying in {} ms",
+                                missingSourceTopics,
+                                retryDelayMs);
+                        try {
+                            Thread.sleep(retryDelayMs);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            terminateRequested.set(true);
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                Topology topology = buildTopology();
+                KafkaStreams streams = new KafkaStreams(topology, props);
+                currentStreamsRef.set(streams);
+
+                CountDownLatch shutdownLatch = new CountDownLatch(1);
+                CountDownLatch runningLatch = new CountDownLatch(1);
+                AtomicBoolean shuttingDown = new AtomicBoolean(false);
+                AtomicInteger exitCode = new AtomicInteger(0);
+                AtomicInteger retryAttempt = new AtomicInteger(0);
+                ScheduledExecutorService failFastScheduler = null;
+
+                LOG.info("Starting KafkaStreams instance (attempt={}, FAIL_FAST={})", restartAttempt, FAIL_FAST);
+
+                try {
+                    streams.setStateListener((newState, oldState) -> {
+                        LOG.info("Kafka Streams state transition: {} -> {}", oldState, newState);
+
+                        if (newState == KafkaStreams.State.RUNNING) {
+                            runningLatch.countDown();
+                            retryAttempt.set(0);
+                        }
+
+                        if (newState == KafkaStreams.State.ERROR && FAIL_FAST) {
+                            initiateShutdown("Kafka Streams entered ERROR state", streams, shutdownLatch, shuttingDown,
+                                    exitCode, 1);
+                        }
+
+                        if (newState == KafkaStreams.State.NOT_RUNNING) {
+                            shutdownLatch.countDown();
+                        }
+                    });
+
+                    streams.setUncaughtExceptionHandler(exception -> {
+                        LOG.error("Uncaught Streams exception", exception);
+                        if (FAIL_FAST) {
+                            initiateShutdown("Uncaught Streams exception", streams, shutdownLatch, shuttingDown,
+                                    exitCode, 1);
+                            return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.SHUTDOWN_CLIENT;
+                        }
+
+                        if (exception instanceof MissingSourceTopicException) {
+                            LOG.warn(
+                                    "Source topics are not available yet (or Kafka metadata is temporarily unavailable). "
+                                            + "Retrying stream thread with backoff because FAIL_FAST=false");
+                        } else {
+                            LOG.warn("Retrying stream thread with backoff because FAIL_FAST=false");
+                        }
+
+                        int attempt = retryAttempt.incrementAndGet();
+                        long backoffNoJitter = calculateBackoffNoJitter(attempt);
+                        long backoffWithJitter = applyJitter(backoffNoJitter);
+
+                        LOG.info("Retry attempt={} sleeping {} ms (base={} ms, max={} ms, jitter={}%)",
+                                attempt,
+                                backoffWithJitter,
+                                backoffNoJitter,
+                                RETRY_BACKOFF_MAX_MS,
+                                RETRY_BACKOFF_JITTER_PCT);
+
+                        try {
+                            Thread.sleep(backoffWithJitter);
+                        } catch (InterruptedException interruptedException) {
+                            Thread.currentThread().interrupt();
+                            LOG.warn("Retry backoff interrupted; replacing stream thread immediately");
+                        }
+
+                        return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD;
+                    });
+
+                    streams.start();
+                    LOG.info("PartitionDedupApp started (FAIL_FAST={})", FAIL_FAST);
+
+                    if (FAIL_FAST) {
+                        boolean started = runningLatch.await(FAIL_FAST_STARTUP_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                        if (!started) {
+                            LOG.error("FAIL_FAST startup timeout: did not reach RUNNING state within {} ms",
+                                    FAIL_FAST_STARTUP_TIMEOUT_MS);
+                            initiateShutdown("FAIL_FAST startup timeout", streams, shutdownLatch, shuttingDown,
+                                    exitCode, 1);
+                        } else {
+                            failFastScheduler = startFailFastConnectivityMonitor(props, streams, shutdownLatch,
+                                    shuttingDown, exitCode);
+                        }
+                    }
+
+                    if (!shuttingDown.get()) {
+                        Collection<org.apache.kafka.streams.StreamsMetadata> storeMetadata = streams
+                                .streamsMetadataForStore(STORE_GAP);
+                        LOG.info("All metadata for store {}: {}", STORE_GAP, storeMetadata);
+                    }
+
+                    shutdownLatch.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    terminateRequested.set(true);
+                    initiateShutdown("Main thread interrupted", streams, shutdownLatch, shuttingDown, exitCode, 1);
+                } catch (Exception e) {
+                    LOG.error("KafkaStreams lifecycle error", e);
+                    if (FAIL_FAST) {
+                        terminateRequested.set(true);
+                        initiateShutdown("FAIL_FAST lifecycle error", streams, shutdownLatch, shuttingDown, exitCode,
+                                1);
+                    } else {
+                        initiateShutdown("Lifecycle error with FAIL_FAST=false; restarting", streams, shutdownLatch,
+                                shuttingDown, exitCode, 0);
+                    }
+                } finally {
+                    if (failFastScheduler != null) {
+                        failFastScheduler.shutdownNow();
+                    }
+                    if (shuttingDown.compareAndSet(false, true)) {
+                        try {
+                            streams.close(Duration.ofSeconds(10));
+                        } catch (Exception closeError) {
+                            LOG.warn("Error while closing Kafka Streams in finally block", closeError);
+                        }
+                    }
+                    currentStreamsRef.compareAndSet(streams, null);
+                }
+
+                if (exitCode.get() != 0) {
+                    processExitCode.compareAndSet(0, exitCode.get());
+                    terminateRequested.set(true);
+                }
+
+                if (terminateRequested.get()) {
+                    break;
+                }
+
+                if (FAIL_FAST) {
+                    LOG.info("FAIL_FAST=true and KafkaStreams stopped; terminating process");
+                    break;
+                }
+
+                long restartDelayMs = applyJitter(Math.max(0L, RETRY_BACKOFF_MS));
+                LOG.warn("KafkaStreams reached NOT_RUNNING; restarting in {} ms (attempt={})",
+                        restartDelayMs,
+                        restartAttempt);
+                try {
+                    Thread.sleep(restartDelayMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    terminateRequested.set(true);
+                    break;
+                }
+            }
+        } finally {
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdownHook);
+            } catch (IllegalStateException ignored) {
+                // JVM is already shutting down
+            } catch (Exception removeHookError) {
+                LOG.debug("Failed to remove shutdown hook", removeHookError);
+            }
+
+            if (processExitCode.get() != 0) {
+                LOG.info("Exiting process with code {} due to FAIL_FAST condition", processExitCode.get());
+                System.exit(processExitCode.get());
+            }
+        }
+    }
+
+    private static long calculateBackoffNoJitter(int attempt) {
+        int normalizedAttempt = Math.max(1, attempt);
+        long baseBackoff = Math.max(0L, RETRY_BACKOFF_MS);
+        long maxBackoff = Math.max(baseBackoff, RETRY_BACKOFF_MAX_MS);
+
+        if (normalizedAttempt <= 1) {
+            return baseBackoff;
+        }
+
+        int exponent = Math.min(normalizedAttempt - 1, 30);
+        long multiplier = 1L << exponent;
+
+        if (baseBackoff == 0L) {
+            return 0L;
+        }
+
+        if (multiplier > Long.MAX_VALUE / baseBackoff) {
+            return maxBackoff;
+        }
+
+        long candidate = baseBackoff * multiplier;
+        return Math.min(maxBackoff, candidate);
+    }
+
+    private static long applyJitter(long backoffMs) {
+        if (backoffMs <= 0L) {
+            return 0L;
+        }
+
+        int jitterPct = Math.max(0, RETRY_BACKOFF_JITTER_PCT);
+        if (jitterPct == 0) {
+            return backoffMs;
+        }
+
+        double jitterFraction = jitterPct / 100.0;
+        long delta = Math.max(1L, Math.round(backoffMs * jitterFraction));
+        long minDelay = Math.max(0L, backoffMs - delta);
+        long maxDelay = Math.max(minDelay, backoffMs + delta);
+
+        return ThreadLocalRandom.current().nextLong(minDelay, maxDelay + 1);
+    }
+
+    private static void validateRuntimeConfiguration() {
+        validateRuntimeConfigurationValues(
+                RETRY_BACKOFF_MS,
+                RETRY_BACKOFF_MAX_MS,
+                RETRY_BACKOFF_JITTER_PCT,
+                FAIL_FAST,
+                FAIL_FAST_STARTUP_TIMEOUT_MS,
+                FAIL_FAST_CHECK_INTERVAL_MS,
+                FAIL_FAST_CHECK_TIMEOUT_MS);
+    }
+
+    static void validateRuntimeConfigurationValues(
+            long retryBackoffMs,
+            long retryBackoffMaxMs,
+            int retryBackoffJitterPct,
+            boolean failFast,
+            long failFastStartupTimeoutMs,
+            long failFastCheckIntervalMs,
+            long failFastCheckTimeoutMs) {
+        if (retryBackoffMs < 0L) {
+            throw new IllegalArgumentException("RETRY_BACKOFF_MS must be >= 0");
+        }
+        if (retryBackoffMaxMs < retryBackoffMs) {
+            throw new IllegalArgumentException("RETRY_BACKOFF_MAX_MS must be >= RETRY_BACKOFF_MS");
+        }
+        if (retryBackoffJitterPct < 0 || retryBackoffJitterPct > 100) {
+            throw new IllegalArgumentException("RETRY_BACKOFF_JITTER_PCT must be between 0 and 100");
+        }
+
+        if (failFast) {
+            if (failFastStartupTimeoutMs <= 0L) {
+                throw new IllegalArgumentException("FAIL_FAST_STARTUP_TIMEOUT_MS must be > 0 when FAIL_FAST=true");
+            }
+            if (failFastCheckIntervalMs <= 0L) {
+                throw new IllegalArgumentException("FAIL_FAST_CHECK_INTERVAL_MS must be > 0 when FAIL_FAST=true");
+            }
+            if (failFastCheckTimeoutMs <= 0L) {
+                throw new IllegalArgumentException("FAIL_FAST_CHECK_TIMEOUT_MS must be > 0 when FAIL_FAST=true");
+            }
+        }
+    }
+
+    private static void initiateShutdown(String reason, KafkaStreams streams, CountDownLatch shutdownLatch,
+            AtomicBoolean shuttingDown, AtomicInteger exitCode, int newExitCode) {
+        if (!shuttingDown.compareAndSet(false, true)) {
+            return;
+        }
+
+        if (newExitCode != 0) {
+            exitCode.compareAndSet(0, newExitCode);
+        }
+
+        LOG.info("Initiating shutdown: {}", reason);
+        try {
+            streams.close(Duration.ofSeconds(10));
+        } catch (Exception e) {
+            LOG.warn("Error while closing Kafka Streams during shutdown", e);
+        } finally {
+            shutdownLatch.countDown();
+        }
+    }
+
+    private static ScheduledExecutorService startFailFastConnectivityMonitor(Properties streamProps, KafkaStreams streams,
+            CountDownLatch shutdownLatch, AtomicBoolean shuttingDown, AtomicInteger exitCode) {
+        Properties adminProps = createAdminProps(streamProps);
+
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "fail-fast-kafka-monitor");
+            t.setDaemon(true);
+            return t;
+        });
+
+        scheduler.scheduleAtFixedRate(() -> {
+            if (shuttingDown.get()) {
+                return;
+            }
+
+            List<String> unresolvedHosts = getUnresolvedBootstrapHosts(streamProps);
+            if (!unresolvedHosts.isEmpty()) {
+                LOG.error("FAIL_FAST bootstrap DNS resolution failed for hosts {}; terminating process",
+                        unresolvedHosts);
+                initiateShutdown("FAIL_FAST bootstrap DNS resolution failed", streams, shutdownLatch, shuttingDown,
+                        exitCode, 1);
+                return;
+            }
+
+            try (Admin admin = Admin.create(adminProps)) {
+                admin.describeCluster().nodes().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            } catch (Exception e) {
+                LOG.error("FAIL_FAST connectivity check failed; terminating process", e);
+                initiateShutdown("FAIL_FAST Kafka connectivity check failed", streams, shutdownLatch, shuttingDown,
+                        exitCode, 1);
+            }
+        }, 0, FAIL_FAST_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+
+        return scheduler;
+    }
+
+    private static List<String> getUnresolvedBootstrapHosts(Properties streamProps) {
+        String bootstrapServers = streamProps.getProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "");
+        List<String> unresolvedHosts = new ArrayList<>();
+
+        for (String server : bootstrapServers.split(",")) {
+            String trimmed = server.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+
+            String host = extractHostFromBootstrapServer(trimmed);
+            if (host == null || host.isEmpty()) {
+                unresolvedHosts.add(trimmed);
+                continue;
+            }
+
+            try {
+                InetAddress.getAllByName(host);
+            } catch (Exception e) {
+                unresolvedHosts.add(host);
+            }
+        }
+
+        return unresolvedHosts;
+    }
+
+    private static String extractHostFromBootstrapServer(String bootstrapServer) {
+        String candidate = bootstrapServer.trim();
+        if (candidate.isEmpty()) {
+            return "";
+        }
+
+        try {
+            if (candidate.contains("://")) {
+                URI uri = URI.create(candidate);
+                return uri.getHost();
+            }
+
+            if (candidate.startsWith("[")) {
+                int endBracket = candidate.indexOf(']');
+                if (endBracket > 1) {
+                    return candidate.substring(1, endBracket);
+                }
+                return candidate;
+            }
+
+            int lastColon = candidate.lastIndexOf(':');
+            if (lastColon > 0) {
+                return candidate.substring(0, lastColon);
+            }
+
+            return candidate;
+        } catch (Exception e) {
+            LOG.debug("Unable to parse bootstrap server entry '{}': {}", bootstrapServer, e.getMessage());
+            return candidate;
+        }
+    }
+
+    private static Properties createAdminProps(Properties streamProps) {
+        Properties adminProps = new Properties();
+        adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
+                streamProps.getProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG));
+
+        for (String key : streamProps.stringPropertyNames()) {
+            if (key.startsWith("security.") || key.startsWith("ssl.") || key.startsWith("sasl.")) {
+                adminProps.put(key, streamProps.getProperty(key));
+            }
+        }
+
+        return adminProps;
+    }
+
+    private static List<String> getMissingSourceTopics(Properties streamProps) {
+        List<String> configuredTopics = new ArrayList<>();
+        for (String topic : RAW_TOPICS.split(",")) {
+            String trimmed = topic.trim();
+            if (!trimmed.isEmpty()) {
+                configuredTopics.add(trimmed);
+            }
+        }
+
+        if (configuredTopics.isEmpty()) {
+            return List.of("<none configured in RAW_TOPICS>");
+        }
+
+        Properties adminProps = createAdminProps(streamProps);
+        try (Admin admin = Admin.create(adminProps)) {
+            java.util.Set<String> existingTopics = admin.listTopics().names()
+                    .get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+
+            List<String> missingTopics = new ArrayList<>();
+            for (String configuredTopic : configuredTopics) {
+                if (!existingTopics.contains(configuredTopic)) {
+                    missingTopics.add(configuredTopic);
+                }
+            }
+            return missingTopics;
+        } catch (Exception e) {
+            LOG.warn("Unable to verify source topics before startup; treating as unavailable and retrying", e);
+            return configuredTopics;
         }
     }
 
