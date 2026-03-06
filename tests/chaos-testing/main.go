@@ -9,6 +9,8 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,12 +63,15 @@ var UNKNOWN uint32 = 0
 
 var MITM_PORT = 1234
 var MITM_DEST_ADDR = "downstream:1234"
-var MITM_DROP_PROBABILITY = 0.21
+var MITM_DROP_PROBABILITY = 0.0
+var MITM_EPS_COUNT uint32 = 0
 
-var PRODUCER_SLEEP_TIME_MS = 1
+var PRODUCER_SLEEP_TIME_MS uint32 = 1
+var PRODUCER_PRODUCE_LIMIT uint32 = 0 // 0 = no limit
+var PRODUCER_PRODUCE = true
 //var PRODUCER_MAX_PACKET_SIZE = 1000000
-var PRODUCER_MAX_PACKET_SIZE =   10000
-//var PRODUCER_MAX_PACKET_SIZE = 100
+//var PRODUCER_MAX_PACKET_SIZE =   10000
+var PRODUCER_MAX_PACKET_SIZE = 100
 
 var KAFKA_ADDR = []string{ "kafka:9092" }
 var KAFKA_PRODUCE_TOPIC = "send"
@@ -83,10 +88,95 @@ func main() {
 	go mitm()
 	go produce()
 	go consume()
+	go manager()
 	for {
 		write_stats()
 		write_file()
 		time.Sleep(time.Second*5)
+	}
+}
+func manager() {
+	ln, err := net.Listen("tcp", ":1234")
+	if err != nil {
+		log.Panic("Failed to start manager: ", err.Error())
+	}
+	defer ln.Close()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			fmt.Println("Failed to accept connection: ", err.Error())
+			continue
+		}
+		for {
+			fmt.Fprintf(conn, `
+Caseinsensitive. Type:
+PK: Producer kill
+PC: Producer continue
+PR [uint]: Producer sleep time in ms. Currently %d
+PM [uint]: Amount of packets to produce. 0 for no limit. Currently %d
+M [float]: Set drop probability for mitm. Currently %f
+Input: `, PRODUCER_SLEEP_TIME_MS, PRODUCER_PRODUCE_LIMIT, MITM_DROP_PROBABILITY)
+			receive := make([]byte, 1024)
+			n, err := conn.Read(receive)
+			if err != nil {
+				fmt.Println("Failed to read from connection: ", err.Error())
+				break
+			}
+			receive = receive[:n]
+			in := string(receive)
+			in = strings.TrimSpace(strings.ToLower(in))
+			if in[0] == 'm' {
+				new_prop, err := strconv.ParseFloat(strings.TrimSpace(in[1:]), 64)
+				if err != nil {
+					out := fmt.Sprint("Failed to parse float: ", err.Error())
+					conn.Write([]byte(out))
+					fmt.Println(out)
+					continue
+				}
+				MITM_DROP_PROBABILITY = new_prop
+				fmt.Fprintf(conn, "New drop probability is: %f", MITM_DROP_PROBABILITY)
+				continue
+			}
+			if len(in) >= 2 && in[:2] == "pk" {
+				PRODUCER_PRODUCE = false
+				fmt.Fprintf(conn, "Stopped producer")
+				continue
+			}
+			if len(in) >= 2 && in[:2] == "pc" {
+				PRODUCER_PRODUCE = true
+				fmt.Fprintf(conn, "Started producer")
+				continue
+			}
+			if len(in) >= 2 && in[:2] == "pr" {
+				new_time64, err := strconv.ParseUint(strings.TrimSpace(in[2:]), 10, 32)
+				new_time := uint32(new_time64)
+				if err != nil {
+					fmt.Fprintln(conn, "Failed to parse float: ", err.Error())
+					continue
+				}
+				if new_time > 1.0 || new_time < 0.0 {
+					fmt.Fprintf(conn, "Drop probability must be between 0.0 and 1.0")
+					continue
+				}
+				atomic.SwapUint32(&PRODUCER_SLEEP_TIME_MS, new_time)
+				fmt.Fprintf(conn, "Sleep time is: %d", PRODUCER_SLEEP_TIME_MS)
+				continue
+			}
+			if len(in) >= 2 && in[:2] == "pm" {
+				new_limit64, err := strconv.ParseUint(strings.TrimSpace(in[2:]), 10, 32)
+				new_limit := uint32(new_limit64)
+				if err != nil {
+					out := fmt.Sprint("Failed to parse float: ", err.Error())
+					conn.Write([]byte(out))
+					fmt.Println(out)
+					continue
+				}
+				atomic.SwapUint32(&PRODUCER_PRODUCE_LIMIT, new_limit)
+				fmt.Fprintf(conn, "Sleep time is: %d", PRODUCER_PRODUCE_LIMIT)
+				continue
+			}
+			fmt.Fprintf(conn, "No input was given")
+		}
 	}
 }
 
@@ -118,6 +208,14 @@ func produce() {
 	}
 	defer producer.Close()
 	for {
+		for !PRODUCER_PRODUCE {}
+		locked := false
+		for PRODUCER_PRODUCE_LIMIT != 0 &&  atomic.LoadUint32(&PRODUCED) >= PRODUCER_PRODUCE_LIMIT{
+			if !locked {
+				fmt.Println("Reached produce limit")
+			}
+			locked = true
+		}
 		msg := generate_message()
 		message := &sarama.ProducerMessage{
 			Topic: KAFKA_PRODUCE_TOPIC,
@@ -177,7 +275,8 @@ func mitm() {
 			atomic.AddUint32(&DROPPED, 1)
 			continue 
 		}
-		FORWARDED+=1
+		atomic.AddUint32(&FORWARDED, 1)
+		atomic.AddUint32(&MITM_EPS_COUNT, 1)
 		_, err = sender_conn.Write(buffer[:n])
 		if err != nil {
 			log.Println("Failed to forward message: ", err.Error())
@@ -228,6 +327,7 @@ func consume_message(message_hash [32]byte) {
 			State:            Unknown,
 			Duplicated_times: 0,
 		}
+		atomic.AddUint32(&UNKNOWN, 1)
 		return
 	}
 	switch  current_sate.State {
@@ -260,7 +360,8 @@ func write_stats() {
 	dropped := atomic.LoadUint32(&DROPPED)
 	forwarded := atomic.LoadUint32(&FORWARDED)
 	unknown := atomic.LoadUint32(&UNKNOWN)
-	fmt.Println("PRODUCED: ", produced, " | RECEIVED: ", received, " | DUPLICATED: ", duplicated, " | DROPPED: ", dropped, " | FORWARDED: ", forwarded, " | UNKNOWN: ", unknown)
+	eps_count := atomic.SwapUint32(&MITM_EPS_COUNT, 0)
+	fmt.Println("PRODUCED: ", produced, " | RECEIVED: ", received, " | DUPLICATED: ", duplicated, " | DROPPED: ", dropped, " | FORWARDED: ", forwarded, " | UNKNOWN: ", unknown, " | EPS COUNT: ", eps_count)
 }
 func write_file() {
 	DATA.Mutex.RLock()
