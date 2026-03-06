@@ -29,40 +29,47 @@ services:
       - |
         /dist/target/linux-amd64/upstream /dist/tests/chaos-testing/upstream.properties
 
-#  resend:
-#    networks:
-#      - airgap
-#    depends_on:
-#      - downstream
-#    image: rockylinux:9.3
-#    volumes:
-#      - ../../dist:/dist:ro
-#      - ../../:/dist:ro
-#      - ./out:/gaps
-#    restart: always
-#    entrypoint:
-#      - /bin/bash
-#      - -c
-#      - |
-#        /dist/target/linux-amd64/resend /dist/tests/chaos-testing/resend.properties
-#
-#  create:
-#    networks:
-#      - airgap
-#    depends_on:
-#      - downstream
-#    image: rockylinux:9.3
-#    volumes:
-#      - ../../dist:/dist:ro
-#      - ../../:/dist:ro
-#      - ./out:/gaps
-#    restart: always
-#    entrypoint:
-#      - /bin/bash
-#      - -c
-#      - |
-#        /dist/target/linux-amd64/create /dist/tests/chaos-testing/create.properties
-#
+  resend:
+    networks:
+      - airgap
+    depends_on:
+      - downstream
+    image: rockylinux:9.3
+    volumes:
+      - ../../dist:/dist:ro
+      - ../../:/dist:ro
+      - ./out:/gaps
+    restart: always
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        while [ true ] ; do
+        sleep 5;
+        /dist/target/linux-amd64/resend /dist/tests/chaos-testing/resend.properties
+        done
+
+  create:
+    networks:
+      - airgap
+    depends_on:
+      - downstream
+    image: rockylinux:9.3
+    volumes:
+      - ../../dist:/dist:ro
+      - ../../:/dist:ro
+      - ./out:/gaps
+    restart: always
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        sleep 10 ;
+        while [ true ] ; do
+        sleep 30;
+        /dist/target/linux-amd64/create /dist/tests/chaos-testing/create.properties
+        done
+
 
   downstream:
     restart: unless-stopped
@@ -79,40 +86,40 @@ services:
       - |
         /dist/target/linux-amd64/downstream /dist/tests/chaos-testing/downstream.properties
 
+#  dedup:
+#    restart: unless-stopped
+#    networks:
+#      - airgap
+#    image: rockylinux:9.3
+#    depends_on:
+#      - kafka
+#    volumes:
+#      - ../../target/dist:/dist:ro
+#      - ../../config:/config:ro
+#      - ./:/this:ro
+#    env_file:
+#      - dedup.env
+#    entrypoint:
+#      - /bin/bash
+#      - -c
+#      - |
+#        dnf install -y /dist/airgap-dedup-1.0.0-325.noarch.rpm &&
+#        java -jar /opt/airgap/dedup/air-gap-deduplication-fat.jar
   dedup:
     restart: unless-stopped
     networks:
       - airgap
-    image: rockylinux:9.3
+    image: eclipse-temurin:17-jre
     depends_on:
       - kafka
     volumes:
-      - ../../target/dist:/dist:ro
+      - ../../java-streams/target:/dist/:ro
       - ../../config:/config:ro
       - ./:/this:ro
-    entrypoint:
-      - /bin/bash
-      - -c
-      - |
-        dnf install -y /dist/airgap-dedup-1.0.0-325.noarch.rpm &&
-        export LOG4J_CONFIGURATION_FILE=/this/log4j2.xml &&
-        export RAW_TOPICS=receive &&
-        export CLEAN_TOPIC=dedup &&
-        export GAP_TOPIC=gaps &&
-        export BOOTSTRAP_SERVERS=kafka:9092 &&
-        export WINDOW_SIZE=100000 &&
-        export MAX_WINDOWS=100000 &&
-        export RAW_TOPICS=receive &&
-        export CLEAN_TOPIC=dedup &&
-        export GAP_TOPIC=gaps &&
-        export GAP_EMIT_INTERVAL_SEC=60 &&
-        export PERSIST_INTERVAL_MS=10000 &&
-        export BOOTSTRAP_SERVERS=kafka:9092 &&
-        export FAIL_FAST=true &&
-        export FAIL_FAST_STARTUP_TIMEOUT_MS=10000 &&
-        export FAIL_FAST_CHECK_INTERVAL_MS=1000 &&
-        export FAIL_FAST_CHECK_TIMEOUT_MS=2000 &&
-        java -jar /opt/airgap/dedup/air-gap-deduplication-fat.jar
+    working_dir: /this
+    env_file:
+      - dedup.env
+    entrypoint: ["java", "-jar", "/dist/air-gap-deduplication-fat-1.jar"]
 
   chaos:
     restart: unless-stopped
@@ -121,6 +128,8 @@ services:
     image: rockylinux:9.3
     depends_on:
       - kafka
+    ports:
+      - 1234:1234
     volumes:
       - ../../:/dist:ro
       - ./out:/out:rw

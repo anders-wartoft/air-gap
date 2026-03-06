@@ -9,7 +9,7 @@
     <Logger name="org.apache.kafka.common.utils.AppInfoParser" level="off"/>
     <Logger name="org.apache.kafka.common.metrics.Metrics" level="off"/>
     <Logger name="org.apache.kafka.clients.admin.AdminClientConfig" level="off"/>
-    <Root level="warn">
+    <Root level="info">
       <AppenderRef ref="Console"/>
     </Root>
   </Loggers>
