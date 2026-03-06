@@ -58,6 +58,26 @@ MAX_WINDOWS=500
 
 Then monitor memory and gap behavior, and adjust gradually.
 
+## Deduplication gets stuck in a restart loop when FAIL_FAST is enabled
+
+If `FAIL_FAST=true`, the deduplication process exits when it does not reach `RUNNING` within the configured startup timeout.
+
+In environments with slower Kafka startup, DNS, TLS handshake, or topic metadata fetch, a low value for `FAIL_FAST_STARTUP_TIMEOUT_MS` can cause repeated restarts (boot loop).
+
+Known working adjustment from field testing:
+
+- `FAIL_FAST_STARTUP_TIMEOUT_MS=10000` caused restarts
+- `FAIL_FAST_STARTUP_TIMEOUT_MS=30000` stabilized startup
+
+Example:
+
+```bash
+export FAIL_FAST=true
+export FAIL_FAST_STARTUP_TIMEOUT_MS=30000
+```
+
+If needed, increase further based on your environment and startup latency.
+
 
 ## I have disabled write for /tmp. Now I get an error running the deduplication
 
