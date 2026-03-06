@@ -1,0 +1,130 @@
+services:
+  kafka:
+    restart: unless-stopped
+    networks:
+      - airgap
+    ports:
+      - 9092:9092
+    environment:
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+
+    image: confluentinc/confluent-local
+
+  upstream:
+    restart: unless-stopped
+    networks:
+      - airgap
+    depends_on:
+      - downstream
+    image: rockylinux:9.3
+    volumes:
+      - ../../dist:/dist:ro
+      - ../../:/dist:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        /dist/target/linux-amd64/upstream /dist/tests/chaos-testing/upstream.properties
+
+  resend:
+    networks:
+      - airgap
+    depends_on:
+      - downstream
+    image: rockylinux:9.3
+    volumes:
+      - ../../dist:/dist:ro
+      - ../../:/dist:ro
+      - ./out:/gaps
+    restart: always
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        while [ true ] ; do
+        sleep 5;
+        /dist/target/linux-amd64/resend /dist/tests/chaos-testing/resend.properties
+        done
+
+  create:
+    networks:
+      - airgap
+    depends_on:
+      - downstream
+    image: rockylinux:9.3
+    volumes:
+      - ../../dist:/dist:ro
+      - ../../:/dist:ro
+      - ./out:/gaps
+    restart: always
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        sleep 10 ;
+        while [ true ] ; do
+        sleep 30;
+        /dist/target/linux-amd64/create /dist/tests/chaos-testing/create.properties
+        done
+
+
+  downstream:
+    restart: unless-stopped
+    networks:
+      - airgap
+    image: rockylinux:9.3
+    depends_on:
+      - kafka
+    volumes:
+      - ../../:/dist:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        /dist/target/linux-amd64/downstream /dist/tests/chaos-testing/downstream.properties
+
+  dedup:
+    restart: unless-stopped
+    networks:
+      - airgap
+    image: eclipse-temurin:17-jre
+    depends_on:
+      - kafka
+    volumes:
+      - ../../java-streams/target:/dist/:ro
+      - ../../config:/config:ro
+      - ./:/this:ro
+    working_dir: /this
+    env_file:
+      - dedup.env
+    entrypoint: ["java", "-jar", "/dist/air-gap-deduplication-fat-1.jar"]
+
+  chaos:
+    restart: unless-stopped
+    networks:
+      - airgap
+    image: rockylinux:9.3
+    depends_on:
+      - kafka
+    ports:
+      - 1234:1234
+    volumes:
+      - ../../:/dist:ro
+      - ./out:/out:rw
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        dnf install -y golang &&
+        cd /dist &&
+        go run /dist/tests/chaos-testing/main.go
+
+networks:
+  airgap:
+    ipam:
+      config:
+
+        - subnet: 10.11.12.0/24
