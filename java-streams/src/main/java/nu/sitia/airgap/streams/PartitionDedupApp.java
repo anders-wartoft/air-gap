@@ -339,7 +339,7 @@ public class PartitionDedupApp {
 
         validateRuntimeConfiguration();
 
-        LOG.info("Starting PartitionDedupApp with config: {}", props);
+        LOG.info("Starting PartitionDedupApp...");
         ;
         LOG.info("BOOTSTRAP_SERVERS={}", BOOTSTRAP_SERVERS);
         LOG.info("RAW_TOPICS={}", RAW_TOPICS);
