@@ -333,14 +333,14 @@ public class PartitionDedupApp {
                 if (k.toUpperCase().contains("PASSWORD") || propName.toUpperCase().contains("PASSWORD")) {
                     displayVal = "********";
                 }
-                LOG.info("Injected Kafka property from env {} -> {}={}", k, propName, displayVal);
+                LOG.debug("Injected Kafka property from env {} -> {}={}", k, propName, displayVal);
             }
         }
 
         validateRuntimeConfiguration();
 
         LOG.info("Starting PartitionDedupApp...");
-        ;
+
         LOG.info("BOOTSTRAP_SERVERS={}", BOOTSTRAP_SERVERS);
         LOG.info("RAW_TOPICS={}", RAW_TOPICS);
         LOG.info("CLEAN_TOPIC={}", CLEAN_TOPIC);
@@ -363,7 +363,6 @@ public class PartitionDedupApp {
         LOG.info("Processing Guarantee: {}", props.get(StreamsConfig.PROCESSING_GUARANTEE_CONFIG));
         LOG.info("Commit Interval (ms): {}", props.get(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG));
         LOG.info("State Dir: {}", props.get(StreamsConfig.STATE_DIR_CONFIG));
-        System.out.println(props);
 
         // Register DynamicMBean for exposing each property as a JMX attribute
         JmxSupport.registerPropsMBean(props, RAW_TOPICS, CLEAN_TOPIC, GAP_TOPIC, APPLICATION_ID, assignedRawPartitions,
@@ -425,7 +424,7 @@ public class PartitionDedupApp {
 
                 try {
                     streams.setStateListener((newState, oldState) -> {
-                        LOG.info("Kafka Streams state transition: {} -> {}", oldState, newState);
+                        LOG.debug("Kafka Streams state transition: {} -> {}", oldState, newState);
 
                         if (newState == KafkaStreams.State.RUNNING) {
                             runningLatch.countDown();
@@ -498,7 +497,7 @@ public class PartitionDedupApp {
                     if (!shuttingDown.get()) {
                         Collection<org.apache.kafka.streams.StreamsMetadata> storeMetadata = streams
                                 .streamsMetadataForStore(STORE_GAP);
-                        LOG.info("All metadata for store {}: {}", STORE_GAP, storeMetadata);
+                        LOG.debug("All metadata for store {}: {}", STORE_GAP, storeMetadata);
                     }
 
                     shutdownLatch.await();
@@ -914,7 +913,7 @@ public class PartitionDedupApp {
         public void init(org.apache.kafka.streams.processor.api.ProcessorContext<String, byte[]> context) {
             this.context = context;
             this.partition = context.taskId().partition();
-            LOG.info("Initializing DedupAndGapProcessor for partition {}", partition);
+            LOG.debug("Initializing DedupAndGapProcessor for partition {}", partition);
             assignedRawPartitions.add(partition);
 
             this.gapStore = (KeyValueStore<String, byte[]>) context.getStateStore(STORE_GAP);
@@ -926,14 +925,14 @@ public class PartitionDedupApp {
                     GapDetector gd = deserializeGapDetector(entry.value);
                     if (gd != null) {
                         gapDetectors.put(entry.key, gd);
-                        LOG.info("Registered GapDetector for key: {}", entry.key);
+                        LOG.debug("Registered GapDetector for key: {}", entry.key);
                         JmxSupport.registerProcessorMBean(this);
                     }
                 }
             }
 
             // Persist this partition’s detector periodically
-            LOG.info("Scheduling periodic gap detector persistence every {} ms", persistIntervalMs);
+            LOG.debug("Scheduling periodic gap detector persistence every {} ms", persistIntervalMs);
             this.persistSchedule = this.context.schedule(
                     java.time.Duration.ofMillis(persistIntervalMs),
                     org.apache.kafka.streams.processor.PunctuationType.WALL_CLOCK_TIME,
@@ -947,7 +946,7 @@ public class PartitionDedupApp {
                         }
                     });
 
-            LOG.info("Emit gap: Started gap detection for partition {}", partition);
+            LOG.debug("Emit gap: Started gap detection for partition {}", partition);
             // Emit gaps only for this partition’s detector
             long emitIntervalMs = Long.parseLong(GAP_EMIT_INTERVAL_SEC) * 1000;
             this.emitSchedule = this.context.schedule(
@@ -1040,7 +1039,7 @@ public class PartitionDedupApp {
             String[] parts = key.split("_");
             if (parts.length != 3) {
                 // Not a topic_partition_offset key, deliver with no gap detection
-                LOG.info("Non-standard key format '{}', forwarding directly to deduped-sink", key);
+                LOG.debug("Non-standard key format '{}', forwarding directly to deduped-sink", key);
                 context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 return;
             }
@@ -1067,11 +1066,11 @@ public class PartitionDedupApp {
                 LOG.warn("No GapDetector found for topicPartition {}, creating a new one", topicPartition);
                 gapDetector = new GapDetector(topic, windowSize, maxWindows);
                 gapDetectors.put(topicPartition, gapDetector);
-                LOG.info("Registered GapDetector for key: {}", topicPartition);
+                LOG.debug("Registered GapDetector for key: {}", topicPartition);
                 // Always re-register the MBean when a new detector is added so JMX sees all
                 // partitions
                 JmxSupport.registerProcessorMBean(this);
-                LOG.info("Re-registered Processor MBean after adding new partition: {}. Current keys: {}",
+                LOG.debug("Re-registered Processor MBean after adding new partition: {}. Current keys: {}",
                         topicPartition, gapDetectors.keySet());
             }
 
@@ -1118,7 +1117,7 @@ public class PartitionDedupApp {
                 context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 totalEmitted.merge(partition, 1L, Long::sum);
             } else if (alreadyReceived == -2) {
-                LOG.info("Key {} is below known range, forwarding", key);
+                LOG.debug("Key {} is below known range, forwarding", key);
                 context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 totalEmitted.merge(partition, 1L, Long::sum);
             } else {

@@ -306,7 +306,7 @@ public class JmxSupport {
             }
             GapDetectorsDynamicMBean mbean = new GapDetectorsDynamicMBean(processor);
             mbs.registerMBean(mbean, name);
-            LOG.info("Registered GapDetectors MBean for partition {} as {}", partition, name);
+            LOG.debug("Registered GapDetectors MBean for partition {} as {}", partition, name);
         } catch (Exception e) {
             e.printStackTrace();
         }
