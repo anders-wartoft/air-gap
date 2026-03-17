@@ -53,6 +53,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -75,6 +76,7 @@ public class PartitionDedupApp {
 
     // SLF4J logger for this class
     private static final Logger LOG = LoggerFactory.getLogger(PartitionDedupApp.class);
+    private static final String RUN_ID = UUID.randomUUID().toString().substring(0, 8);
     // Support multiple input topics for Merge/Fan-in pattern
     public static final String RAW_TOPICS = System.getenv().getOrDefault("RAW_TOPICS", "transfer");
     public static final String CLEAN_TOPIC = System.getenv().getOrDefault("CLEAN_TOPIC", "dedup"); // deduped output
@@ -286,7 +288,7 @@ public class PartitionDedupApp {
     }
 
     public static void main(String[] args) {
-        System.out.println("Starting PartitionDedupApp...");
+        System.out.println("Starting PartitionDedupApp... runId=" + RUN_ID);
         Properties props = new Properties();
         props.put(StreamsConfig.APPLICATION_ID_CONFIG, APPLICATION_ID);
         props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
@@ -339,7 +341,7 @@ public class PartitionDedupApp {
 
         validateRuntimeConfiguration();
 
-        LOG.info("Starting PartitionDedupApp...");
+        LOG.info("Starting PartitionDedupApp... runId={}", RUN_ID);
 
         LOG.info("BOOTSTRAP_SERVERS={}", BOOTSTRAP_SERVERS);
         LOG.info("RAW_TOPICS={}", RAW_TOPICS);
@@ -363,6 +365,12 @@ public class PartitionDedupApp {
         LOG.info("Processing Guarantee: {}", props.get(StreamsConfig.PROCESSING_GUARANTEE_CONFIG));
         LOG.info("Commit Interval (ms): {}", props.get(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG));
         LOG.info("State Dir: {}", props.get(StreamsConfig.STATE_DIR_CONFIG));
+        LOG.info("Startup capability summary: runId={}, topicsCount={}, failFast={}, connectivityMonitor={}, kafkaSecurity={}",
+            RUN_ID,
+            RAW_TOPICS.split(",").length,
+            FAIL_FAST,
+            FAIL_FAST ? "enabled" : "disabled",
+            resolveKafkaSecurityMode(props));
 
         // Register DynamicMBean for exposing each property as a JMX attribute
         JmxSupport.registerPropsMBean(props, RAW_TOPICS, CLEAN_TOPIC, GAP_TOPIC, APPLICATION_ID, assignedRawPartitions,
@@ -420,7 +428,8 @@ public class PartitionDedupApp {
                 AtomicInteger retryAttempt = new AtomicInteger(0);
                 ScheduledExecutorService failFastScheduler = null;
 
-                LOG.info("Starting KafkaStreams instance (attempt={}, FAIL_FAST={})", restartAttempt, FAIL_FAST);
+                LOG.info("Starting KafkaStreams instance (runId={}, attempt={}, FAIL_FAST={})", RUN_ID, restartAttempt,
+                    FAIL_FAST);
 
                 try {
                     streams.setStateListener((newState, oldState) -> {
@@ -479,7 +488,7 @@ public class PartitionDedupApp {
                     });
 
                     streams.start();
-                    LOG.info("PartitionDedupApp started (FAIL_FAST={})", FAIL_FAST);
+                    LOG.info("PartitionDedupApp started (runId={}, FAIL_FAST={})", RUN_ID, FAIL_FAST);
 
                     if (FAIL_FAST) {
                         boolean started = runningLatch.await(FAIL_FAST_STARTUP_TIMEOUT_MS, TimeUnit.MILLISECONDS);
@@ -544,8 +553,9 @@ public class PartitionDedupApp {
                 }
 
                 long restartDelayMs = applyJitter(Math.max(0L, RETRY_BACKOFF_MS));
-                LOG.warn("KafkaStreams reached NOT_RUNNING; restarting in {} ms (attempt={})",
+                LOG.warn("KafkaStreams reached NOT_RUNNING; restarting in {} ms (runId={}, attempt={})",
                         restartDelayMs,
+                    RUN_ID,
                         restartAttempt);
                 try {
                     Thread.sleep(restartDelayMs);
@@ -565,10 +575,20 @@ public class PartitionDedupApp {
             }
 
             if (processExitCode.get() != 0) {
-                LOG.info("Exiting process with code {} due to FAIL_FAST condition", processExitCode.get());
+                LOG.info("Exiting process with code {} due to FAIL_FAST condition (runId={})", processExitCode.get(),
+                        RUN_ID);
                 System.exit(processExitCode.get());
             }
         }
+    }
+
+    private static String resolveKafkaSecurityMode(Properties props) {
+        String securityProtocol = props.getProperty("security.protocol", "PLAINTEXT");
+        String saslMechanism = props.getProperty("sasl.mechanism");
+        if (saslMechanism != null && !saslMechanism.isBlank()) {
+            return securityProtocol + "+SASL(" + saslMechanism + ")";
+        }
+        return securityProtocol;
     }
 
     private static long calculateBackoffNoJitter(int attempt) {
@@ -678,6 +698,7 @@ public class PartitionDedupApp {
     private static ScheduledExecutorService startFailFastConnectivityMonitor(Properties streamProps, KafkaStreams streams,
             CountDownLatch shutdownLatch, AtomicBoolean shuttingDown, AtomicInteger exitCode) {
         Properties adminProps = createAdminProps(streamProps);
+        AtomicInteger probeCounter = new AtomicInteger(0);
 
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "fail-fast-kafka-monitor");
@@ -700,7 +721,16 @@ public class PartitionDedupApp {
             }
 
             try (Admin admin = Admin.create(adminProps)) {
+                long start = System.nanoTime();
                 admin.describeCluster().nodes().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                int count = probeCounter.incrementAndGet();
+                if (LOG.isDebugEnabled() && (count == 1 || count % 6 == 0)) {
+                    long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+                    LOG.debug("FAIL_FAST connectivity probe ok (runId={}, probeCount={}, durationMs={})",
+                            RUN_ID,
+                            count,
+                            durationMs);
+                }
             } catch (Exception e) {
                 LOG.error("FAIL_FAST connectivity check failed; terminating process", e);
                 initiateShutdown("FAIL_FAST Kafka connectivity check failed", streams, shutdownLatch, shuttingDown,
@@ -891,6 +921,10 @@ public class PartitionDedupApp {
         private static final Map<Integer, Long> lastEmitted = new java.util.concurrent.ConcurrentHashMap<>();
         private static final Map<Integer, Long> totalReceived = new java.util.concurrent.ConcurrentHashMap<>();
         private static final Map<Integer, Long> totalEmitted = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final Map<Integer, Long> totalDuplicates = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final Map<Integer, Long> totalGapFill = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final Map<Integer, Long> totalBelowRange = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final Map<Integer, Long> totalNonStandardKeyPassthrough = new java.util.concurrent.ConcurrentHashMap<>();
         // Removed unused reportScheduled field
         // Use the shared ObjectMapper instance for reporting
         private static final ObjectMapper REPORT_MAPPER = new ObjectMapper();
@@ -915,6 +949,10 @@ public class PartitionDedupApp {
             this.partition = context.taskId().partition();
             LOG.debug("Initializing DedupAndGapProcessor for partition {}", partition);
             assignedRawPartitions.add(partition);
+            LOG.info("Task assigned partition {} (runId={}); active partitions now {}",
+                    partition,
+                    RUN_ID,
+                    assignedRawPartitions);
 
             this.gapStore = (KeyValueStore<String, byte[]>) context.getStateStore(STORE_GAP);
 
@@ -922,7 +960,7 @@ public class PartitionDedupApp {
             try (org.apache.kafka.streams.state.KeyValueIterator<String, byte[]> iter = gapStore.all()) {
                 while (iter.hasNext()) {
                     org.apache.kafka.streams.KeyValue<String, byte[]> entry = iter.next();
-                    GapDetector gd = deserializeGapDetector(entry.value);
+                    GapDetector gd = deserializeGapDetector(entry.value, entry.key);
                     if (gd != null) {
                         gapDetectors.put(entry.key, gd);
                         LOG.debug("Registered GapDetector for key: {}", entry.key);
@@ -937,12 +975,28 @@ public class PartitionDedupApp {
                     java.time.Duration.ofMillis(persistIntervalMs),
                     org.apache.kafka.streams.processor.PunctuationType.WALL_CLOCK_TIME,
                     ts -> {
+                        long startNs = System.nanoTime();
+                        int persisted = 0;
+                        long totalBytes = 0;
                         for (Map.Entry<String, GapDetector> entry : gapDetectors.entrySet()) {
                             try {
-                                gapStore.put(entry.getKey(), serializeGapDetector(entry.getValue()));
+                                byte[] data = serializeGapDetector(entry.getValue());
+                                if (data != null) {
+                                    totalBytes += data.length;
+                                }
+                                gapStore.put(entry.getKey(), data);
+                                persisted++;
                             } catch (Exception e) {
                                 LOG.error("Failed to serialize GapDetector for {}", entry.getKey(), e);
                             }
+                        }
+                        if (LOG.isDebugEnabled()) {
+                            long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+                            LOG.debug("Persisted gap detectors (partition={}, count={}, totalBytes={}, durationMs={})",
+                                    partition,
+                                    persisted,
+                                    totalBytes,
+                                    durationMs);
                         }
                     });
 
@@ -972,6 +1026,13 @@ public class PartitionDedupApp {
                 persistSchedule.cancel();
                 persistSchedule = null;
             }
+            if (partition >= 0) {
+                assignedRawPartitions.remove(partition);
+                LOG.info("Task released partition {} (runId={}); active partitions now {}",
+                        partition,
+                        RUN_ID,
+                        assignedRawPartitions);
+            }
         }
 
         public int getPartition() {
@@ -983,6 +1044,10 @@ public class PartitionDedupApp {
             // Count missing messages for this partition
             // For this GapDetector, get current gaps
             LOG.debug("[GAP-DEBUG] Partition {}: gapDetectors keys: {}", partition, gapDetectors.keySet());
+            int windowsScanned = 0;
+            int windowsEmitted = 0;
+            long rangesEmitted = 0;
+            long missingOffsetsInRanges = 0;
             for (Map.Entry<String, GapDetector> entry : gapDetectors.entrySet()) {
                 LOG.debug("[GAP-DEBUG] Checking detector key {} for partition {}", entry.getKey(), partition);
                 String key = entry.getKey(); // key is topic_partition
@@ -1003,6 +1068,7 @@ public class PartitionDedupApp {
                 // Sticky empty emission logic: emit empty gaps once when gaps become empty,
                 // reset if non-empty
                 for (GapDetector.Window window : windows) {
+                    windowsScanned++;
                     List<List<Long>> gaps = window.findGapsFiltered(detector.getMinReceived());
                     long windowMin = window.getMinOffset();
                     String gapKey = topic + "_" + partition + ":" + windowMin;
@@ -1021,12 +1087,30 @@ public class PartitionDedupApp {
                             context.forward(new Record<>(gapKey, json.getBytes(), System.currentTimeMillis()),
                                     "gaps-sink");
                             LOG.debug("Emitted gaps for window {}: {}", gapKey, json);
+                            windowsEmitted++;
+                            rangesEmitted += gaps.size();
+                            for (List<Long> gap : gaps) {
+                                if (gap.size() == 1) {
+                                    missingOffsetsInRanges += 1;
+                                } else if (gap.size() == 2) {
+                                    missingOffsetsInRanges += (gap.get(1) - gap.get(0) + 1);
+                                }
+                            }
                         } catch (Exception e) {
                             LOG.error("Failed to serialize gaps for window {}", gapKey, e);
                         }
                         window.lastEmittedNonEmpty[0] = true;
                     }
                 }
+            }
+            if (LOG.isDebugEnabled()) {
+                LOG.debug(
+                        "Gap emission cycle summary (partition={}, windowsScanned={}, windowsEmitted={}, rangesEmitted={}, missingOffsetsInRanges={})",
+                        partition,
+                        windowsScanned,
+                        windowsEmitted,
+                        rangesEmitted,
+                        missingOffsetsInRanges);
             }
         }
 
@@ -1038,8 +1122,11 @@ public class PartitionDedupApp {
                 return; // nothing we can do
             String[] parts = key.split("_");
             if (parts.length != 3) {
-                // Not a topic_partition_offset key, deliver with no gap detection
-                LOG.debug("Non-standard key format '{}', forwarding directly to deduped-sink", key);
+                // Non-standard keys are expected for internal passthrough records
+                LOG.trace("Non-standard key passthrough key='{}', partsCount={}",
+                        key,
+                        parts.length);
+                totalNonStandardKeyPassthrough.merge(this.partition, 1L, Long::sum);
                 context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 return;
             }
@@ -1050,12 +1137,18 @@ public class PartitionDedupApp {
                 partition = Integer.parseInt(parts[1]);
                 offset = Long.parseLong(parts[2]);
             } catch (Exception e) {
-                // Not a topic_partition_offset key, deliver with no gap detection
-                LOG.debug("Non-standard key format '{}', forwarding directly to deduped-sink", key);
+                // Non-standard keys are expected for internal passthrough records
+                LOG.trace(
+                        "Non-standard key passthrough key='{}' (partitionPart='{}', offsetPart='{}', reason='{}')",
+                        key,
+                        parts[1],
+                        parts[2],
+                        e.getMessage());
+                totalNonStandardKeyPassthrough.merge(this.partition, 1L, Long::sum);
                 context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 return;
             }
-            LOG.debug("Processing record from topic={}, partition={}, offset={}", topic, partition, offset);
+            LOG.trace("Processing record from topic={}, partition={}, offset={}", topic, partition, offset);
             String topicPartition = topic + "_" + partition;
 
             // Increment received counter
@@ -1107,19 +1200,22 @@ public class PartitionDedupApp {
             // * If the number is less than the lowest known offset, it is considered unseen
             // and -2 is returned.
             if (alreadyReceived == 1) {
-                LOG.debug("Key already seen {}", key);
+                LOG.trace("Key already seen {}", key);
+                totalDuplicates.merge(partition, 1L, Long::sum);
             } else if (alreadyReceived == 0) {
-                LOG.debug("Forwarding unique key {}", key);
+                LOG.trace("Forwarding unique key {}", key);
                 context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 totalEmitted.merge(partition, 1L, Long::sum);
             } else if (alreadyReceived == -1) {
-                LOG.debug("Key {} fills a gap, forwarding", key);
+                LOG.trace("Key {} fills a gap, forwarding", key);
                 context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 totalEmitted.merge(partition, 1L, Long::sum);
+                totalGapFill.merge(partition, 1L, Long::sum);
             } else if (alreadyReceived == -2) {
-                LOG.debug("Key {} is below known range, forwarding", key);
+                LOG.trace("Key {} is below known range, forwarding", key);
                 context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 totalEmitted.merge(partition, 1L, Long::sum);
+                totalBelowRange.merge(partition, 1L, Long::sum);
             } else {
                 LOG.error("Unexpected return value {} from gapDetector.check for key {}", alreadyReceived, key);
             }
@@ -1156,11 +1252,26 @@ public class PartitionDedupApp {
             report.put("delta_received", deltaReceived);
             report.put("total_emitted", emitted);
             report.put("delta_emitted", deltaEmitted);
+            report.put("total_duplicates", totalDuplicates.getOrDefault(part, 0L));
+            report.put("total_gap_fill", totalGapFill.getOrDefault(part, 0L));
+            report.put("total_below_range", totalBelowRange.getOrDefault(part, 0L));
+            report.put("total_non_standard_key_passthrough", totalNonStandardKeyPassthrough.getOrDefault(part, 0L));
             report.put("eps", deltaReceived / MISSING_REPORT_INTERVAL_SEC);
 
             try {
                 String json = REPORT_MAPPER.writeValueAsString(List.of(report));
                 LOG.info("[MISSING-REPORT] {}", json);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug(
+                            "Partition flow summary (partition={}, deltaReceived={}, deltaEmitted={}, duplicates={}, gapFill={}, belowRange={}, nonStandardKeyPassthrough={})",
+                            part,
+                            deltaReceived,
+                            deltaEmitted,
+                            totalDuplicates.getOrDefault(part, 0L),
+                            totalGapFill.getOrDefault(part, 0L),
+                            totalBelowRange.getOrDefault(part, 0L),
+                            totalNonStandardKeyPassthrough.getOrDefault(part, 0L));
+                }
             } catch (Exception e) {
                 LOG.error("Failed to serialize missing report JSON", e);
             }
@@ -1173,23 +1284,27 @@ public class PartitionDedupApp {
      * Deserialize a GapDetector from a byte array using Java serialization.
      * Returns null if the byte array is null or deserialization fails.
      */
-    private static GapDetector deserializeGapDetector(byte[] data) {
+    private static GapDetector deserializeGapDetector(byte[] data, String detectorKey) {
         if (data == null) {
-            LOG.warn("deserializeGapDetector called with null data");
+            LOG.warn("deserializeGapDetector called with null data (detectorKey={}), creating empty detector",
+                    detectorKey);
             return new GapDetector("", WINDOW_SIZE, MAX_WINDOWS);
         }
         try (java.io.ByteArrayInputStream bis = new java.io.ByteArrayInputStream(data);
                 java.io.ObjectInputStream ois = new java.io.ObjectInputStream(bis)) {
             Object obj = ois.readObject();
             if (obj instanceof GapDetector) {
-                LOG.debug("Successfully deserialized GapDetector");
+                LOG.debug("Successfully deserialized GapDetector (detectorKey={})", detectorKey);
                 return (GapDetector) obj;
             } else {
-                LOG.error("Deserialized object is not a recognized GapDetector: {}. Returning a new instance.",
+                LOG.error(
+                        "Deserialized object is not a recognized GapDetector for detectorKey {}: {}. Returning a new instance.",
+                        detectorKey,
                         obj.getClass());
             }
         } catch (Exception e) {
-            LOG.error("Failed to deserialize GapDetector", e);
+            LOG.error("Failed to deserialize GapDetector for detectorKey {}; creating empty detector", detectorKey,
+                    e);
         }
         return new GapDetector("", WINDOW_SIZE, MAX_WINDOWS);
     }

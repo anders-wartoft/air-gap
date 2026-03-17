@@ -193,18 +193,31 @@ public class GapDetector implements java.io.Serializable {
             // special case: If the number is less than the lowest known offset,
             // then we deliver it as unseen, but do not create a new window
             if (!windows.isEmpty() && number < windows.getFirst().minOffset) {
+                LOG.debug("[GapDetector] Offset {} is below current known window range (firstWindowMin={}) for topic {}",
+                        number,
+                        windows.getFirst().minOffset,
+                        topicName);
                 return -2;
             }
 
             // purge oldest if exceeding maxWindows
             if (windows.size() >= maxWindows) {
                 Window old = windows.removeFirst();
+                List<List<Long>> purgedWindowGaps = old.findGapsFiltered(minReceived);
+                LOG.debug(
+                        "[GapDetector] Purging oldest window {}-{} for topic {} (currentWindows={}, maxWindows={}, purgedGapRanges={})",
+                        old.minOffset,
+                        old.maxOffset,
+                        topicName,
+                        windows.size(),
+                        maxWindows,
+                        purgedWindowGaps.size());
                 if (onPurge != null) {
                     onPurge.accept(new WindowView() {
                         public long getMinOffset() { return old.minOffset; }
                         public long getMaxOffset() { return old.maxOffset; }
                         public long getCreatedAt() { return old.createdAt; }
-                        public List<List<Long>> findGaps() { return old.findGapsFiltered(minReceived); }
+                        public List<List<Long>> findGaps() { return purgedWindowGaps; }
                     });
                 }
             }
@@ -213,6 +226,12 @@ public class GapDetector implements java.io.Serializable {
             try {
                 w = new Window(start, end);
                 windows.add(w);
+                LOG.debug("[GapDetector] Created new window {}-{} for topic {} (windowsNow={}, maxWindows={})",
+                        start,
+                        end,
+                        topicName,
+                        windows.size(),
+                        maxWindows);
             } catch (OutOfMemoryError oom) {
                 LOG.error("[GapDetector] OutOfMemoryError: Failed to allocate new window for offsets " + start + "-" + end + ": " + oom);
                 // Prevent further window growth
