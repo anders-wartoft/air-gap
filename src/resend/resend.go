@@ -317,6 +317,16 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 		Logger.Fatalf("Failed parsing filter file: %v", err)
 		return
 	}
+
+	// TLS for kafka if needed
+	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
+		Logger.Print("Using TLS for Kafka")
+		err := kafkaClient.SetTLS(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
+		if err != nil {
+			Logger.Panicf("Failed to configure TLS: %v", err)
+		}
+	}
+
 	jsonFilter = filterJsonFilterByPartitionRange(jsonFilter, config.partitionStartValue, config.partitionStopValue)
 	if len(jsonFilter.Results) == 0 {
 		Logger.Warnf("No resend bundle partitions match configured range start=%d stop=%d",
@@ -495,15 +505,6 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 		}
 
 		return keepRunning
-	}
-
-	// TLS for kafka if needed
-	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
-		Logger.Print("Using TLS for Kafka")
-		err := kafkaClient.SetTLS(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
-		if err != nil {
-			Logger.Panicf("Failed to configure TLS: %v", err)
-		}
 	}
 
 	Logger.Debugf("Got %d results from resend filter", len(jsonFilter.Results))

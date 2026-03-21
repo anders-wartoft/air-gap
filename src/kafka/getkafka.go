@@ -100,6 +100,21 @@ func SetTLSConfigParameters(certFile, keyFile, caFile, keyPasswordFile string) (
 	return createTLSConfig()
 }
 
+// ApplyTLSConfig enables TLS on the provided Sarama config if TLS parameters are set.
+func ApplyTLSConfig(config *sarama.Config) error {
+	if tlsConfigParameters == nil {
+		return nil
+	}
+	Logger.Println("Enabling TLS configuration for Kafka client")
+	tlsConfig, err := createTLSConfig()
+	if err != nil {
+		return err
+	}
+	config.Net.TLS.Enable = true
+	config.Net.TLS.Config = tlsConfig
+	return nil
+}
+
 // decryptLegacyPEM decrypts a legacy PEM encrypted private key (the old format with DEK-Info header)
 func decryptLegacyPEM(block *pem.Block, password []byte) ([]byte, error) {
 	// Get encryption info from headers

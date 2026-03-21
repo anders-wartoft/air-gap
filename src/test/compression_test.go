@@ -15,7 +15,7 @@ func compressionTest(data []byte, t *testing.T) {
 	}
 
 	// Decompress and check round-trip
-	decompressed, err := protocol.DecompressGzip(compressed)
+	decompressed, err := protocol.DecompressGzip(compressed, len(data))
 	if err != nil {
 		t.Fatalf("Decompression failed: %v", err)
 	}

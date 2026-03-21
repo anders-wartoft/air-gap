@@ -39,6 +39,9 @@ func (k *KafkaAdapter) GetLastOffset(servers, topic string, partition int) (int6
 	kafka.ConfigureSaramaLogger()
 
 	config := sarama.NewConfig()
+	if err := kafka.ApplyTLSConfig(config); err != nil {
+		return 0, err
+	}
 	bootstrapServers := strings.Split(servers, ",")
 	client, err := sarama.NewClient(bootstrapServers, config)
 	if err != nil {

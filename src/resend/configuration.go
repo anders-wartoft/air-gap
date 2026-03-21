@@ -333,6 +333,10 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		Logger.Print("Overriding caFile with environment variable: " + prefix + "CA_FILE" + " with value: " + caFile)
 		config.caFile = caFile
 	}
+	if keyPasswordFile := os.Getenv(prefix + "KEY_PASSWORD_FILE"); keyPasswordFile != "" {
+		Logger.Print("Overriding keyPasswordFile with environment variable: " + prefix + "KEY_PASSWORD_FILE" + " with value: " + keyPasswordFile)
+		config.keyPasswordFile = keyPasswordFile
+	}
 	if limit := os.Getenv(prefix + "LIMIT"); limit != "" {
 		Logger.Print("Overriding limit with environment variable: " + prefix + "LIMIT" + " with value: " + limit)
 		config.limit = strings.ToLower(limit)
