@@ -9,7 +9,7 @@
   <url>http://maven.apache.org</url>
   <properties>
     <!-- Keep all Log4j artifacts on the same version to avoid provider initialization issues at runtime. -->
-    <log4j2.version>2.25.3</log4j2.version>
+    <log4j2.version>2.25.4</log4j2.version>
   </properties>
   <dependencies>
     <!-- SLF4J API -->
