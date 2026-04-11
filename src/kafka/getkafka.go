@@ -236,7 +236,7 @@ func createTLSConfig() (*tls.Config, error) {
 
 	Logger.Debugf("DEBUG: PEM block type: '%s'", block.Type)
 	Logger.Debugf("DEBUG: PEM Proc-Type header: '%s'", block.Headers["Proc-Type"])
-	Logger.Debugf("DEBUG: keyPasswordFile: '%s'", tlsConfigParameters.KeyPasswordFile)
+	Logger.Debugf("DEBUG: keyPasswordFile: '%s'", tlsConfigParameters.KeyPasswordFile) // lgtm[go/clear-text-logging] - logs file path, not password content
 
 	// Check if the key file is encrypted
 	isEncrypted := false

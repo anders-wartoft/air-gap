@@ -334,7 +334,7 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		config.caFile = caFile
 	}
 	if keyPasswordFile := os.Getenv(prefix + "KEY_PASSWORD_FILE"); keyPasswordFile != "" {
-		Logger.Print("Overriding keyPasswordFile with environment variable: " + prefix + "KEY_PASSWORD_FILE" + " with value: " + keyPasswordFile)
+		Logger.Print("Overriding keyPasswordFile with environment variable: " + prefix + "KEY_PASSWORD_FILE" + " with value: " + keyPasswordFile) // lgtm[go/clear-text-logging] - logs file path, not password content
 		config.keyPasswordFile = keyPasswordFile
 	}
 	if limit := os.Getenv(prefix + "LIMIT"); limit != "" {

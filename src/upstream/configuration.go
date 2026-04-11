@@ -640,7 +640,7 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		absPath, _ := filepath.Abs(result.keyPasswordFile)
 		file, err := os.Open(result.keyPasswordFile)
 		if err != nil {
-			Logger.Fatalf("Cannot open keyPasswordFile '%s' (absolute path: '%s'): %v", result.keyPasswordFile, absPath, err)
+			Logger.Fatalf("Cannot open keyPasswordFile '%s' (absolute path: '%s'): %v", result.keyPasswordFile, absPath, err) // lgtm[go/clear-text-logging] - logs file path, not password content
 		}
 		defer file.Close()
 	}
@@ -733,7 +733,7 @@ func logConfiguration(config TransferConfiguration) {
 	}
 	Logger.Printf("  certFile: %s", config.certFile)
 	Logger.Printf("  keyFile: %s", config.keyFile)
-	Logger.Printf("  keyPasswordFile: %s", config.keyPasswordFile)
+	Logger.Printf("  keyPasswordFile: %s", config.keyPasswordFile) // lgtm[go/clear-text-logging] - logs file path, not password content
 	Logger.Printf("  caFile: %s", config.caFile)
 	Logger.Printf("  deliverFilter: %s", config.deliverFilter)
 	Logger.Printf("  logStatistics: %d seconds", config.logStatistics)

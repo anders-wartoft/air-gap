@@ -6,9 +6,8 @@ import (
 
 // OBS: Before running the fuzzer, disable the checksum test in parser.go ParseMessage
 func FuzzUdpMessageHandler(f *testing.F) {
-	f.Fuzz(func(t *testing.T, packet []byte){
+	f.Fuzz(func(t *testing.T, packet []byte) {
 		kafkaWriter = NewNullAdapter()
 		handleUdpMessage(packet)
 	})
 }
-

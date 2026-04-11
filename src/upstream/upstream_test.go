@@ -6,7 +6,7 @@ import (
 )
 
 func FuzzKafkaHandler(f *testing.F) {
-	f.Fuzz(func(t *testing.T, time_in int64, id string, time_in2 int64, received []byte, compressWhenLengthExceeds int){
+	f.Fuzz(func(t *testing.T, time_in int64, id string, time_in2 int64, received []byte, compressWhenLengthExceeds int) {
 		config.payloadSize = 65507
 		config.compressWhenLengthExceeds = compressWhenLengthExceeds
 		config.encryption = false
@@ -14,9 +14,9 @@ func FuzzKafkaHandler(f *testing.F) {
 		time_unix := time.UnixMicro(time_in)
 		time_unix2 := time.UnixMicro(time_in2)
 		udpClient := udpFuzzHandler{
-			SendMessageFunc: func([]byte) error { return nil },
+			SendMessageFunc:  func([]byte) error { return nil },
 			SendMessagesFunc: func([][]byte) error { return nil },
-			CloseFunc: func() error { return nil },
+			CloseFunc:        func() error { return nil },
 		}
 
 		kafkaHandler(
@@ -28,6 +28,7 @@ func FuzzKafkaHandler(f *testing.F) {
 			received)
 	})
 }
+
 type udpFuzzHandler struct {
 	SendMessageFunc  func([]byte) error
 	SendMessagesFunc func([][]byte) error
@@ -45,4 +46,3 @@ func (u udpFuzzHandler) SendMessages(msgs [][]byte) error {
 func (u udpFuzzHandler) Close() error {
 	return u.CloseFunc()
 }
-
