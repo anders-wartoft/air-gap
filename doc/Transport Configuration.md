@@ -106,25 +106,32 @@ privateKeyFiles=certs/private*.pem
 
 ### Message Retry Logic
 
-Both UDP and TCP implementations include automatic retry logic with exponential backoff:
+Upstream retries failed sends automatically. The strategy differs by transport:
 
-**Retry Strategy:**
+**TCP retry strategy (configurable):**
 
-- Maximum 3 attempts per message
-- Exponential backoff: 100ms, 200ms, 400ms between attempts
-- Only on transient failures (connection errors, I/O errors)
+- Default: retry indefinitely (`tcpRetryTimes=0`) with 1-second pause between attempts
+- Upstream never gives up by default — no messages are lost even if downstream is restarted
+- Sending resumes automatically as soon as the downstream comes back
+- All three parameters are configurable; see [TCP Retry Configuration](#tcp-retry-configuration) below
 
-**Example log output:**
+**UDP retry strategy (fixed):**
+
+- Maximum 30 attempts with 100ms pause (3 seconds total)
+- If all 30 attempts fail, the Kafka offset is NOT committed — the message is reprocessed on the next Kafka poll
+- Only on transient failures (I/O errors)
+
+**Example log output (TCP, default warn level):**
 
 ```bash
-[DEBUG] Send attempt 1/3 failed for id=transfer_4_23: connection refused, retrying in 100ms
+[WARN] Send attempt 1/∞ failed for id=transfer_4_23: TCP connection unavailable to 127.0.0.1:1234, retrying in 1000ms
 [INFO] Message id=transfer_4_23 successfully sent after 2 attempt(s)
 ```
 
 **Kafka Integration:**
 
-- If all retries fail, the Kafka message is NOT marked as consumed
-- Failed messages are automatically reprocessed when transport is restored
+- For TCP with infinite retries (`tcpRetryTimes=0`): upstream blocks until delivery succeeds — no message is ever lost
+- For TCP with finite retries or UDP: if all retries fail, the Kafka message is NOT marked as consumed and will be reprocessed when transport is restored
 - This prevents message loss due to temporary network issues
 
 ### Status Tracking
@@ -155,6 +162,43 @@ Transport status is continuously monitored and reported:
 ```
 
 ## TCP-Specific Features
+
+### TCP Retry Configuration
+
+When `transport=tcp`, upstream retries failed sends according to three configurable parameters:
+
+| Property | Env variable | Default | Description |
+| --- | --- | --- | --- |
+| `tcpRetryInterval` | `AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL` | `1000` | Milliseconds to wait between retry attempts |
+| `tcpRetryTimes` | `AIRGAP_UPSTREAM_TCP_RETRY_TIMES` | `0` | Max retries; `0` = infinite (never give up) |
+| `tcpRetryErrorLevel` | `AIRGAP_UPSTREAM_TCP_RETRY_ERROR_LEVEL` | `WARN` | Log level for per-attempt retry messages (`DEBUG`/`INFO`/`WARN`/`ERROR`) |
+
+**Default behaviour (recommended for production):**
+
+```properties
+transport=tcp
+# Not required — these are the defaults:
+tcpRetryInterval=1000
+tcpRetryTimes=0
+tcpRetryErrorLevel=WARN
+```
+
+With `tcpRetryTimes=0`, sending blocks until the downstream comes back. The upstream never asks Kafka to reprocess the message, so **no messages are lost** regardless of how long the downstream is unavailable.
+
+**Quieter retry logging:**
+
+```properties
+tcpRetryErrorLevel=debug   # Only visible when logLevel=debug
+```
+
+**Finite retries (fall back to Kafka reprocessing after N failures):**
+
+```properties
+tcpRetryTimes=10           # Give up after 10 attempts (10 seconds at default interval)
+tcpRetryInterval=1000
+```
+
+When finite retries are exhausted, upstream returns `false` to the Kafka handler, so the message is reprocessed on the next Kafka poll — no data is lost, but ordering may be affected.
 
 ### Connection Health Check
 
@@ -308,8 +352,10 @@ payloadSize=8000   # Optimize fragmentation
 
 ```bash
 transport=tcp
-payloadSize=4096   # Conservative fragmentation
-# TCP handles retries automatically
+payloadSize=4096      # Conservative fragmentation
+tcpRetryInterval=1000 # 1 second between retries
+tcpRetryTimes=0       # Retry indefinitely (no message loss)
+tcpRetryErrorLevel=warn
 ```
 
 ## Migration Between Transports
@@ -336,5 +382,9 @@ Added in 0.1.8-SNAPSHOT
 - Automatic reconnection
 - Conditional message marking
 - Retry logging improvements
+
+Added later:
+
+- `tcpRetryInterval`, `tcpRetryTimes`, `tcpRetryErrorLevel` — configurable TCP retry behaviour with default infinite-retry to guarantee no message loss
 
 Both UDP and TCP use the same underlying message protocol and are fully compatible at the application level.

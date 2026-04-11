@@ -52,6 +52,9 @@ type TransferConfiguration struct {
 	logLevel                     string                   // log level: DEBUG, INFO, WARN, ERROR, FATAL
 	logStatistics                int32                    // log statistics every n seconds, 0 means no logging
 	compressWhenLengthExceeds    int                      // compress messages when length exceeds this value, 0 means no compression
+	tcpRetryInterval             int                      // milliseconds between TCP send retries (default 1000)
+	tcpRetryTimes                int                      // max TCP send retries, 0 = infinite (default 0)
+	tcpRetryErrorLevel           string                   // log level for TCP retry messages (default "WARN")
 }
 
 func DefaultConfiguration() TransferConfiguration {
@@ -71,6 +74,9 @@ func DefaultConfiguration() TransferConfiguration {
 	config.compressWhenLengthExceeds = 0 // default: no compression
 	config.inputFilterTimeout = 100      // default: 100ms regex timeout
 	config.partitionStartValue = 0
+	config.tcpRetryInterval = 1000     // default: 1 second between retries
+	config.tcpRetryTimes = 0           // default: infinite retries
+	config.tcpRetryErrorLevel = "WARN" // default: warn level for retry errors
 	return config
 }
 
@@ -292,6 +298,31 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 					Logger.Printf("partitionStartValue: %d", result.partitionStartValue)
 				}
 			}
+		case "tcpRetryInterval":
+			tmp, err := strconv.Atoi(value)
+			if err != nil || tmp <= 0 {
+				Logger.Fatalf("Error in config tcpRetryInterval. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
+			} else {
+				result.tcpRetryInterval = tmp
+				Logger.Printf("tcpRetryInterval: %d", tmp)
+			}
+		case "tcpRetryTimes":
+			tmp, err := strconv.Atoi(value)
+			if err != nil || tmp < 0 {
+				Logger.Fatalf("Error in config tcpRetryTimes. Illegal value: %s. Legal values are a non-negative integer (0 = infinite)", value)
+			} else {
+				result.tcpRetryTimes = tmp
+				Logger.Printf("tcpRetryTimes: %d", tmp)
+			}
+		case "tcpRetryErrorLevel":
+			level := strings.ToUpper(value)
+			switch level {
+			case "DEBUG", "INFO", "WARN", "ERROR":
+				result.tcpRetryErrorLevel = level
+				Logger.Printf("tcpRetryErrorLevel: %s", level)
+			default:
+				Logger.Fatalf("Error in config tcpRetryErrorLevel. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR", value)
+			}
 		default:
 			Logger.Fatalf("Unknown configuration key: %s", key)
 		}
@@ -481,6 +512,28 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			config.partitionStartValue = partitionStartValueInt
 		}
 	}
+	if tcpRetryInterval := os.Getenv(prefix + "TCP_RETRY_INTERVAL"); tcpRetryInterval != "" {
+		if v, err := strconv.Atoi(tcpRetryInterval); err == nil && v > 0 {
+			Logger.Print("Overriding tcpRetryInterval with environment variable: " + prefix + "TCP_RETRY_INTERVAL" + " with value: " + tcpRetryInterval)
+			config.tcpRetryInterval = v
+		}
+	}
+	if tcpRetryTimes := os.Getenv(prefix + "TCP_RETRY_TIMES"); tcpRetryTimes != "" {
+		if v, err := strconv.Atoi(tcpRetryTimes); err == nil && v >= 0 {
+			Logger.Print("Overriding tcpRetryTimes with environment variable: " + prefix + "TCP_RETRY_TIMES" + " with value: " + tcpRetryTimes)
+			config.tcpRetryTimes = v
+		}
+	}
+	if tcpRetryErrorLevel := os.Getenv(prefix + "TCP_RETRY_ERROR_LEVEL"); tcpRetryErrorLevel != "" {
+		level := strings.ToUpper(tcpRetryErrorLevel)
+		switch level {
+		case "DEBUG", "INFO", "WARN", "ERROR":
+			Logger.Print("Overriding tcpRetryErrorLevel with environment variable: " + prefix + "TCP_RETRY_ERROR_LEVEL" + " with value: " + tcpRetryErrorLevel)
+			config.tcpRetryErrorLevel = level
+		default:
+			Logger.Fatalf("Error in environment variable AIRGAP_UPSTREAM_TCP_RETRY_ERROR_LEVEL. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR", tcpRetryErrorLevel)
+		}
+	}
 
 	return config
 }
@@ -599,6 +652,18 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	if result.partitionStartValue < 0 {
 		Logger.Fatalf("Error in config partitionStartValue. Illegal value: %d. Legal values are a non-negative integer", result.partitionStartValue)
 	}
+	if result.tcpRetryInterval <= 0 {
+		Logger.Fatalf("Error in config tcpRetryInterval. Illegal value: %d. Legal values are a positive integer (milliseconds)", result.tcpRetryInterval)
+	}
+	if result.tcpRetryTimes < 0 {
+		Logger.Fatalf("Error in config tcpRetryTimes. Illegal value: %d. Legal values are a non-negative integer (0 = infinite)", result.tcpRetryTimes)
+	}
+	switch result.tcpRetryErrorLevel {
+	case "DEBUG", "INFO", "WARN", "ERROR":
+		// valid
+	default:
+		Logger.Fatalf("Error in config tcpRetryErrorLevel. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR", result.tcpRetryErrorLevel)
+	}
 	// Set up a filtering scheme, if configured. You can filter every other, third, fifth message etc
 	// by setting filterConfig to a string like "2,3,22,23,42,43". This will send messages 2 and 3
 	// of every group of 23 messages. The last group (42,43) is just to verify that the user has
@@ -677,4 +742,13 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  inputFilterDefaultAction: %s", config.inputFilterDefaultAction)
 	Logger.Printf("  inputFilterTimeout: %dms", config.inputFilterTimeout)
 	Logger.Printf("  partitionStartValue: %d", config.partitionStartValue)
+	if config.transport == "tcp" {
+		tcpRetryTimesStr := "infinite"
+		if config.tcpRetryTimes > 0 {
+			tcpRetryTimesStr = strconv.Itoa(config.tcpRetryTimes)
+		}
+		Logger.Printf("  tcpRetryInterval: %dms", config.tcpRetryInterval)
+		Logger.Printf("  tcpRetryTimes: %s", tcpRetryTimesStr)
+		Logger.Printf("  tcpRetryErrorLevel: %s", config.tcpRetryErrorLevel)
+	}
 }

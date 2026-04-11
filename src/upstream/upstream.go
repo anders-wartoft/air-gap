@@ -395,13 +395,21 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 	}
 
 	// Send with retry logic - prevents message loss if receiver is temporarily unavailable
-	// We retry aggressively to avoid telling Kafka to reprocess (which causes consumer group rebalancing)
-	const maxRetries = 30       // 30 attempts
-	const retryIntervalMs = 100 // 100ms between attempts = 3 seconds total wait
+	// For TCP: uses configurable tcpRetryTimes (0=infinite) and tcpRetryInterval.
+	// For UDP: hardcoded 30 retries at 100ms (3s total), then let Kafka reprocess.
+	var maxRetries int
+	var retryIntervalMs int
+	if config.transport == "tcp" {
+		maxRetries = config.tcpRetryTimes // 0 = infinite
+		retryIntervalMs = config.tcpRetryInterval
+	} else {
+		maxRetries = 30
+		retryIntervalMs = 100
+	}
 	var transportErr error
 	var hadFailure bool
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for attempt := 1; maxRetries == 0 || attempt <= maxRetries; attempt++ {
 		transportErr = udpClient.SendMessages(messages)
 		if transportErr == nil {
 			// Success - update counters and status
@@ -431,14 +439,33 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 
 		// Send failed - prepare for retry with backoff
 		hadFailure = true
-		if attempt < maxRetries {
-			if Logger.CanLog(logging.DEBUG) && attempt <= 3 {
-				// Only log first 3 attempts to avoid log spam
-				Logger.Debugf("Send attempt %d/%d failed for id=%s: %v, retrying in %dms",
-					attempt, maxRetries, id, transportErr, retryIntervalMs)
-			}
-			time.Sleep(time.Duration(retryIntervalMs) * time.Millisecond)
+		retryLimitStr := fmt.Sprintf("%d", maxRetries)
+		if maxRetries == 0 {
+			retryLimitStr = "∞"
 		}
+		if config.transport == "tcp" {
+			// Use configurable error level for TCP retry messages
+			switch config.tcpRetryErrorLevel {
+			case "DEBUG":
+				Logger.Debugf("Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
+					fmt.Sprintf("%d", attempt), retryLimitStr, id, transportErr, retryIntervalMs)
+			case "INFO":
+				Logger.Infof("Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
+					fmt.Sprintf("%d", attempt), retryLimitStr, id, transportErr, retryIntervalMs)
+			case "ERROR":
+				Logger.Errorf("Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
+					fmt.Sprintf("%d", attempt), retryLimitStr, id, transportErr, retryIntervalMs)
+			default: // WARN
+				Logger.Warnf("Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
+					fmt.Sprintf("%d", attempt), retryLimitStr, id, transportErr, retryIntervalMs)
+			}
+		} else {
+			if Logger.CanLog(logging.DEBUG) && attempt <= 3 {
+				Logger.Debugf("Send attempt %d/%s failed for id=%s: %v, retrying in %dms",
+					attempt, retryLimitStr, id, transportErr, retryIntervalMs)
+			}
+		}
+		time.Sleep(time.Duration(retryIntervalMs) * time.Millisecond)
 	}
 
 	// All retries failed - update status and don't consume the message
@@ -455,7 +482,6 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 
 	// Return false to prevent this message from being marked as consumed
 	// The message will be reprocessed when the receiver comes back up
-	// Note: This should be rare as we retry for ~3 seconds before giving up
 	Logger.Errorf("Failed to send message id=%s after %d retries (%dms): %v. Message will be retried.",
 		id, maxRetries, maxRetries*retryIntervalMs, transportErr)
 	return false

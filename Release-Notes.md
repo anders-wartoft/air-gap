@@ -1,5 +1,46 @@
 # Release Notes
 
+## 0.1.9-SNAPSHOT
+
+### TCP Transport Reliability
+
+- **Configurable TCP retry behaviour**: When `transport=tcp`, upstream now retries failed sends with three new config parameters:
+  - `tcpRetryInterval` (`AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL`, default `1000` ms) — pause between retry attempts
+  - `tcpRetryTimes` (`AIRGAP_UPSTREAM_TCP_RETRY_TIMES`, default `0`) — maximum retries; `0` means infinite (never give up)
+  - `tcpRetryErrorLevel` (`AIRGAP_UPSTREAM_TCP_RETRY_ERROR_LEVEL`, default `WARN`) — log level for per-attempt retry messages (`DEBUG`/`INFO`/`WARN`/`ERROR`)
+  - With the default infinite-retry setting, upstream blocks until the downstream comes back and no messages are ever lost, fixing a bug where restarting the downstream caused the upstream to stop sending permanently
+  - UDP retry behaviour is unchanged (30 × 100 ms, then Kafka reprocessing)
+
+### Deduplication (Java Streams)
+
+- **Fail-fast startup with retry backoff**: Deduplication app now validates Kafka connectivity at startup and fails fast with clear error messages; retries with exponential backoff and jitter instead of entering a broken state
+- **Fixed restart loop**: Resolved a bug where the deduplication app could get stuck in an infinite restart loop under certain error conditions
+- **Password leak fix**: Fixed a bug where the Kafka password was exposed in log output (#11, contributed by Tobias Wennberg)
+- **Improved logging**: More detailed event-level logging in `PartitionDedupApp` and `GapDetector`; tuned log levels for individual events to reduce noise at INFO level
+
+### Upstream / Downstream
+
+- **Decompression size limit**: New `maxDecompressedSize` config option for downstream to cap the maximum size of a decompressed message, protecting against decompression bombs. Defaults to no limit
+- **Fix downstream assembly panic** (#10): Resolved a panic that could occur during message reassembly when fragments arrived in unexpected order or were corrupted; replaced with graceful error handling
+- **UDP broadcast duplication remedy**: Documented and added configuration guidance for handling duplicate messages that arise from UDP broadcast environments
+
+### Resend
+
+- **Fixed TLS for resend app**: Resolved a bug that prevented the resend application from using TLS when connecting to Kafka; added `certFile`, `keyFile`, `caFile`, and `keyPasswordFile` support matching upstream/downstream configuration
+- **TLS integration tests**: Added `resend_tls_test.go` with test coverage for TLS-authenticated Kafka connections in resend
+
+### Partition Merging
+
+- **Merge multiple topics into one**: New `partitionStartValue` feature (upstream) allows merging events from several source clusters/topics into a single downstream topic by offsetting partition numbers. Full test case (testcase 21) with two upstream sources, one downstream, one deduplicator and full resend support
+- **Load balancing filter utility**: New `utils/loadbalance.py` script to calculate the correct `deliverFilter` values for a given number of upstream instances and partitions
+
+### Internal / Testing
+
+- **Compression integration tests**: Added `src/test/compression_test.go`
+- **Test configs for testcase 21**: Complete set of properties/env files covering all components in the partition-merge scenario
+- **Kafka TLS helper**: Extracted reusable TLS config setup in `src/kafka/getkafka.go` for use by resend and other clients
+- **Documentation**: Updated README, Deduplication.md, FAQ.md, Redundancy and Load Balancing.md, Resend.md, and Transport Configuration.md with new features and troubleshooting guidance
+
 ## 0.1.8-SNAPSHOT
 
 ### Transport Layer Improvements

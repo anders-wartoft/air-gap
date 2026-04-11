@@ -278,6 +278,9 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | inputFilterRules | AIRGAP_UPSTREAM_INPUT_FILTER_RULES | | Path to file containing ordered allow/deny regex rules, or inline comma-separated rules. Format: `action:regex_pattern` where action is `allow` or `deny`. Rules evaluated in order, first match wins. See [InputFilter.md](doc/InputFilter.md) for details |
 | inputFilterDefaultAction | AIRGAP_UPSTREAM_INPUT_FILTER_DEFAULT_ACTION | allow | Default action when no filter rules match: `allow` or `deny`. Use `deny` for allowlist approach, `allow` for blocklist approach |
 | inputFilterTimeout | AIRGAP_UPSTREAM_INPUT_FILTER_TIMEOUT | 100 | Regex match timeout in milliseconds for input filter rules. Protects against ReDoS attacks. Increase for complex patterns or large payloads |
+| tcpRetryInterval | AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL | 1000 | (TCP only) Milliseconds to wait between send retries when the downstream is unreachable |
+| tcpRetryTimes | AIRGAP_UPSTREAM_TCP_RETRY_TIMES | 0 | (TCP only) Maximum number of send retries. `0` means retry indefinitely (no message loss). Set to a positive integer to give up after that many attempts |
+| tcpRetryErrorLevel | AIRGAP_UPSTREAM_TCP_RETRY_ERROR_LEVEL | WARN | (TCP only) Log level used for each retry attempt message. Valid values: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 
 ### Example use case: Two clusters, same topic name, no topic rename possible
 
