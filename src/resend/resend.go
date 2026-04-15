@@ -438,6 +438,22 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 		// If this is the last message that we will send for this partition, mark finished after sending.
 		last := isLast(jsonFilter, topic, downstreamPartition, offset)
 
+		// Input filtering based on payload content: clear payload instead of dropping,
+		// so the downstream sequence ID is still filled and no gap is reported.
+		if config.inputFilter != nil {
+			shouldFilter, err := config.inputFilter.ShouldFilterOut(received)
+			if err != nil {
+				Logger.Errorf("Error applying input filter: %v", err)
+				if strings.Contains(err.Error(), "timeout") {
+					Logger.Warnf("Input filter timeout for id=%s", sendID)
+				}
+				// On error, fail open (don't filter)
+			} else if shouldFilter {
+				Logger.Debugf("Input filter cleared payload for message: %s (sending with empty payload to preserve sequence)", sendID)
+				received = []byte{}
+			}
+		}
+
 		// Compress or not
 		var isCompressed = false
 		if config.compressWhenLengthExceeds > 0 && len(received) > config.compressWhenLengthExceeds {

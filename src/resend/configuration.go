@@ -10,43 +10,48 @@ import (
 	"sync"
 	"time"
 
+	"sitia.nu/airgap/src/inputfilter"
 	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/protocol"
 )
 
 type TransferConfiguration struct {
-	id                           string         // unique id for this resend
-	nic                          string         // network interface card
-	targetIP                     string         // target IP address
-	targetPort                   int            // target port
-	payloadSize                  uint16         // Maximum Transmission Unit - protocol headers
-	from                         string         // Start time for reading from Kafka
-	to                           string         // End time for reading from Kafka
-	encryption                   bool           // encryption on/off
-	key                          []byte         // symmetric key in use
-	newkey                       []byte         // a new symmetric key, when successfully sent, copy the value to key
-	publicKey                    *rsa.PublicKey // public key for encrypting the symmetric key
-	publicKeyFile                string         // file with the public key
-	generateNewSymmetricKeyEvery int            // seconds between key generation
-	eps                          float64        // events per second, -1 means no limit
-	bootstrapServers             string         // Kafka bootstrap servers
-	topic                        string         // Kafka topic
-	groupID                      string         // Kafka group ID
-	logFileName                  string         // log file name, redirect logging to a file from the console
-	certFile                     string         // Certificate to use to communicate with Kafka with TLS
-	keyFile                      string         // Key file to use for TLS
-	caFile                       string         // CA file to use for TLS
-	keyPasswordFile              string         // File containing the password to decrypt the key file
-	logLevel                     string         // log level: DEBUG, INFO, WARN, ERROR, FATAL
-	limit                        string         // limit the exported messages: all, first (all means no limit)
-	resendFileName               string         // output file name
-	logStatistics                int            // log statistics interval in seconds, 0 means no logging
-	compressWhenLengthExceeds    int            // compress messages when length exceeds this value, 0 means no compression
-	partition                    int            // Kafka partition to read from. Can only read from one partition at a time when manually configured
-	partitionStartValue          int            // value added to source partition number when sending message IDs downstream
-	partitionStopValue           int            // number of downstream partitions to serve, starting from partitionStartValue (0 = no upper bound)
-	offsetFrom                   int64          // offset to start reading from
-	offsetTo                     int64          // offset to stop reading at
+	id                           string                   // unique id for this resend
+	nic                          string                   // network interface card
+	targetIP                     string                   // target IP address
+	targetPort                   int                      // target port
+	payloadSize                  uint16                   // Maximum Transmission Unit - protocol headers
+	from                         string                   // Start time for reading from Kafka
+	to                           string                   // End time for reading from Kafka
+	encryption                   bool                     // encryption on/off
+	key                          []byte                   // symmetric key in use
+	newkey                       []byte                   // a new symmetric key, when successfully sent, copy the value to key
+	publicKey                    *rsa.PublicKey           // public key for encrypting the symmetric key
+	publicKeyFile                string                   // file with the public key
+	generateNewSymmetricKeyEvery int                      // seconds between key generation
+	eps                          float64                  // events per second, -1 means no limit
+	bootstrapServers             string                   // Kafka bootstrap servers
+	topic                        string                   // Kafka topic
+	groupID                      string                   // Kafka group ID
+	logFileName                  string                   // log file name, redirect logging to a file from the console
+	certFile                     string                   // Certificate to use to communicate with Kafka with TLS
+	keyFile                      string                   // Key file to use for TLS
+	caFile                       string                   // CA file to use for TLS
+	keyPasswordFile              string                   // File containing the password to decrypt the key file
+	logLevel                     string                   // log level: DEBUG, INFO, WARN, ERROR, FATAL
+	limit                        string                   // limit the exported messages: all, first (all means no limit)
+	resendFileName               string                   // output file name
+	logStatistics                int                      // log statistics interval in seconds, 0 means no logging
+	compressWhenLengthExceeds    int                      // compress messages when length exceeds this value, 0 means no compression
+	partition                    int                      // Kafka partition to read from. Can only read from one partition at a time when manually configured
+	partitionStartValue          int                      // value added to source partition number when sending message IDs downstream
+	partitionStopValue           int                      // number of downstream partitions to serve, starting from partitionStartValue (0 = no upper bound)
+	offsetFrom                   int64                    // offset to start reading from
+	offsetTo                     int64                    // offset to stop reading at
+	inputFilterRules             string                   // input filter rules (file path or inline)
+	inputFilterDefaultAction     string                   // default action when no rules match (allow or deny)
+	inputFilterTimeout           int                      // regex match timeout in milliseconds (default 100)
+	inputFilter                  *inputfilter.InputFilter // input filter instance
 }
 
 var nextKeyGeneration time.Time
@@ -92,6 +97,8 @@ func defaultConfiguration() TransferConfiguration {
 	config.generateNewSymmetricKeyEvery = 0 // default: do not generate new keys
 	config.eps = -1.0
 	config.compressWhenLengthExceeds = 0 // default: no compression
+	config.inputFilterDefaultAction = "allow"
+	config.inputFilterTimeout = 100 // default: 100ms regex timeout
 	// Command line overrides
 	config.topic = ""
 	config.partition = -1
@@ -265,6 +272,19 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 			}
 			result.partitionStopValue = v
 			Logger.Printf("partitionStopValue: %d", result.partitionStopValue)
+		case "inputFilterRules":
+			result.inputFilterRules = value
+			Logger.Printf("inputFilterRules: %s", value)
+		case "inputFilterDefaultAction":
+			result.inputFilterDefaultAction = strings.ToLower(value)
+			Logger.Printf("inputFilterDefaultAction: %s", result.inputFilterDefaultAction)
+		case "inputFilterTimeout":
+			tmp, err := strconv.Atoi(value)
+			if err != nil || tmp <= 0 {
+				Logger.Fatalf("Error in config inputFilterTimeout. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
+			}
+			result.inputFilterTimeout = tmp
+			Logger.Printf("inputFilterTimeout: %d", result.inputFilterTimeout)
 		default:
 			Logger.Printf("Unknown configuration key: %s", key)
 		}
@@ -446,6 +466,22 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		Logger.Print("Overriding partitionStopValue with environment variable: " + prefix + "PARTITION_STOP_VALUE" + " with value: " + partitionStopValue)
 		config.partitionStopValue = value
 	}
+	if inputFilterRules := os.Getenv(prefix + "INPUT_FILTER_RULES"); inputFilterRules != "" {
+		Logger.Print("Overriding inputFilterRules with environment variable: " + prefix + "INPUT_FILTER_RULES" + " with value: " + inputFilterRules)
+		config.inputFilterRules = inputFilterRules
+	}
+	if inputFilterDefaultAction := os.Getenv(prefix + "INPUT_FILTER_DEFAULT_ACTION"); inputFilterDefaultAction != "" {
+		Logger.Print("Overriding inputFilterDefaultAction with environment variable: " + prefix + "INPUT_FILTER_DEFAULT_ACTION" + " with value: " + inputFilterDefaultAction)
+		config.inputFilterDefaultAction = strings.ToLower(inputFilterDefaultAction)
+	}
+	if inputFilterTimeout := os.Getenv(prefix + "INPUT_FILTER_TIMEOUT"); inputFilterTimeout != "" {
+		value, err := strconv.Atoi(inputFilterTimeout)
+		if err != nil || value <= 0 {
+			Logger.Fatalf("Error parsing INPUT_FILTER_TIMEOUT environment variable: %v", err)
+		}
+		Logger.Print("Overriding inputFilterTimeout with environment variable: " + prefix + "INPUT_FILTER_TIMEOUT" + " with value: " + inputFilterTimeout)
+		config.inputFilterTimeout = value
+	}
 
 	return config
 }
@@ -603,6 +639,16 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 					Logger.Fatalf("Error parsing partitionStopValue command line argument: %s must be a non-negative integer", value)
 				}
 				config.partitionStopValue = v
+			case "inputFilterRules":
+				config.inputFilterRules = value
+			case "inputFilterDefaultAction":
+				config.inputFilterDefaultAction = strings.ToLower(value)
+			case "inputFilterTimeout":
+				v, err := strconv.Atoi(value)
+				if err != nil || v <= 0 {
+					Logger.Fatalf("Error parsing inputFilterTimeout command line argument: must be a positive integer (milliseconds)")
+				}
+				config.inputFilterTimeout = v
 			default:
 				found = false
 				Logger.Warnf("Unknown command line override: %s", key)
@@ -723,6 +769,21 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		Logger.Fatalf("Error in config partitionStopValue. Illegal value: %d. Legal values are 0 or higher", result.partitionStopValue)
 	}
 
+	// Set up input filtering based on payload content
+	if result.inputFilterRules != "" {
+		var err error
+		timeout := time.Duration(result.inputFilterTimeout) * time.Millisecond
+		result.inputFilter, err = inputfilter.LoadFilterRules(result.inputFilterRules, result.inputFilterDefaultAction, timeout)
+		if err != nil {
+			Logger.Fatalf("Error loading input filter rules: %v", err)
+		}
+		Logger.Printf("Input filtering is enabled")
+		Logger.Print(result.inputFilter.GetRulesSummary())
+	} else {
+		result.inputFilter = nil
+		Logger.Printf("No input filtering is enabled.")
+	}
+
 	return result
 }
 
@@ -759,4 +820,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  partitionStopValue: %d", config.partitionStopValue)
 	Logger.Printf("  offsetFrom: %d", config.offsetFrom)
 	Logger.Printf("  offsetTo: %d", config.offsetTo)
+	Logger.Printf("  inputFilterRules: %s", config.inputFilterRules)
+	Logger.Printf("  inputFilterDefaultAction: %s", config.inputFilterDefaultAction)
+	Logger.Printf("  inputFilterTimeout: %dms", config.inputFilterTimeout)
 }
