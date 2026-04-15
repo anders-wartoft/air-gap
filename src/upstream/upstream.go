@@ -328,9 +328,9 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 			atomic.AddInt64(&filteredEvents, 1)
 			atomic.AddInt64(&totalFiltered, 1)
 			if Logger.CanLog(logging.DEBUG) {
-				Logger.Debugf("Input filter blocked message: %s", id)
+				Logger.Debugf("Input filter cleared payload for message: %s (sending with empty payload to preserve sequence)", id)
 			}
-			return keepRunning
+			received = []byte{} // Clear payload but still send so gap-detector sees the offset
 		} else {
 			// Message passed the input filter
 			atomic.AddInt64(&unfilteredEvents, 1)

@@ -65,6 +65,29 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 	// log.Printf("message length: %d", len(message))
 	payloadLength := int32(len(message))
 
+	// Special case: empty payload must still produce exactly one packet so that the
+	// downstream sequence is contiguous (e.g. for filtered events that must fill gaps).
+	if payloadLength == 0 {
+		part := []byte{}
+		b := make([]byte, 2)
+		part = append(part, messageType)
+		binary.BigEndian.PutUint16(b, 1)
+		part = append(part, b...) // messageNumber = 1
+		binary.BigEndian.PutUint16(b, 1)
+		part = append(part, b...) // nrMsgs = 1
+		idBytes := []byte(id)
+		binary.BigEndian.PutUint16(b, uint16(len(idBytes)))
+		part = append(part, b...)
+		part = append(part, idBytes...)
+		checksum := CalculateChecksum([]byte{})
+		part = append(part, []byte(checksum)...)
+		binary.BigEndian.PutUint16(b, 0)
+		part = append(part, b...) // payload length = 0
+		// no payload bytes
+		result = append(result, part)
+		return result
+	}
+
 	// This call will calculate the correct number of messages
 	nrMsgs := NrMessages(mtu, id, message)
 	// log.Printf("Message length: %d, MTU: %d\n", payloadLength, mtu)

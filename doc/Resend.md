@@ -105,6 +105,9 @@ The `resend` application takes similar parameters as the `create` application:
 - partitionStopValue={number of downstream partitions handled by this resend instance, starting at partitionStartValue; 0 means no upper bound}
 - offsetFrom={offset to start reading from}
 - offsetTo={offset to stop reading at}
+- inputFilterRules={path to allow/deny rule file or inline comma-separated rules, e.g. `deny:secret`. Matched events are sent with empty payload so the gap-detector sees every sequence ID. See [InputFilter.md](InputFilter.md)}
+- inputFilterDefaultAction={default action when no rules match: `allow` or `deny`. Default: `allow`}
+- inputFilterTimeout={regex match timeout in milliseconds. Default: `100`}
 
 When started, the `resend` will read and emit the events as fast as possible, without throttling if the eps is not set. When all events have been delivered, the application terminates.
 

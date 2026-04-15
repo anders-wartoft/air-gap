@@ -1,6 +1,8 @@
 # Input Filtering
 
-The air-gap system supports content-based filtering of events at the upstream side before transmission. This allows you to control which events are sent across the diode based on regex patterns matching the payload content.
+The air-gap system supports content-based filtering of events at the upstream side before transmission, and in the `resend` application when replaying missing events. This allows you to control which events are forwarded to the downstream Kafka based on regex patterns matching the payload content.
+
+> **Important**: Filtered events are **not dropped**. Instead, they are sent across the diode with an **empty payload**. This ensures the downstream gap-detector sees every sequence ID and does not report false gaps. The deduplication application (`PartitionDedupApp`) silently discards zero-length events before writing to the clean topic, so they never appear in downstream Kafka.
 
 ## Overview
 
@@ -16,7 +18,7 @@ Input filtering provides:
 
 ### Basic Setup
 
-Add to your `config/upstream.properties`:
+Add to your `config/upstream.properties` or `config/resend.properties`:
 
 ```properties
 # File-based rules (recommended for complex filters). Use .txt suffix on the files for better detection as a rule file.
@@ -32,12 +34,20 @@ inputFilterTimeout=100
 
 ### Environment Variables
 
-Override via environment variables:
+Override via environment variables (upstream):
 
 ```bash
 export AIRGAP_UPSTREAM_INPUT_FILTER_RULES=config/input-filter-rules.txt
 export AIRGAP_UPSTREAM_INPUT_FILTER_DEFAULT_ACTION=allow
 export AIRGAP_UPSTREAM_INPUT_FILTER_TIMEOUT=100
+```
+
+For the `resend` application:
+
+```bash
+export AIRGAP_RESEND_INPUT_FILTER_RULES=config/input-filter-rules.txt
+export AIRGAP_RESEND_INPUT_FILTER_DEFAULT_ACTION=allow
+export AIRGAP_RESEND_INPUT_FILTER_TIMEOUT=100
 ```
 
 ### Rule Format
@@ -251,10 +261,10 @@ STATISTICS: {
 
 Fields:
 
-- **`filtered`**: Events filtered (blocked) during the last interval
-- **`unfiltered`**: Events that passed through the input filter during the last interval
-- **`total_filtered`**: Total events filtered (blocked) since startup
-- **`total_unfiltered`**: Total events that passed through the input filter since startup
+- **`filtered`**: Events whose payload was cleared by the input filter during the last interval (sent with empty payload; not counted in `sent`)
+- **`unfiltered`**: Events that passed through the input filter unchanged during the last interval
+- **`total_filtered`**: Total events whose payload was cleared since startup
+- **`total_unfiltered`**: Total events that passed through the input filter unchanged since startup
 - **`filter_timeouts`**: Regex timeout errors during the last interval
 - **`total_filter_timeouts`**: Total regex timeout errors since startup
 
@@ -265,7 +275,7 @@ Fields:
 Check if your filter rules are too restrictive:
 
 1. Set `inputFilterDefaultAction=allow` temporarily
-2. Check logs for `"Input filter blocked message"` (debug level)
+2. Check logs for `"Input filter cleared payload for message"` (debug level) — filtered events are still sent but with empty payload
 3. Verify your regex patterns match what you expect
 
 ### Filter not working

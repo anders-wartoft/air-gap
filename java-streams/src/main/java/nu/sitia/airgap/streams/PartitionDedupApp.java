@@ -1199,23 +1199,41 @@ public class PartitionDedupApp {
             // received and -1 if it fills a gap.
             // * If the number is less than the lowest known offset, it is considered unseen
             // and -2 is returned.
+            //
+            // Events with a zero-length payload were sent by upstream with their content
+            // intentionally cleared by the input filter. They must still be registered with
+            // the gap detector (done above via gapDetector.check) so no gap is reported, but
+            // they must NOT be forwarded to the clean topic.
+            boolean emptyPayload = (value == null || value.length == 0);
             if (alreadyReceived == 1) {
                 LOG.trace("Key already seen {}", key);
                 totalDuplicates.merge(partition, 1L, Long::sum);
             } else if (alreadyReceived == 0) {
-                LOG.trace("Forwarding unique key {}", key);
-                context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
-                totalEmitted.merge(partition, 1L, Long::sum);
+                if (emptyPayload) {
+                    LOG.trace("Dropping empty-payload (filtered) key {}", key);
+                } else {
+                    LOG.trace("Forwarding unique key {}", key);
+                    context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
+                    totalEmitted.merge(partition, 1L, Long::sum);
+                }
             } else if (alreadyReceived == -1) {
-                LOG.trace("Key {} fills a gap, forwarding", key);
-                context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
-                totalEmitted.merge(partition, 1L, Long::sum);
-                totalGapFill.merge(partition, 1L, Long::sum);
+                if (emptyPayload) {
+                    LOG.trace("Dropping empty-payload (filtered) gap-fill key {}", key);
+                } else {
+                    LOG.trace("Key {} fills a gap, forwarding", key);
+                    context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
+                    totalEmitted.merge(partition, 1L, Long::sum);
+                    totalGapFill.merge(partition, 1L, Long::sum);
+                }
             } else if (alreadyReceived == -2) {
-                LOG.trace("Key {} is below known range, forwarding", key);
-                context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
-                totalEmitted.merge(partition, 1L, Long::sum);
-                totalBelowRange.merge(partition, 1L, Long::sum);
+                if (emptyPayload) {
+                    LOG.trace("Dropping empty-payload (filtered) below-range key {}", key);
+                } else {
+                    LOG.trace("Key {} is below known range, forwarding", key);
+                    context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
+                    totalEmitted.merge(partition, 1L, Long::sum);
+                    totalBelowRange.merge(partition, 1L, Long::sum);
+                }
             } else {
                 LOG.error("Unexpected return value {} from gapDetector.check for key {}", alreadyReceived, key);
             }
