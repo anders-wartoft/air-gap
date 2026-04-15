@@ -1,5 +1,19 @@
 # Release Notes
 
+## 0.1.10-SNAPSHOT
+
+### Input Filtering — Empty-Payload Behaviour
+
+- **No more false gaps from filtered events**: Previously, events matched by `inputFilterRules` were dropped entirely before transmission. This caused the downstream gap-detector to report them as missing and trigger unnecessary resend cycles. Filtered events are now sent across the diode with an **empty payload** instead of being dropped, so every sequence ID reaches the downstream and no gap is recorded.
+- **Deduplication discards zero-length events**: `PartitionDedupApp` now checks the payload length before forwarding to the clean topic. Events with an empty payload are silently discarded, so they never appear in downstream Kafka — the effect is identical to the old drop behaviour from a consumer perspective, but without the side-effect of generating gaps.
+- **Resend honours `inputFilterRules`**: The `resend` application now supports the same `inputFilterRules`, `inputFilterDefaultAction`, and `inputFilterTimeout` configuration options as upstream. Matched events are sent with empty payload using the same logic, keeping resend consistent with normal upstream operation. Environment variable overrides: `AIRGAP_RESEND_INPUT_FILTER_RULES`, `AIRGAP_RESEND_INPUT_FILTER_DEFAULT_ACTION`, `AIRGAP_RESEND_INPUT_FILTER_TIMEOUT`.
+
+### Documentation Updates
+
+- Updated `doc/InputFilter.md` to describe the empty-payload behaviour, corrected statistics field descriptions and troubleshooting log message references, and added `resend` environment variable examples.
+- Updated `README.md` upstream configuration table to reflect the empty-payload + dedup-discard design.
+- Updated `doc/Resend.md` parameter list to include the three new `inputFilter*` options.
+
 ## 0.1.9-SNAPSHOT
 
 ### TCP Transport Reliability
