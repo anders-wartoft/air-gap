@@ -23,33 +23,33 @@ type KeyInfo struct {
 
 // TransferConfiguration struct definition
 type TransferConfiguration struct {
-	id                   string
-	nic                  string
-	targetIP             string
-	targetPort           int
-	bootstrapServers     string
-	topic                string
-	mtu                  uint16
-	key                  []byte    // symmetric
-	keyInfos             []KeyInfo // array of private keys
-	privateKeyGlob       string
-	target               string
-	transport            string // Transport protocol: udp or tcp (default: udp)
-	logLevel             string
-	logFileName          string
-	certFile             string
-	keyFile              string
-	caFile               string
-	clientID             string
-	topicTranslations    string
-	translations         map[string]string // map from input topic to output topic
-	logStatistics        int32             //  How often to log statistics in seconds. 0 means no logging
-	numReceivers         int               // Number of UDP receivers to start
-	channelBufferSize    int               // Size of the channel buffer between UDP receiver and Kafka writer
-	batchSize            int               // Number of messages to batch together
-	readBufferMultiplier uint16            // Multiplier for the read buffer size
-	rcvBufSize           int               // Size of the OS receive buffer for UDP sockets
-	keyPasswordFile      string            // File containing the password to decrypt the key file
+	id                    string
+	nic                   string
+	targetIP              string
+	targetPort            int
+	bootstrapServers      string
+	topic                 string
+	mtu                   uint16
+	key                   []byte    // symmetric
+	keyInfos              []KeyInfo // array of private keys
+	privateKeyGlob        string
+	target                string
+	transport             string // Transport protocol: udp or tcp (default: udp)
+	logLevel              string
+	logFileName           string
+	certFile              string
+	keyFile               string
+	caFile                string
+	clientID              string
+	topicTranslations     string
+	translations          map[string]string // map from input topic to output topic
+	logStatistics         int32             //  How often to log statistics in seconds. 0 means no logging
+	numReceivers          int               // Number of UDP receivers to start
+	channelBufferSize     int               // Size of the channel buffer between UDP receiver and Kafka writer
+	batchSize             int               // Number of messages to batch together
+	readBufferMultiplier  uint16            // Multiplier for the read buffer size
+	rcvBufSize            int               // Size of the OS receive buffer for UDP sockets
+	keyPasswordFile       string            // File containing the password to decrypt the key file
 	maximumDecompressSize int
 }
 
@@ -511,7 +511,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  logFileName: %s", config.logFileName)
 	Logger.Printf("  certFile: %s", config.certFile)
 	Logger.Printf("  keyFile: %s", config.keyFile)
-	Logger.Printf("  keyPasswordFile: %s", config.keyPasswordFile)
+	Logger.Printf("  keyPasswordFile: [set]")
 	Logger.Printf("  caFile: %s", config.caFile)
 	Logger.Printf("  topicTranslations: %s", config.topicTranslations)
 	Logger.Printf("  logStatistics: %d", config.logStatistics)
@@ -619,7 +619,7 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 func intPow(base int, exp uint) int {
 	out := 1
 	for _ = range exp {
-		out = out*base
+		out = out * base
 	}
 	return out
 }
@@ -630,7 +630,7 @@ func convertUnitSufix(size string) (int, error) {
 		mult := 1
 		out, err := strconv.Atoi(num)
 		if err == nil {
-			return out * mult , nil
+			return out * mult, nil
 		}
 	}
 	if num, found := strings.CutSuffix(size, "KiB"); found {
@@ -638,7 +638,7 @@ func convertUnitSufix(size string) (int, error) {
 		mult := intPow(2, 10)
 		out, err := strconv.Atoi(num)
 		if err == nil {
-			return out * mult , nil
+			return out * mult, nil
 		}
 	}
 	if num, found := strings.CutSuffix(size, "MiB"); found {
@@ -646,26 +646,26 @@ func convertUnitSufix(size string) (int, error) {
 		mult := intPow(2, 20)
 		out, err := strconv.Atoi(num)
 		if err == nil {
-			return out * mult , nil
+			return out * mult, nil
 		}
 	}
 	if num, found := strings.CutSuffix(size, "GiB"); found {
 		mult := intPow(2, 30)
 		out, err := strconv.Atoi(num)
 		if err == nil {
-			return out * mult , nil
+			return out * mult, nil
 		}
 	}
 	if num, found := strings.CutSuffix(size, "TiB"); found {
 		mult := intPow(2, 40)
 		out, err := strconv.Atoi(num)
 		if err == nil {
-			return out * mult , nil
+			return out * mult, nil
 		}
 	}
 	out, err := strconv.Atoi(size)
 	if err != nil {
-		return 0, err 
+		return 0, err
 	}
 	return out, nil
 }

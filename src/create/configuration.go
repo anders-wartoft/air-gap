@@ -297,7 +297,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  groupID: %s", config.groupID)
 	Logger.Printf("  certFile: %s", config.certFile)
 	Logger.Printf("  keyFile: %s", config.keyFile)
-	Logger.Printf("  keyPasswordFile: %s", config.keyPasswordFile)
+	Logger.Printf("  keyPasswordFile: [set]")
 	Logger.Printf("  caFile: %s", config.caFile)
 	Logger.Printf("  limit: %s", config.limit)
 	Logger.Printf("  resendFileName: %s", config.resendFileName)

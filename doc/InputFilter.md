@@ -196,6 +196,10 @@ The input filter includes multiple layers of protection against Regular Expressi
 
 4. **Length limits**: Regex patterns are limited to 1000 characters
 
+### DEBUG Logging Caveat
+
+When `logLevel=DEBUG` is set, the upstream Kafka consumer logs up to 80 bytes of the raw message payload and the full message key **before** the input filter is applied. This means sensitive content that the filter is configured to suppress may still appear in debug logs. Do not use `logLevel=DEBUG` in production environments where payload confidentiality is required.
+
 ### Configuration Options
 
 - **`inputFilterRules`**: Path to rule file or inline comma-separated rules
