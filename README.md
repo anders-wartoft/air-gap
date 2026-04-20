@@ -380,6 +380,21 @@ The property privateKeyFiles should point to one or more private key files that 
 | readBufferMultiplier | AIRGAP_DOWNSTREAM_READ_BUFFER_MULTIPLIER | 16 | Size of the user-space buffer allocated for each UDP socket read operation. The buffer size is calculated as: `buffer size = mtu * readBufferMultiplier` |
 | rcvBufSize | AIRGAP_DOWNSTREAM_RCV_BUF_SIZE | 4194304 (4MiB) | Size (in bytes) of the OS-level receive buffer for each UDP socket, set via the SO_RCVBUF socket option. It controls how much incoming UDP data the kernel can buffer for the application before packets are dropped due to the application not reading fast enough. |
 | maximumDecompressSize | AIRGAP_MAXIMUM_DECOMPRESS_SIZE | 268435456 (256MiB) | The maximum size, in bytes, downstream will try do decompress until it errors and drops the packet. Takes sufixes B, KiB, MiB, GiB or none (defaults to B). Can be set to "-1" for no limit |
+| maxCacheEntries | AIRGAP_DOWNSTREAM_MAX_CACHE_ENTRIES | 100000 | Maximum number of in-flight fragment-reassembly entries held simultaneously in the fragment cache. Each unique message ID that arrives with `nrMessages > 1` occupies one entry until all fragments have been received or the 30 s TTL expires. Without a cap, flooding the listening port with packets bearing unique IDs exhausts memory. Raise this value if you see "Fragment cache full" warnings at your expected peak throughput. |
+| maxNrMessages | AIRGAP_DOWNSTREAM_MAX_NR_MESSAGES | 4096 | Maximum value of the `nrMessages` field accepted in a single packet. A packet claiming more fragments than this is rejected before any memory is allocated for it. At MTU 1500 a 1 MiB payload fragments into at most ~730 parts; the default of 4096 gives ample headroom while blocking implausibly large values that would create cache entries that can never complete. |
+| maxTCPConnections | AIRGAP_DOWNSTREAM_MAX_TCP_CONNECTIONS | 256 | Maximum number of simultaneously active TCP connections (TCP transport only). Each accepted connection owns a goroutine; an attacker who opens many connections and sends nothing can exhaust memory and goroutine stacks. Connections beyond this limit are closed immediately with a warning. Raise if you have many legitimate concurrent senders. |
+| keyExchangeMinIntervalSecs | AIRGAP_DOWNSTREAM_KEY_EXCHANGE_MIN_INTERVAL_SECS | 1 | Minimum number of seconds that must elapse between two accepted `KEY_EXCHANGE` messages. Each key-exchange packet triggers RSA-OAEP decryption for every loaded private key; without a floor a packet flood pins a CPU core. Legitimate key rotation happens every hundreds of seconds so a value of 1 has no effect in normal operation. Set to `0` to disable rate-limiting entirely. |
+
+### Listening Port Security
+
+The four settings above protect the downstream listening port against denial-of-service attacks. Downstream is typically placed behind a hardware diode or firewall that already restricts which hosts can send to it, but the limits provide a defence-in-depth layer for when that is not the case, or when the upstream side is compromised.
+
+**When to change the defaults:**
+
+- **`maxCacheEntries`** — increase only if you see `"Fragment cache full"` warnings during normal high-throughput operation. Estimate the required value as: `peak concurrent in-flight multi-part messages × average fragments per message`. On a heavily loaded deployment receiving 1 MiB payloads at MTU 1500, ~730 cache entries are active per message; 100 000 covers roughly 136 concurrent such messages.
+- **`maxNrMessages`** — leave at the default unless upstream is configured to produce payloads larger than `maxNrMessages × (MTU − protocol header)` bytes. For a 1 MiB payload cap, anything above ~750 is sufficient.
+- **`maxTCPConnections`** — relevant only when `transport=tcp`. Match to the number of legitimate concurrent upstream senders plus a small safety margin (e.g., `numUpstreamInstances + 10`).
+- **`keyExchangeMinIntervalSecs`** — keep at `1` or higher in all production deployments. The only reason to set it to `0` is during testing when you want to cycle keys very rapidly.
 
 ### Configuration Examples
 

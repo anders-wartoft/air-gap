@@ -1,5 +1,33 @@
 # Release Notes
 
+## 0.1.11-SNAPSHOT
+
+### Security Hardening — Downstream Listening Port
+
+Four denial-of-service vulnerabilities on the downstream listening port have been fixed. All mitigations are on by default with safe values and can be tuned via configuration.
+
+- **Fragment cache memory exhaustion (OOM)**: An attacker could flood the port with UDP/TCP packets bearing unique message IDs and `nrMessages=65535`, filling the fragment-reassembly cache indefinitely. The cache now enforces a configurable entry cap (`maxCacheEntries`, default 100 000). Fragments arriving when the cache is full are dropped with a warning rather than accepted. The limit is exposed as exported constants `DefaultMaxCacheEntries` / `DefaultMaxNrMessages` in the `protocol` package so the value is accessible without magic numbers.
+- **Oversized nrMessages field**: Packets claiming an implausibly large fragment count (`nrMessages` > `maxNrMessages`, default 4 096) are now rejected at parse time before any cache memory is allocated. Legitimate fragmentation at MTU 1500 tops out at ~730 parts for a 1 MiB payload.
+- **TCP goroutine exhaustion**: Without a connection cap, an attacker opening thousands of idle TCP connections could exhaust goroutine stacks and memory. A new `maxTCPConnections` limit (default 256) closes connections that exceed the cap immediately, with a warning log.
+- **KEY_EXCHANGE CPU exhaustion via RSA flooding**: Any sender could submit `TYPE_KEY_EXCHANGE` packets to trigger `rsa.DecryptOAEP` against every loaded private key. A configurable rate limit (`keyExchangeMinIntervalSecs`, default 1 s) silently drops duplicate key-exchange requests that arrive before the interval expires. Legitimate key rotation runs every hundreds of seconds and is unaffected.
+
+All four limits are configurable via `.properties` file and environment variable overrides — see README.md for the full parameter table and guidance on when to change the defaults.
+
+### Security Hardening — Dependency and Toolchain Upgrades
+
+- **Go toolchain upgraded** from `go1.24.7` to `go1.24.13`, resolving 14 actively reachable stdlib CVEs (including TLS DoS, ASN.1 memory exhaustion, PEM quadratic blowup, and x509 panic).
+- **`jackson-databind` upgraded** from `2.15.1` (May 2023) to `2.18.3` in the Java deduplication module.
+
+### Security Hardening — Sensitive Value Masking in Logs
+
+- `keyPasswordFile` was logged as a literal file path in the startup configuration dump for the `resend`, `create`, and `downstream` applications. It is now masked as `[set]`, consistent with how `upstream` already handled it.
+
+### Documentation and README
+
+- Added a "DEBUG Logging Caveat" section to `doc/InputFilter.md`: when `logLevel=DEBUG` is active, up to 80 bytes of raw Kafka payload and the full message key are logged **before** the input filter runs, bypassing content suppression.
+- Added four new rows to the downstream parameter table in `README.md` documenting `maxCacheEntries`, `maxNrMessages`, `maxTCPConnections`, and `keyExchangeMinIntervalSecs`.
+- Added a "Listening Port Security" section to `README.md` explaining the threat model and guidance on when to raise each limit above its default.
+
 ## 0.1.10-SNAPSHOT
 
 ### Input Filtering — Empty-Payload Behaviour

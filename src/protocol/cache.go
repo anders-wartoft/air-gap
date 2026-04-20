@@ -17,9 +17,24 @@ type MessageCacheEntry struct {
 	val map[uint16][]byte
 }
 
+// Default security limits for MessageCache (configurable via downstream properties).
+const (
+	// DefaultMaxCacheEntries caps the number of in-flight fragment-reassembly entries.
+	// One entry is held per unique message ID until all fragments arrive or the 30 s
+	// TTL expires; without a cap a flood of unique IDs exhausts memory.
+	DefaultMaxCacheEntries = 100_000
+
+	// DefaultMaxNrMessages caps the nrMessages field declared in a single packet.
+	// Legitimate fragmentation tops out at ~730 parts (1 MiB payload / MTU 1500 bytes);
+	// higher values signal a malformed or adversarial packet and are rejected early.
+	DefaultMaxNrMessages uint16 = 4096
+)
+
 type MessageCache struct {
-	mu      sync.RWMutex
-	entries map[string]*MessageCacheEntry
+	mu            sync.RWMutex
+	entries       map[string]*MessageCacheEntry
+	maxEntries    int    // configurable via downstream maxCacheEntries
+	maxNrMessages uint16 // configurable via downstream maxNrMessages
 }
 
 // AddPartAndSnapshot adds/updates one multipart payload fragment and returns a
@@ -31,6 +46,12 @@ func (m *MessageCache) AddPartAndSnapshot(id string, messageId uint16, maxMessag
 
 	entry, ok := m.entries[id]
 	if !ok {
+		if len(m.entries) >= m.maxEntries {
+			// Cache is full; drop the fragment rather than growing without bound.
+			// This protects against memory exhaustion from flooding with unique IDs.
+			Logger.Warnf("Fragment cache full (%d entries), dropping fragment for id: %s", m.maxEntries, id)
+			return MessageCacheEntry{}, false
+		}
 		entry = createMessageCacheEntry()
 		entry.len = maxMessageId
 		m.entries[id] = entry
@@ -103,10 +124,21 @@ func createMessageCacheEntry() *MessageCacheEntry {
 	}
 }
 
+// SetLimits updates the security limits for this cache at runtime.
+// Call this once, before any messages arrive, after the application config is loaded.
+func (m *MessageCache) SetLimits(maxEntries int, maxNrMessages uint16) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.maxEntries = maxEntries
+	m.maxNrMessages = maxNrMessages
+}
+
 func CreateMessageCache() *MessageCache {
 	cache := &MessageCache{
-		entries: make(map[string]*MessageCacheEntry),
-		mu:      sync.RWMutex{},
+		entries:       make(map[string]*MessageCacheEntry),
+		mu:            sync.RWMutex{},
+		maxEntries:    DefaultMaxCacheEntries,
+		maxNrMessages: DefaultMaxNrMessages,
 	}
 	// Start empty old items from the cache
 	cache.StartCleaning()

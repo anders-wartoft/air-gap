@@ -30,6 +30,12 @@ var config TransferConfiguration
 var BuildNumber string
 var kafkaWriter KafkaWriter
 
+// lastKeyExchangeNano records the Unix nanosecond of the most recently processed
+// KEY_EXCHANGE message. Used to rate-limit RSA decryption: any attacker who can
+// reach the downstream port could otherwise flood TYPE_KEY_EXCHANGE packets and
+// pin a CPU core with repeated RSA-OAEP decrypt calls.
+var lastKeyExchangeNano int64
+
 // Transport status tracking
 var transportStatusMu sync.Mutex
 var transportStatus string = "running"         // "running" or error message
@@ -42,6 +48,7 @@ var previousKafkaStatus string = "running" // Track previous status for change d
 
 func SetConfig(conf TransferConfiguration) {
 	config = conf
+	cache.SetLimits(conf.maxCacheEntries, uint16(conf.maxNrMessages))
 }
 
 func translateTopic(input string) string {
@@ -195,6 +202,14 @@ func handleUdpMessage(msg []byte) {
 		atomic.AddInt64(&totalSent, 1)
 
 	case protocol.IsMessageType(messageType, protocol.TYPE_KEY_EXCHANGE):
+		now := time.Now().UnixNano()
+		last := atomic.LoadInt64(&lastKeyExchangeNano)
+		minInterval := int64(config.keyExchangeMinIntervalSecs) * int64(time.Second)
+		if minInterval > 0 && now-last < minInterval {
+			Logger.Warnf("KEY_EXCHANGE rate limit: dropping duplicate key exchange request (< %ds since last)", config.keyExchangeMinIntervalSecs)
+			return
+		}
+		atomic.StoreInt64(&lastKeyExchangeNano, now)
 		keyFile := readNewKey(payload)
 		sendMessage(protocol.TYPE_STATUS, "", config.topic, []byte("Updating symmetric key with: "+keyFile))
 

@@ -66,10 +66,18 @@ func ParseMessage(message []byte, cache *MessageCache) (uint8, string, []byte, e
 	messageNumber := binary.BigEndian.Uint16(messageNumberBytes)
 	sofar = 3
 
-	// Next 2 bytes are the number of messagesparse messaparse messa
+	// Next 2 bytes are the number of messages
 	nrMessagesBytes := message[3:5]
 	nrMessages := binary.BigEndian.Uint16(nrMessagesBytes)
 	sofar = 5
+
+	// Cap nrMessages: legitimate messages fragment at most ~730 times at MTU 1500
+	// with a 1 MiB Kafka payload. Anything larger is anomalous and keeps a cache
+	// entry open that can never complete, aiding OOM amplification.
+	// The limit is configurable via downstream maxNrMessages / cache.maxNrMessages.
+	if nrMessages > cache.maxNrMessages {
+		return TYPE_ERROR, "", nil, fmt.Errorf("nrMessages %d exceeds maximum %d", nrMessages, cache.maxNrMessages)
+	}
 
 	// Next 2 bytes are the length of the id
 	idLengthBytes := message[5:7]

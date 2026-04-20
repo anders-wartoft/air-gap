@@ -75,16 +75,20 @@ func (a *UDPAdapter) Close() error {
 // TCPAdapter implements TransportReceiver for TCP connections.
 // It listens for incoming TCP connections and parses messages from the same protocol format as UDP.
 type TCPAdapter struct {
-	listener   net.Listener
-	stopChan   <-chan struct{}
-	wg         sync.WaitGroup
-	closed     bool
-	closeMutex sync.Mutex
+	listener       net.Listener
+	stopChan       <-chan struct{}
+	wg             sync.WaitGroup
+	closed         bool
+	closeMutex     sync.Mutex
+	activeConns    atomic.Int64
+	maxConnections int // configured via maxTCPConnections; caps goroutine exhaustion
 }
 
 // NewTCPAdapter creates a new TCP receiver adapter
 func NewTCPAdapter(config TransferConfiguration) *TCPAdapter {
-	return &TCPAdapter{}
+	return &TCPAdapter{
+		maxConnections: config.maxTCPConnections,
+	}
 }
 
 // Setup initializes the TCP adapter (no-op for TCP as it doesn't need tuning like UDP)
@@ -147,6 +151,12 @@ func (t *TCPAdapter) Listen(
 			}
 
 			// Handle each connection in its own goroutine
+			if t.activeConns.Add(1) > int64(t.maxConnections) {
+				t.activeConns.Add(-1)
+				conn.Close()
+				Logger.Warnf("Max TCP connections (%d) reached, rejecting connection from %s", t.maxConnections, conn.RemoteAddr())
+				continue
+			}
 			t.wg.Add(1)
 			go t.handleConnection(conn, callback, stopChan)
 		}
@@ -156,6 +166,7 @@ func (t *TCPAdapter) Listen(
 // handleConnection reads messages from a TCP connection and invokes the callback
 func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stopChan <-chan struct{}) {
 	defer t.wg.Done()
+	defer t.activeConns.Add(-1)
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
