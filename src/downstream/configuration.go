@@ -144,13 +144,13 @@ func defaultConfiguration() TransferConfiguration {
 	config.logFileName = ""
 	config.mtu = 0 // default auto
 	config.translations = make(map[string]string)
-	config.logStatistics = 0            // default no logging
-	config.numReceivers = 10            // default ten UDP receiver
-	config.channelBufferSize = 16384    // default channel buffer size of 16384 bytes
-	config.batchSize = 32               // default batching of 32 messages
-	config.readBufferMultiplier = 16    // default 16 times mtu as memory buffer
-	config.rcvBufSize = 4 * 1024 * 1024 // default 4MB OS receive buffer for UDP sockets
-	config.topic = "airgap-internal"
+	config.logStatistics = 0                         // default no logging
+	config.numReceivers = 10                         // default ten UDP receiver
+	config.channelBufferSize = 16384                 // default channel buffer size of 16384 bytes
+	config.batchSize = 32                            // default batching of 32 messages
+	config.readBufferMultiplier = 16                 // default 16 times mtu as memory buffer
+	config.rcvBufSize = 4 * 1024 * 1024              // default 4MB OS receive buffer for UDP sockets
+	config.topic = ""                                // default disabled (empty = no internal Kafka logging)
 	config.maximumDecompressSize = 256 * 1024 * 1024 // default 256 MiB
 	config.maxCacheEntries = int(protocol.DefaultMaxCacheEntries)
 	config.maxNrMessages = int(protocol.DefaultMaxNrMessages)
