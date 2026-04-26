@@ -131,7 +131,7 @@ The thread with name "now" will connecto to Kafka with a group id of "testGroup-
 
 When a thread reads a message in Kafka, it will check if the Kafka timestamp - the delay (delay is a negative number) is at least equal to, or greater than, the current time. If not, it will sleep until the time is right to send.
 
-If a message is read but not delivered (because the thread is sleeping) and the application terminates, then the
+If a message is read but not delivered (because the thread is sleeping) and the application terminates, then the event will be resent when the application is restarted, since the thread will read the same message again and check if the time is right to send. This means that if you have a thread with a delay of 3 minutes, and you terminate the application, the in-flight message (the one the thread was sleeping on) will be resent when you restart. If the application was down longer than the delay (e.g., 5 minutes with a 3-minute delay), the message will be delivered immediately without any additional wait.
 
 ### Deduplication and Gap Detection
 
