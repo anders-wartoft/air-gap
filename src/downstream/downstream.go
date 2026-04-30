@@ -155,16 +155,19 @@ func handleUdpMessage(msg []byte) {
 
 	switch {
 	case protocol.IsMessageType(messageType, protocol.TYPE_CLEARTEXT):
-		Logger.Debug("Case cleartext")
 		if protocol.IsMessageType(messageType, protocol.TYPE_COMPRESSED_GZIP) {
-			Logger.Debugf("Gzip, payload length", len(payload))
+			if Logger.CanLog(logging.DEBUG) {
+				Logger.Debugf("Gzip, payload length", len(payload))
+			}
 			payload, err = protocol.DecompressGzip(payload, config.maximumDecompressSize)
 			if err != nil {
 				Logger.Errorf("Decompress error: %v", err)
 				sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
 				return
 			}
-			Logger.Debugf("unzipped, payload length", len(payload))
+			if Logger.CanLog(logging.DEBUG) {
+				Logger.Debugf("unzipped, payload length", len(payload))
+			}
 		}
 		if partition < 0 || partition > 2147483647 {
 			Logger.Fatalf("Partition out of int32 range: %d", partition)

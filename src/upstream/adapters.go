@@ -30,8 +30,8 @@ type UDPAdapter struct {
 	conn *udp.UDPConn
 }
 
-func NewUDPAdapter(address string) (*UDPAdapter, error) {
-	c, err := udp.NewUDPConn(address)
+func NewUDPAdapter(address, nic string) (*UDPAdapter, error) {
+	c, err := udp.NewUDPConnWithNIC(address, nic)
 	if err != nil {
 		return nil, err
 	}

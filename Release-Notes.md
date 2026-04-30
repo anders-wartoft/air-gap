@@ -2,6 +2,12 @@
 
 ## 0.1.11-SNAPSHOT
 
+### Upstream / Resend — NIC binding for broadcast sends
+
+- **Fix: `nic` setting not honoured when `targetIP=255.255.255.255`**: Previously, the UDP sender socket was created with a plain `net.Dial` call, ignoring the configured `nic`. The OS would pick the outgoing interface freely, and the socket lacked `SO_BROADCAST`, causing sends to the limited-broadcast address to fail silently or go out the wrong interface.
+- The new `NewUDPConnWithNIC` helper in `src/udp/sender.go` sets `SO_BROADCAST` when the target is `255.255.255.255`, and binds the socket to the IPv4 address of the named NIC when `nic` is set. Both upstream and resend pass `config.nic` through their `NewUDPAdapter` constructors.
+- **No downstream change required**: downstream `targetIP=0.0.0.0` is correct for receiving broadcast; the `nic` field on downstream continues to serve only MTU auto-detection.
+
 ### Security Hardening — Downstream Listening Port
 
 Four denial-of-service vulnerabilities on the downstream listening port have been fixed. All mitigations are on by default with safe values and can be tuned via configuration.

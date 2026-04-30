@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"syscall"
 )
 
 // UDPConn wraps a reusable UDP connection
@@ -13,11 +14,81 @@ type UDPConn struct {
 
 // NewUDPConn creates a new UDP connection to the given address.
 func NewUDPConn(address string) (*UDPConn, error) {
-	conn, err := net.Dial("udp", address)
+	return NewUDPConnWithNIC(address, "")
+}
+
+// NewUDPConnWithNIC creates a new UDP connection to the given address, optionally bound to a
+// specific network interface. When the target is a broadcast address (255.255.255.255) or a
+// NIC name is supplied, a custom dialer is used that:
+//   - Binds the socket to the IPv4 address of the named interface (if nic != "")
+//   - Sets SO_BROADCAST on the socket (if the target is 255.255.255.255)
+func NewUDPConnWithNIC(address, nic string) (*UDPConn, error) {
+	host, _, _ := net.SplitHostPort(address)
+	isBroadcast := host == "255.255.255.255"
+
+	// Resolve the NIC's IPv4 address for local binding when a NIC is specified.
+	var localIP net.IP
+	if nic != "" {
+		iface, err := net.InterfaceByName(nic)
+		if err != nil {
+			return nil, fmt.Errorf("interface %q not found: %w", nic, err)
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get addresses for interface %q: %w", nic, err)
+		}
+		for _, a := range addrs {
+			if ipNet, ok := a.(*net.IPNet); ok {
+				if v4 := ipNet.IP.To4(); v4 != nil {
+					localIP = v4
+					break
+				}
+			}
+		}
+		if localIP == nil {
+			return nil, fmt.Errorf("no IPv4 address found on interface %q", nic)
+		}
+	}
+
+	// Fast path: no broadcast, no NIC binding needed.
+	if !isBroadcast && localIP == nil {
+		conn, err := net.Dial("udp", address)
+		if err != nil {
+			return nil, err
+		}
+		if udpConn, ok := conn.(*net.UDPConn); ok {
+			_ = udpConn.SetWriteBuffer(1 << 20) // 1 MiB
+		}
+		return &UDPConn{conn: conn}, nil
+	}
+
+	// Slow path: need SO_BROADCAST and/or interface binding.
+	var localAddr *net.UDPAddr
+	if localIP != nil {
+		localAddr = &net.UDPAddr{IP: localIP}
+	}
+
+	dialer := net.Dialer{
+		LocalAddr: localAddr,
+		Control: func(network, address string, c syscall.RawConn) error {
+			if !isBroadcast {
+				return nil
+			}
+			var setSockOptErr error
+			err := c.Control(func(fd uintptr) {
+				setSockOptErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+			})
+			if err != nil {
+				return err
+			}
+			return setSockOptErr
+		},
+	}
+
+	conn, err := dialer.Dial("udp4", address)
 	if err != nil {
 		return nil, err
 	}
-	// Pre-set large buffers to reduce syscall overhead
 	if udpConn, ok := conn.(*net.UDPConn); ok {
 		_ = udpConn.SetWriteBuffer(1 << 20) // 1 MiB
 	}

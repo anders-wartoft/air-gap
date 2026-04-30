@@ -659,7 +659,7 @@ func Main(build string) {
 
 	// Create UDP
 	address := fmt.Sprintf("%s:%d", config.targetIP, config.targetPort)
-	udpAdapter, err := NewUDPAdapter(address)
+	udpAdapter, err := NewUDPAdapter(address, config.nic)
 	if err != nil {
 		Logger.Fatalf("Error creating UDP: %v", err)
 	}

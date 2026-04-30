@@ -251,7 +251,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | id | AIRGAP_UPSTREAM_ID | | Name of the instance. Will be used in logging and when sending status messages |
 | logLevel | AIRGAP_UPSTREAM_LOG_LEVEL | info | debug, info, error, warn, fatal |
 | source | AIRGAP_UPSTREAM_SOURCE | random | Where to get the information to send. kafka or random. Random is just a string with a counter at the end, not really random data. |
-| nic | AIRGAP_UPSTREAM_NIC | | What nic to use for sending to downstream |
+| nic | AIRGAP_UPSTREAM_NIC | | Network interface to bind the UDP sender socket to. Required when `targetIP=255.255.255.255` to ensure the broadcast is sent only on the specified interface and `SO_BROADCAST` is set automatically. |
 | targetIP | AIRGAP_UPSTREAM_TARGET_IP | | Downstream air-gap ip address, if IPv6, enclose the address with brackets, like [::1] |
 | targetPort | AIRGAP_UPSTREAM_TARGET_PORT | | Downstream air-gap ip port |
 | transport | AIRGAP_UPSTREAM_TRANSPORT | udp | Transport protocol to use: udp or tcp. Use tcp when no diode is needed |
@@ -357,7 +357,7 @@ The property privateKeyFiles should point to one or more private key files that 
 | ------------------------- | ------------------------- | ------------- | ----------- |
 | id | AIRGAP_DOWNSTREAM_ID | | Name of the instance. Will be used in logging and when sending status messages |
 | logLevel | AIRGAP_DOWNSTREAM_LOG_LEVEL | | debug, info, error, warn, fatal |
-| nic | AIRGAP_DOWNSTREAM_NIC | | What nic to use for binding the UDP port |
+| nic | AIRGAP_DOWNSTREAM_NIC | | Network interface name used for MTU auto-detection (`mtu=auto`). The downstream listening address is controlled by `targetIP`; use `0.0.0.0` to receive on all interfaces. |
 | targetIP | AIRGAP_DOWNSTREAM_TARGET_IP | | Ip address to bind to |
 | targetPort | AIRGAP_DOWNSTREAM_TARGET_PORT | | Port to bind to |
 | bootstrapServers | AIRGAP_DOWNSTREAM_BOOTSTRAP_SERVERS | | Bootstrap url for Kafka, with port |
@@ -454,7 +454,20 @@ Some problems that may arise are:
 - The UDP sending fails. Check that you have static arp (arp -s) and route (ip route add) enabled.
 - If the UDP connection is very unstable, then condider using two instances of upstream/downstream sending the same information over two different hardware diodes to the same Kafka and the same topic. Duplicates should be removed by the gap-detection so the result should be a more stable connection.
 
-### UDP Broadcast Duplication Issue
+### UDP Broadcast
+
+#### Sending on a Specific Interface
+
+When `targetIP=255.255.255.255`, set `nic` to the outgoing network interface (e.g. `nic=en0`). Upstream and resend will:
+
+1. Resolve the IPv4 address of the named interface and bind the socket to it — ensuring the broadcast leaves only via that interface.
+2. Set `SO_BROADCAST` on the socket automatically — required by the OS to allow sending to `255.255.255.255`.
+
+Downstream should use `targetIP=0.0.0.0` to receive broadcast packets. The `nic` setting on downstream is used only for MTU auto-detection.
+
+> **macOS note:** On macOS the kernel always delivers a local copy of a broadcast packet back to the sending machine via the loopback path. This is visible in `tcpdump -i lo0` but is not present on other machines on the network and does not affect production deployments.
+
+#### Broadcast Duplication with Multiple Receiver Threads
 
 When using UDP broadcast mode with multiple receiver threads bound to the same port (configured via `numReceivers`), each broadcast message may be received by all threads, resulting in duplicate delivery to Kafka. This occurs because broadcast packets are replicated to all bound sockets by default.
 

@@ -548,7 +548,7 @@ func Main(build string) {
 		transportAdapter = adapter
 	case "udp":
 		Logger.Printf("Creating UDP transport to %s", address)
-		adapter, errUDP := NewUDPAdapter(address)
+		adapter, errUDP := NewUDPAdapter(address, config.nic)
 		if errUDP != nil {
 			Logger.Fatalf("Error creating UDP adapter: %v", errUDP)
 		}
