@@ -218,7 +218,7 @@ func filter(jsonFilter JsonFilter, topic string, partition int, offset int64) bo
 				if len(g.Gaps) == 0 || len(g.Gaps[0]) == 0 {
 					return false
 				}
-				// Just look at the first gap
+				// Just look at the first gap; offsets are absolute
 				first := g.Gaps[0][0]
 				// Send everything from first and onwards
 				return offset >= first
@@ -231,13 +231,13 @@ func filter(jsonFilter JsonFilter, topic string, partition int, offset int64) bo
 			if g.Topic == topic && g.Partition == partition {
 				for _, gap := range g.Gaps {
 					if len(gap) > 1 { // [min, max]
-						if offset >= (gap[0]+g.WindowMin) && offset <= (gap[1]+g.WindowMin) {
-							Logger.Debugf("Offset %d is within gap [%d,%d] (windowMin %d)", offset, gap[0], gap[1], g.WindowMin)
+						if offset >= gap[0] && offset <= gap[1] {
+							Logger.Debugf("Offset %d is within gap [%d,%d]", offset, gap[0], gap[1])
 							return true
 						}
 					} else if len(gap) == 1 { // [exact]
-						if offset == (gap[0] + g.WindowMin) {
-							Logger.Debugf("Offset %d is equal to gap [%d] (windowMin %d)", offset, gap[0], g.WindowMin)
+						if offset == gap[0] {
+							Logger.Debugf("Offset %d is equal to gap [%d]", offset, gap[0])
 							return true
 						}
 					}

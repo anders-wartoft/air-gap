@@ -1099,7 +1099,9 @@ public class PartitionDedupApp {
                         } catch (Exception e) {
                             LOG.error("Failed to serialize gaps for window {}", gapKey, e);
                         }
-                        window.lastEmittedNonEmpty[0] = true;
+                        // Track whether this window had non-empty gaps: reset to false when gaps
+                        // become empty so we don't keep emitting redundant empty-gap messages.
+                        window.lastEmittedNonEmpty[0] = !gaps.isEmpty();
                     }
                 }
             }

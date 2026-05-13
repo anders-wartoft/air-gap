@@ -876,6 +876,8 @@ Downstream can be run as a service in the same manner as upstream.
 
 The `create` application is used to create resend bundle files that contain information of missing events. The bundle should be transferred to the upstream network and consumed by the `resend` application. This application can not be run as a service. The application will terminate when the gaps are exported to the file.
 
+The deduplication app tracks missing offsets per *window* (a fixed-size range of consecutive offsets). A single partition can have several active windows. `create` merges all windows for the same partition into one bundle entry and converts every gap offset to an **absolute** Kafka offset, so the bundle can be used directly by `resend` without any extra offset arithmetic.
+
 ### Resend
 
 The `resend` application is used to either consume resend bundles created by the `create` application, or resend everything from a specified timestamp. The application can not be run as a service. The application will terminate when the information has been resent for all partitions.

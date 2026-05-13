@@ -14,7 +14,25 @@ When all events have been resent, the gaps downstream should disappear, or at le
 
 ### create
 
-This application will get all data from the GAP_TOPIC topic and create a JSON file with the topic name upstream, all partitions, and their respective missing offsets. In order for this to work, we must make sure the GAP_TOPIC only stores one version of our gaps, so we always get the latest one.
+This application reads all data from the GAP_TOPIC topic and creates a JSON resend bundle with the upstream topic name, all partitions, and their respective missing Kafka offsets.
+
+#### How gaps are stored internally
+
+The deduplication app (PartitionDedupApp) tracks received offsets in fixed-size *windows* (default size: `WINDOW_SIZE=1000`). Each window covers a contiguous range of offsets, e.g. `[0–999]`, `[1000–1999]`. Missing offsets within a window are stored as offsets *relative to the window's start* (`window_min`), so a relative gap of `5` in the window `[1000–1999]` means absolute Kafka offset `1005`.
+
+Each window is emitted as a separate record to the GAP_TOPIC keyed by `topic_partition:window_min`. A partition with many messages will therefore have multiple gap records in the topic.
+
+#### What `create` produces
+
+`create` reads all window records from the GAP_TOPIC and, for each topic+partition, **merges all windows into a single bundle entry** with gap offsets converted to **absolute** Kafka offsets. `window_min` is normalised to `0` in the output. This means the bundle is ready to be used directly by `resend` without any further offset arithmetic.
+
+Example bundle entry (two windows merged; offsets are absolute):
+
+```json
+{"gaps":[[3],[1005],[1010,1015]],"partition":0,"topic":"transfer","window_min":0,"window_max":1999}
+```
+
+In order for this to work, we must make sure the GAP_TOPIC only stores one version of the gaps per window, so we always get the latest state.
 
 If the GAP_TOPIC topic has the property `cleanup.policy=compact`, then only the latest record for each key will be retained after compaction. Newer records with the same key will overwrite older ones.
 
@@ -111,7 +129,7 @@ The `resend` application takes similar parameters as the `create` application:
 
 When started, the `resend` will read and emit the events as fast as possible, without throttling if the eps is not set. When all events have been delivered, the application terminates.
 
-The setting `limit` can be used if a lot of gaps are present. Instead of writing all the gaps to the resend file, only the first gap for each partition is recorded and the `resend` application will resend that gap and all events after that for each partition.
+The setting `limit` can be used if a lot of gaps are present. Instead of writing all the gaps to the resend file, only the first (lowest absolute offset) gap across all windows for each partition is recorded and the `resend` application will resend that gap and all events after that for each partition.
 
 In case file copy to upstream is not feasable, the command line overrides can be used to resend events.
 
