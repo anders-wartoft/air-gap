@@ -171,11 +171,103 @@ Gap detection can be performed on the Roaring bitmaps effectively. This is perfo
 - When a window is about to get deleted
 - Once every (configurable) second.
 
-When a window is about to get deleted, all the gaps in that window are sent to the gap topic. The deduplicator will accept any event older than the oldest event in the oldest window, so this is the last chance to deliver those events. 
+When a window is about to get deleted, all the gaps in that window are sent to the gap topic. The deduplicator will accept any event older than the oldest event in the oldest window, so this is the last chance to deliver those events.
 
 Periodically (configurable), all gaps are extracted for all partitions. Gaps are compared with all gaps for the last time this was run and all gaps that are present in the last run and in this run will be written to the gap topic.
 
 Resend bundles can be created from the gap topic to get the missing events delivered once more (more on that in the Resend documentation).
+
+### Gap topic wire format
+
+Each message written to the gap topic uses a compact binary format:
+
+**Key:** `topic:partition:windowMin`  (colon-separated; colons cannot appear in Kafka topic names)
+
+**Value:**
+
+| Offset | Size | Description |
+| --- | --- | --- |
+| 0 | 1 byte | Version (currently `1`) |
+| 1 | 8 bytes | `windowMin` — first Kafka offset in the window (big-endian int64) |
+| 9 | 8 bytes | `windowMax` — last Kafka offset in the window (big-endian int64) |
+| 17 | N bytes | 32-bit [RoaringBitmap](https://roaringbitmap.org/) (portable serialization format) of **missing** event positions relative to `windowMin` |
+
+Bit position `P` is set when the event at absolute offset `windowMin + P` has **not** been received. The tail of the window (events not yet received at emit time) is excluded from the bitmap so consumers see only genuine gaps, not merely undelivered future events.
+
+The maximum message size for a window of size `W` is `17 + ⌈W / 8⌉` bytes in the worst case (every other event missing). For the default `WINDOW_SIZE=1000` this is approximately 142 bytes — well within Kafka's default 1 MB limit.
+
+> **Warning — large WINDOW_SIZE and Kafka message size limit**
+>
+> Kafka's default maximum message size is **1 MB** (`max.message.bytes = 1048576`). If your `WINDOW_SIZE` is very large the gap bitmap can exceed this limit and the deduplicator will fail to emit gap messages (you will see producer errors in the logs).
+>
+> The critical threshold is:
+>
+> $$WINDOW\_SIZE > (max.message.bytes - 17) \times 8 = (1\,048\,576 - 17) \times 8 = 8\,388\,712$$
+>
+> If you need a larger window, increase `max.message.bytes` in the broker configuration for the gap topic:
+>
+> ```sh
+> kafka-configs.sh --bootstrap-server localhost:9092 \
+>   --entity-type topics --entity-name gaps \
+>   --alter --add-config max.message.bytes=<larger_value>
+> ```
+
+### Gap topic size
+
+The number of unique keys in the gap topic is:
+
+$$\text{unique keys} = \text{source partitions} \times \text{MAX\_WINDOWS}$$
+
+After full compaction this is the entire topic — e.g. 6 partitions × 5 windows × ~300 bytes ≈ **9 KB**.
+
+Before compaction the topic grows at roughly one message per active window per `GAP_EMIT_INTERVAL_SEC`. With Kafka's default `min.cleanable.dirty.ratio=0.5` and no compaction lag, the cleaner triggers almost immediately and the topic stays near its compacted size.
+
+**The main risk is `min.compaction.lag.ms`.** If this is set on the gap topic, messages cannot be compacted until they are older than that value:
+
+| Lag | Messages accumulated (6 partitions × 5 windows, 5 s interval) | Size (typical ~300 B/msg) |
+| --- | --- | --- |
+| 0 (default) | ~30 | < 10 KB |
+| 1 hour | ~21 600 | ~6.5 MB |
+| 24 hours | ~518 000 | ~155 MB |
+
+Keep `min.compaction.lag.ms` at its default (0) on the gap topic, or set it to at most a few minutes. Also ensure `cleanup.policy=compact` (not `delete`) is configured for the gap topic so old window versions are eventually removed.
+
+### Inspecting the gap topic with the `gaps` tool
+
+The `gaps` binary reads the gap topic and displays its contents in a human-readable form. It is built alongside the other Go binaries (`make build-go`).
+
+**Usage:**
+
+```sh
+gaps [config.properties] [--full] [--bootstrapServers=...] [--topic=...]
+```
+
+**Short mode** (default): one summary line per window, sorted by topic / partition / window offset.
+
+```text
+transfer/0 [0..999]: 3 missing  first: 5, 10-12, 50
+transfer/0 [1000..1999]: 0 missing
+transfer/1 [0..999]: 12 missing  first: 0-4, 8, 200-205, ...
+```
+
+**Full mode** (`--full`): one block per window listing every missing absolute offset.
+
+```text
+Topic: transfer  Partition: 0  Window: [0..999]
+  Missing offsets: 5, 10-12, 50
+Topic: transfer  Partition: 1  Window: [0..999]
+  Missing offsets: 0-4, 8, 200-205, 300
+```
+
+**Configuration** (same property file format as the other tools, prefix `AIRGAP_GAPS_` for environment variable overrides):
+
+| Property           | Description                              | Default       |
+| ------------------ | ---------------------------------------- | ------------- |
+| `bootstrapServers` | Kafka bootstrap servers                  | _required_    |
+| `topic`            | Gap topic name                           | _required_    |
+| `groupID`          | Consumer group ID                        | `gaps-group`  |
+| `mode`             | `short` (default) or `full`              | `short`       |
+| `logLevel`         | Log level                                | `INFO`        |
 
 ### A little more depth in Gap Detection
 

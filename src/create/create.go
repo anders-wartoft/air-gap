@@ -1,22 +1,113 @@
 package create
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/RoaringBitmap/roaring"
 	"sitia.nu/airgap/src/kafka"
 	"sitia.nu/airgap/src/version"
 )
 
-// main is the entry point of the program.
+// parsedWindow holds a decoded gap-topic binary message.
+type parsedWindow struct {
+	topic     string
+	partition int
+	windowMin int64
+	windowMax int64
+	// relGaps contains relative gap ranges: each entry is [from] or [from, to].
+	relGaps [][]int64
+}
+
+// parseGapPayload decodes the binary gap-topic wire format.
+//
+// Wire format (big-endian):
+//
+//	[1 byte]  version = 1
+//	[8 bytes] windowMin (int64)
+//	[8 bytes] windowMax (int64)
+//	[N bytes] 32-bit RoaringBitmap of MISSING relative positions (portable format)
+//
+// Key format: "topic:partition:windowMin"
+func parseGapPayload(key, value []byte) (parsedWindow, error) {
+	parts := strings.SplitN(string(key), ":", 3)
+	if len(parts) != 3 {
+		return parsedWindow{}, fmt.Errorf("invalid gap key %q: expected topic:partition:windowMin", string(key))
+	}
+	topic := parts[0]
+	partition, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return parsedWindow{}, fmt.Errorf("invalid partition in gap key %q: %w", string(key), err)
+	}
+
+	const headerLen = 17
+	if len(value) < headerLen {
+		return parsedWindow{}, fmt.Errorf("gap payload too short: %d bytes", len(value))
+	}
+	if value[0] != 1 {
+		return parsedWindow{}, fmt.Errorf("unsupported gap payload version: %d", value[0])
+	}
+	windowMin := int64(binary.BigEndian.Uint64(value[1:9]))
+	windowMax := int64(binary.BigEndian.Uint64(value[9:17]))
+
+	rb := roaring.New()
+	if len(value) > headerLen {
+		if _, err := rb.ReadFrom(bytes.NewReader(value[headerLen:])); err != nil {
+			return parsedWindow{}, fmt.Errorf("failed to parse gap bitmap: %w", err)
+		}
+	}
+
+	return parsedWindow{
+		topic:     topic,
+		partition: partition,
+		windowMin: windowMin,
+		windowMax: windowMax,
+		relGaps:   bitmapToRanges(rb),
+	}, nil
+}
+
+// bitmapToRanges converts a bitmap of relative positions to compact [from] / [from, to] ranges.
+func bitmapToRanges(rb *roaring.Bitmap) [][]int64 {
+	var ranges [][]int64
+	it := rb.Iterator()
+	rangeStart, prev := int64(-1), int64(-1)
+	for it.HasNext() {
+		v := int64(it.Next())
+		if rangeStart < 0 {
+			rangeStart, prev = v, v
+		} else if v == prev+1 {
+			prev = v
+		} else {
+			if rangeStart == prev {
+				ranges = append(ranges, []int64{rangeStart})
+			} else {
+				ranges = append(ranges, []int64{rangeStart, prev})
+			}
+			rangeStart, prev = v, v
+		}
+	}
+	if rangeStart >= 0 {
+		if rangeStart == prev {
+			ranges = append(ranges, []int64{rangeStart})
+		} else {
+			ranges = append(ranges, []int64{rangeStart, prev})
+		}
+	}
+	return ranges
+}
+
+// Main is the entry point of the program.
 // It reads a configuration file from the command line parameter,
 // initializes the necessary variables, and starts the upstream process.
 func Main(BuildNumber string, kafkaReader KafkaReader) {
@@ -85,24 +176,20 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 		}
 		ctx, cancel = context.WithCancel(context.Background())
 
-		// Map to store last entry for each topic-partition-window_min
-		lastEntries := make(map[string]json.RawMessage)
+		// Map to store last entry for each "topic-partition-windowMin".
+		lastEntries := make(map[string]parsedWindow)
 
-		// Kafka message handler: parse JSON, store last entry
+		// Kafka message handler: decode binary gap payload, keep latest per window.
 		kafkaHandler := func(id string, key []byte, t time.Time, received []byte) bool {
 			atomic.AddInt64(&receivedEvents, 1)
 			atomic.AddInt64(&totalReceived, 1)
-			// Parse message as JSON
-			var msg map[string]interface{}
-			if err := json.Unmarshal(received, &msg); err != nil {
-				Logger.Errorf("Failed to parse message: %v", err)
+			pw, err := parseGapPayload(key, received)
+			if err != nil {
+				Logger.Errorf("Failed to parse gap message: %v", err)
 				return keepRunning
 			}
-			topic, _ := msg["topic"].(string)
-			partition := fmt.Sprintf("%v", msg["partition"])
-			windowMin := fmt.Sprintf("%v", msg["window_min"])
-			keyStr := fmt.Sprintf("%s-%s-%s", topic, partition, windowMin)
-			lastEntries[keyStr] = json.RawMessage(received)
+			keyStr := fmt.Sprintf("%s-%d-%d", pw.topic, pw.partition, pw.windowMin)
+			lastEntries[keyStr] = pw
 			return keepRunning
 		}
 
@@ -135,40 +222,30 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 
 // writeResults formats and outputs the results as JSON, either to a file or the console.
 // Windows for the same topic+partition are merged into a single entry with absolute gap offsets.
-func writeResults(lastEntries map[string]json.RawMessage, config TransferConfiguration) {
-	// windowEntry holds the parsed fields needed for merging.
+func writeResults(lastEntries map[string]parsedWindow, config TransferConfiguration) {
 	type windowEntry struct {
-		windowMin float64
-		windowMax float64
-		gaps      []interface{} // each element is []interface{} of float64
-		raw       map[string]interface{}
+		windowMin int64
+		windowMax int64
+		topic     string
+		partition int
+		relGaps   [][]int64
 	}
 
 	// Group window entries by "topic-partition".
-	grouped := make(map[string][]windowEntry) // key: "topic-partition"
-	groupOrder := []string{}                  // preserve insertion order for determinism
+	grouped := make(map[string][]windowEntry)
+	groupOrder := []string{}
 
-	for _, v := range lastEntries {
-		var entry map[string]interface{}
-		if err := json.Unmarshal(v, &entry); err != nil {
-			Logger.Errorf("Failed to parse last entry for output: %v", err)
-			continue
-		}
-		topic, _ := entry["topic"].(string)
-		partition := fmt.Sprintf("%v", entry["partition"])
-		windowMin, _ := entry["window_min"].(float64)
-		windowMax, _ := entry["window_max"].(float64)
-		rawGaps, _ := entry["gaps"].([]interface{})
-
-		groupKey := fmt.Sprintf("%s-%s", topic, partition)
+	for _, pw := range lastEntries {
+		groupKey := fmt.Sprintf("%s-%d", pw.topic, pw.partition)
 		if _, exists := grouped[groupKey]; !exists {
 			groupOrder = append(groupOrder, groupKey)
 		}
 		grouped[groupKey] = append(grouped[groupKey], windowEntry{
-			windowMin: windowMin,
-			windowMax: windowMax,
-			gaps:      rawGaps,
-			raw:       entry,
+			windowMin: pw.windowMin,
+			windowMax: pw.windowMax,
+			topic:     pw.topic,
+			partition: pw.partition,
+			relGaps:   pw.relGaps,
 		})
 	}
 
@@ -182,27 +259,20 @@ func writeResults(lastEntries map[string]json.RawMessage, config TransferConfigu
 			return windows[i].windowMin < windows[j].windowMin
 		})
 
-		// Use metadata from first window (topic, partition) and largest windowMax.
 		first := windows[0]
-		topic, _ := first.raw["topic"].(string)
-		partitionVal := first.raw["partition"]
 		maxWindowMax := windows[len(windows)-1].windowMax
 
 		// Merge gaps from all windows, converting relative offsets to absolute.
 		var absoluteGaps []interface{}
 		for _, w := range windows {
-			for _, rawGap := range w.gaps {
-				gap, ok := rawGap.([]interface{})
-				if !ok {
-					continue
-				}
+			for _, gap := range w.relGaps {
 				if len(gap) == 1 {
-					rel, _ := gap[0].(float64)
-					absoluteGaps = append(absoluteGaps, []interface{}{rel + w.windowMin})
+					absoluteGaps = append(absoluteGaps, []interface{}{float64(gap[0] + w.windowMin)})
 				} else if len(gap) == 2 {
-					relFrom, _ := gap[0].(float64)
-					relTo, _ := gap[1].(float64)
-					absoluteGaps = append(absoluteGaps, []interface{}{relFrom + w.windowMin, relTo + w.windowMin})
+					absoluteGaps = append(absoluteGaps, []interface{}{
+						float64(gap[0] + w.windowMin),
+						float64(gap[1] + w.windowMin),
+					})
 				}
 			}
 		}
@@ -213,9 +283,9 @@ func writeResults(lastEntries map[string]json.RawMessage, config TransferConfigu
 		}
 
 		outputEntry := map[string]interface{}{
-			"topic":      topic,
-			"partition":  partitionVal,
-			"window_min": float64(0),
+			"topic":      first.topic,
+			"partition":  first.partition,
+			"window_min": 0,
 			"window_max": maxWindowMax,
 			"gaps":       absoluteGaps,
 		}

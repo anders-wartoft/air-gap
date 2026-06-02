@@ -2,9 +2,9 @@
 # Go Binary Builds
 # ============================================================================
 
-.PHONY: build-go build-go-all build-go-linux-amd64 build-go-linux-arm64 build-go-mac-arm64 _build-binaries upstream downstream create resend FORCE
+.PHONY: build-go build-go-all build-go-linux-amd64 build-go-linux-arm64 build-go-mac-arm64 _build-binaries upstream downstream create resend gaps FORCE
 
-GO_BINARIES := upstream downstream create resend
+GO_BINARIES := upstream downstream create resend gaps
 GO_BUILD_DIR := $(LINUX_AMD64_DIR)
 
 # Increment build number once per build
@@ -28,6 +28,7 @@ build-go-linux-arm64: .build-number-incremented src/version/version.go
 	@GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(LINUX_ARM64_DIR)/downstream ./src/cmd/downstream
 	@GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(LINUX_ARM64_DIR)/create ./src/cmd/create
 	@GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(LINUX_ARM64_DIR)/resend ./src/cmd/resend
+	@GOOS=linux GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(LINUX_ARM64_DIR)/gaps ./src/cmd/gaps
 	@echo "✅ Go binaries built (Linux ARM64)"
 
 build-go-mac-arm64: .build-number-incremented src/version/version.go
@@ -37,6 +38,7 @@ build-go-mac-arm64: .build-number-incremented src/version/version.go
 	@GOOS=darwin GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(MAC_ARM64_DIR)/downstream ./src/cmd/downstream
 	@GOOS=darwin GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(MAC_ARM64_DIR)/create ./src/cmd/create
 	@GOOS=darwin GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(MAC_ARM64_DIR)/resend ./src/cmd/resend
+	@GOOS=darwin GOARCH=arm64 go build -ldflags '$(BUILD_LDFLAGS)' -o $(MAC_ARM64_DIR)/gaps ./src/cmd/gaps
 	@echo "✅ Go binaries built (macOS ARM64)"
 
 # Generate version file
@@ -81,3 +83,11 @@ resend: src/version/version.go .build-number-incremented
 		-ldflags '$(BUILD_LDFLAGS)' \
 		-o $(GO_BUILD_DIR)/resend \
 		./src/cmd/resend
+
+gaps: src/version/version.go .build-number-incremented
+	@echo "Building gaps ($(GOARCH))..."
+	@mkdir -p $(GO_BUILD_DIR)
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build \
+		-ldflags '$(BUILD_LDFLAGS)' \
+		-o $(GO_BUILD_DIR)/gaps \
+		./src/cmd/gaps

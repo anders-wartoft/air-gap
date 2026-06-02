@@ -64,6 +64,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.roaringbitmap.RoaringBitmap;
 
 public class PartitionDedupApp {
     // Configurable window size and max windows for GapDetector
@@ -908,7 +909,6 @@ public class PartitionDedupApp {
         private static final Logger LOG = LoggerFactory.getLogger(DedupAndGapProcessor.class);
         private final long windowSize;
         private final int maxWindows;
-        private ObjectMapper MAPPER = new ObjectMapper();
 
         private org.apache.kafka.streams.processor.api.ProcessorContext<String, byte[]> context;
         private KeyValueStore<String, byte[]> gapStore;
@@ -917,6 +917,7 @@ public class PartitionDedupApp {
         private Cancellable emitSchedule;
 
         private static final Map<Integer, Long> lastTotalMissing = new java.util.concurrent.ConcurrentHashMap<>();
+
         private static final Map<Integer, Long> lastReceived = new java.util.concurrent.ConcurrentHashMap<>();
         private static final Map<Integer, Long> lastEmitted = new java.util.concurrent.ConcurrentHashMap<>();
         private static final Map<Integer, Long> totalReceived = new java.util.concurrent.ConcurrentHashMap<>();
@@ -1071,22 +1072,17 @@ public class PartitionDedupApp {
                     windowsScanned++;
                     List<List<Long>> gaps = window.findGapsFiltered(detector.getMinReceived());
                     long windowMin = window.getMinOffset();
-                    String gapKey = topic + "_" + partition + ":" + windowMin;
+                    String gapKey = topic + ":" + partition + ":" + windowMin;
                     if (window.lastEmittedNonEmpty == null)
                         window.lastEmittedNonEmpty = new boolean[] { true };
                     boolean wasNonEmpty = window.lastEmittedNonEmpty[0];
                     if (!gaps.isEmpty() || wasNonEmpty) {
                         try {
-                            Map<String, Object> gapsMap = new HashMap<>();
-                            gapsMap.put("topic", topic);
-                            gapsMap.put("partition", partition);
-                            gapsMap.put("window_min", windowMin);
-                            gapsMap.put("window_max", window.getMaxOffset());
-                            gapsMap.put("gaps", gaps);
-                            String json = MAPPER.writeValueAsString(gapsMap);
-                            context.forward(new Record<>(gapKey, json.getBytes(), System.currentTimeMillis()),
+                            byte[] payload = gapListToBinaryPayload(windowMin, window.getMaxOffset(), gaps);
+                            context.forward(new Record<>(gapKey, payload, System.currentTimeMillis()),
                                     "gaps-sink");
-                            LOG.debug("Emitted gaps for window {}: {}", gapKey, json);
+                            LOG.debug("Emitted binary gap payload for window {} ({} bytes, {} gap ranges)",
+                                    gapKey, payload.length, gaps.size());
                             windowsEmitted++;
                             rangesEmitted += gaps.size();
                             for (List<Long> gap : gaps) {
@@ -1174,16 +1170,11 @@ public class PartitionDedupApp {
                     List<List<Long>> gaps = window.findGaps();
                     long windowMin = window.getMinOffset();
                     if (!gaps.isEmpty()) {
-                        String gapKey = topic + "_" + partition + ":" + windowMin;
-                        Map<String, Object> gapsMap = new HashMap<>();
-                        gapsMap.put("topic", topic);
-                        gapsMap.put("partition", partition);
-                        gapsMap.put("window_min", windowMin);
-                        gapsMap.put("window_max", window.getMaxOffset());
-                        gapsMap.put("gaps", gaps);
-                        String json = MAPPER.writeValueAsString(gapsMap);
-                        context.forward(new Record<>(gapKey, json.getBytes(), record.timestamp()), "gaps-sink");
-                        LOG.debug("Emitted gaps for window {}: {}", gapKey, json);
+                        String gapKey = topic + ":" + partition + ":" + windowMin;
+                        byte[] payload = gapListToBinaryPayload(windowMin, window.getMaxOffset(), gaps);
+                        context.forward(new Record<>(gapKey, payload, record.timestamp()), "gaps-sink");
+                        LOG.debug("Emitted binary gap payload for purged window {} ({} bytes, {} gap ranges)",
+                                gapKey, payload.length, gaps.size());
                     }
                 } catch (OutOfMemoryError oom) {
                     String errorMessage = "OutOfMemoryError while emitting gaps for purged window. Consider increasing MAX_WINDOWS or reducing WINDOW_SIZE. "
@@ -1341,6 +1332,51 @@ public class PartitionDedupApp {
             oos.flush();
             return bos.toByteArray();
         }
+    }
+
+    /**
+     * Build the binary gap-topic payload for a window.
+     *
+     * <p>Wire format (big-endian):
+     * <pre>
+     *   [1 byte]  version = 1
+     *   [8 bytes] windowMin  (long)
+     *   [8 bytes] windowMax  (long)
+     *   [N bytes] 32-bit RoaringBitmap (portable format) of MISSING relative positions
+     * </pre>
+     *
+     * <p>The maximum payload size is 17 + ceil(windowSize / 8) bytes.
+     * With the default Kafka max.message.bytes of 1 048 576 (1 MiB) this means
+     * WINDOW_SIZE must be smaller than (1 048 576 - 17) * 8 = 8 388 712 events.
+     * If WINDOW_SIZE exceeds that limit the deduplicator will fail to emit gaps
+     * until Kafka is reconfigured with a larger max.message.bytes.
+     *
+     * @param windowMin  absolute start offset of the window
+     * @param windowMax  absolute end offset of the window (inclusive)
+     * @param gaps       compact relative-offset gap list from GapDetector
+     * @return serialized binary payload
+     */
+    static byte[] gapListToBinaryPayload(long windowMin, long windowMax,
+            List<List<Long>> gaps) throws java.io.IOException {
+        RoaringBitmap gapBitmap = new RoaringBitmap();
+        for (List<Long> gap : gaps) {
+            if (gap.size() == 1) {
+                gapBitmap.add(gap.get(0).intValue());
+            } else if (gap.size() == 2) {
+                // add(long rangeStart, long rangeEnd) is exclusive at the end
+                gapBitmap.add(gap.get(0), gap.get(1) + 1L);
+            }
+        }
+        gapBitmap.runOptimize();
+
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        java.io.DataOutputStream dos = new java.io.DataOutputStream(bos);
+        dos.writeByte(1);          // version
+        dos.writeLong(windowMin);
+        dos.writeLong(windowMax);
+        gapBitmap.serialize(dos);
+        dos.flush();
+        return bos.toByteArray();
     }
 }
 
