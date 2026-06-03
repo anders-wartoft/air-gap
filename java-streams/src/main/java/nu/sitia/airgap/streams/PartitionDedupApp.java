@@ -121,6 +121,9 @@ public class PartitionDedupApp {
     public static final long MISSING_REPORT_INTERVAL_SEC = Long
             .parseLong(System.getenv().getOrDefault("MISSING_REPORT_INTERVAL_SEC", "60"));
 
+    public static final int NUM_STANDBY_REPLICAS = Integer
+            .parseInt(System.getenv().getOrDefault("NUM_STANDBY_REPLICAS", "1"));
+
     /**
      * JMX MBean interface for exposing the Properties (props) variable
      */
@@ -309,7 +312,7 @@ public class PartitionDedupApp {
         props.put(StreamsConfig.STATE_DIR_CONFIG, STATE_DIR_CONFIG);
 
         // Warm standby replicas for faster failover of state (tune as desired)
-        props.put(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, 1);
+        props.put(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, NUM_STANDBY_REPLICAS);
 
         // Optional: commit interval (EOS v2 ignores this for transactional commits)
         props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, COMMIT_INTERVAL_MS);
@@ -362,7 +365,7 @@ public class PartitionDedupApp {
         LOG.info("RETRY_BACKOFF_JITTER_PCT={}", RETRY_BACKOFF_JITTER_PCT);
         LOG.info("Application ID: {}", props.get(StreamsConfig.APPLICATION_ID_CONFIG));
         LOG.info("Num Stream Threads: {}", props.get(StreamsConfig.NUM_STREAM_THREADS_CONFIG));
-        LOG.info("Num Standby Replicas: {}", props.get(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG));
+        LOG.info("Num Standby Replicas: {} (min instances needed: {})", props.get(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG), (NUM_STANDBY_REPLICAS + 1) + " × partitions");
         LOG.info("Processing Guarantee: {}", props.get(StreamsConfig.PROCESSING_GUARANTEE_CONFIG));
         LOG.info("Commit Interval (ms): {}", props.get(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG));
         LOG.info("State Dir: {}", props.get(StreamsConfig.STATE_DIR_CONFIG));
