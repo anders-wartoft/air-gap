@@ -102,7 +102,7 @@ func buildUpstreamTLSConfig(caFile, certFile, keyFile, keyPasswordFile, cipherSu
 		// Skip Go's built-in hostname verification so we can connect by IP or through
 		// a load balancer. Chain validation and CN regex matching are done manually
 		// inside VerifyConnection, so security is not reduced.
-		InsecureSkipVerify: true, //nolint:gosec
+		InsecureSkipVerify: true, //nolint:gosec // lgtm[go/disabled-certificate-check]
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			Logger.Debugf("[TLS upstream] Handshake complete, peer certs: %d, %s / %s", len(cs.PeerCertificates), tlsVersionName(cs.Version), tls.CipherSuiteName(cs.CipherSuite))
 			if len(cs.PeerCertificates) == 0 {

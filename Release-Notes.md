@@ -110,6 +110,11 @@
   - Fixed gap array types from `[][]float64` to `[][]int64`
   - All 5 test cases now passing
 
+### Code Quality
+
+- **Suppressed CodeQL alert for `InsecureSkipVerify`**: Added `lgtm[go/disabled-certificate-check]` suppression to `src/upstream/adapters.go` line 105. The use of `InsecureSkipVerify: true` is intentional and secure because certificate chain validation and CN regex matching are performed manually via the `VerifyConnection` callback. This allows connecting by IP address or through load balancers while maintaining full certificate verification.
+- **Suppressed CodeQL alerts for integer conversions**: Added missing `codeql[incorrect-integer-conversion]` suppression to `src/downstream/configuration.go` line 792 (alert #30). All integer conversions in configuration parsing are validated with explicit range checks before conversion to ensure values fit within the target type (uint16 or int32). The existing suppressions in `src/upstream/configuration.go` (lines 662, 707) and `src/downstream/configuration.go` (lines 756, 817) cover alerts #29, #31, #32, and #33.
+
 ### Internal Changes
 
 - Added atomic operation imports (`sync/atomic`) to `src/udp/receiver.go` and `src/upstream/upstream.go`

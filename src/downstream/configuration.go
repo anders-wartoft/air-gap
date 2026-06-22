@@ -789,6 +789,7 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			if err != nil || v < 0 || v > 60 {
 				Logger.Fatalf("Error parsing --logStatistics: %s", value)
 			}
+			// codeql[incorrect-integer-conversion]: value is checked to fit in int32 above (0-60 range)
 			config.logStatistics = int32(v)
 		case "numReceivers":
 			v, err := strconv.Atoi(value)
