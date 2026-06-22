@@ -752,7 +752,7 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				if err != nil || v < 0 || v > 65535 {
 					Logger.Fatalf("Error parsing --mtu: %s", value)
 				}
-				// codeql[incorrect-integer-conversion]: value is checked to fit in uint16 above
+				// lgtm[go/incorrect-integer-conversion] - value is checked to fit in uint16 above
 				config.mtu = uint16(v)
 			}
 		case "privateKeyFiles":
@@ -789,7 +789,7 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			if err != nil || v < 0 || v > 60 {
 				Logger.Fatalf("Error parsing --logStatistics: %s", value)
 			}
-			// codeql[incorrect-integer-conversion]: value is checked to fit in int32 above (0-60 range)
+			// lgtm[go/incorrect-integer-conversion] - value is checked to fit in int32 above (0-60 range)
 			config.logStatistics = int32(v)
 		case "numReceivers":
 			v, err := strconv.Atoi(value)
@@ -814,7 +814,7 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			if err != nil || v < 1 || v > 65535 {
 				Logger.Fatalf("Error parsing --readBufferMultiplier: %s", value)
 			}
-			// codeql[incorrect-integer-conversion]: value is checked to fit in uint16 above
+			// lgtm[go/incorrect-integer-conversion] - value is checked to fit in uint16 above
 			config.readBufferMultiplier = uint16(v)
 		case "rcvBufSize":
 			v, err := strconv.Atoi(value)

@@ -658,7 +658,7 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				if err != nil || v < 0 || v > 65535 {
 					Logger.Fatalf("Error parsing --payloadSize: %s", value)
 				}
-				// codeql[incorrect-integer-conversion]: value is checked to fit in uint16 above
+				// lgtm[go/incorrect-integer-conversion] - value is checked to fit in uint16 above
 				config.payloadSize = uint16(v)
 			}
 		case "topicTranslations":
@@ -703,7 +703,7 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			if v > math.MaxInt32 {
 				Logger.Fatalf("Error parsing --logStatistics: value %d exceeds max int32", v)
 			}
-			// codeql[incorrect-integer-conversion]: value is checked to fit in int32 above
+			// lgtm[go/incorrect-integer-conversion] - value is checked to fit in int32 above
 			config.logStatistics = int32(v)
 		case "compressWhenLengthExceeds":
 			v, err := strconv.Atoi(value)
