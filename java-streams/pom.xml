@@ -4,7 +4,7 @@
   <groupId>nu.sitia.airgap.streams</groupId>
   <artifactId>air-gap-deduplication</artifactId>
   <packaging>jar</packaging>
-  <version>0.1.10-SNAPSHOT</version>
+  <version>0.1.12-SNAPSHOT</version>
   <name>air-gap Deduplication</name>
   <url>http://maven.apache.org</url>
   <properties>
@@ -124,6 +124,10 @@
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <mainClass>nu.sitia.airgap.streams.PartitionDedupApp</mainClass>
+                  <manifestEntries>
+                    <Implementation-Version>${project.version}</Implementation-Version>
+                    <Build-Number>${build.number}</Build-Number>
+                  </manifestEntries>
                 </transformer>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer"/>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer"/>

@@ -183,6 +183,101 @@ Now, add the cert.pem to upstream (public key) and the
 key.pem to downstream. Downstream can have several private keys,
 if all of the filenames are covered by the same file glob
 
+### Upstream certificate (for TCP mTLS and future UDP signing)
+
+Certificates follow the X.509 standard and use `.crt` / `.key` file extensions.
+Private keys are AES-256 encrypted; the passphrase is stored in a separate password file
+(one line, no trailing whitespace). The same certificate and key are used for TCP mTLS
+(authenticating upstream to downstream) and will also be used for UDP payload signing
+in a future update.
+
+```bash
+# Generate a CA key and self-signed CA certificate (do this once per environment)
+openssl genrsa -out ca.key 4096
+openssl req -new -x509 -key ca.key -out ca.crt -days 3650 \
+  -subj "/C=SE/O=MyOrg/CN=AirGap-CA"
+
+# ── Upstream certificate ──────────────────────────────────────────────────────
+
+# Choose a passphrase and save it to a file (no trailing newline, not stored in shell history)
+# Linux:
+read -s -p "Enter passphrase for upstream key: " UPSTREAM_PW
+# MacOS
+printf "Enter passphrase for upstream key: "
+read -s UPSTREAM_PW
+# Windows
+$UPSTREAM_PW = Read-Host "Enter passphrase for upstream key"
+# Save passphrase to file with restricted permissions and unset variable
+printf '%s' "$UPSTREAM_PW" > upstream.key.pw && unset UPSTREAM_PW
+chmod 600 upstream.key.pw
+
+# Generate an AES-256 encrypted private key
+openssl genrsa -aes256 -passout file:upstream.key.pw -out upstream.key 2048
+
+# Create a CSR — adjust -subj to match your organisation.
+# The Common Name (CN) is matched by downstream via tcpTLSClientCNRegex.
+openssl req -new -key upstream.key -passin file:upstream.key.pw -out upstream.csr -subj "/C=SE/O=MyOrg/CN=upstream-1"
+
+# Sign the CSR with the CA
+openssl x509 -req -in upstream.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out upstream.crt -days 825
+
+# ── Downstream certificate ────────────────────────────────────────────────────
+
+# Linux
+read -s -p "Enter passphrase for downstream key: " DOWNSTREAM_PW
+# MacOS
+printf "Enter passphrase for downstream key: "
+read -s DOWNSTREAM_PW
+# Windows
+$DOWNSTREAM_PW = Read-Host "Enter passphrase for downstream key"
+
+printf '%s' "$DOWNSTREAM_PW" > downstream.key.pw && unset DOWNSTREAM_PW
+chmod 600 downstream.key.pw
+
+openssl genrsa -aes256 -passout file:downstream.key.pw -out downstream.key 2048
+
+openssl req -new -key downstream.key -passin file:downstream.key.pw -out downstream.csr -subj "/C=SE/O=MyOrg/CN=downstream-1"
+
+openssl x509 -req -in downstream.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out downstream.crt -days 825
+```
+
+Deploy the files:
+
+| File | Upstream config property | Downstream config property |
+| ---- | ------------------------ | -------------------------- |
+| `ca.crt` | `tcpTLSCAFile` (verify server cert) | `tcpTLSCAFile` (verify client cert) |
+| `upstream.crt` | `tcpTLSCertFile` (mTLS client cert) | — |
+| `upstream.key` | `tcpTLSKeyFile` | — |
+| `upstream.key.pw` | `tcpTLSKeyPasswordFile` | — |
+| `downstream.crt` | — | `tcpTLSCertFile` (server cert) |
+| `downstream.key` | — | `tcpTLSKeyFile` |
+| `downstream.key.pw` | — | `tcpTLSKeyPasswordFile` |
+
+Example upstream properties for TCP mTLS:
+
+```properties
+transport=tcp
+tcpTLSEnabled=true
+tcpTLSCertFile=certs/upstream.crt
+tcpTLSKeyFile=certs/upstream.key
+tcpTLSKeyPasswordFile=certs/upstream.key.pw
+tcpTLSCAFile=certs/ca.crt
+# Regex matched against the server certificate CN (required when connecting by IP)
+tcpTLSServerCNRegex=^nu\.sitia\.airgap\.downstream-[0-9]+$
+```
+
+Example downstream properties for TCP mTLS:
+
+```properties
+transport=tcp
+tcpTLSCertFile=certs/downstream.crt
+tcpTLSKeyFile=certs/downstream.key
+tcpTLSKeyPasswordFile=certs/downstream.key.pw
+tcpTLSCAFile=certs/ca.crt
+tcpTLSClientAuth=require
+tcpTLSClientCNRegex=^upstream-[0-9]+$
+```
+
 ## Encryption
 
 The provided solution encrypts data in transit over the UDP connection. If needed, add TLS and authentication to all the Kafka connections. If the event generation is also secured with Kafka TLS, then no part of the event chain needs to be in clear text.
@@ -227,9 +322,30 @@ generateNewSymmetricKeyEvery=500
 payloadSize=auto
 ```
 
-All configuration can be overridden by environment variables. In the case a file is parsed that will be parsed first and may result in configuration errors. After that, any environment variables are checked and, if found, will overwrite the file configuration.
+Configuration is applied in the following order, with each step overriding the previous:
 
-The environment variables are named as:
+1. Built-in defaults
+2. Property file (optional)
+3. Environment variables
+4. Command-line flags (`--key=value`)
+
+Command-line flags use the same property names as the property file:
+
+```bash
+./upstream upstream.properties --transport=tcp --targetIP=10.0.0.1
+./downstream downstream.properties --transport=tcp --logLevel=DEBUG
+./resend resend.properties --bootstrapServers=localhost:9092
+./create create.properties --topic=my-gap-topic
+./gaps gaps.properties --bootstrapServers=localhost:9092 --topic=gaps
+```
+
+The property file argument is optional. Flags can be used without a property file:
+
+```bash
+./downstream --transport=tcp --bootstrapServers=localhost:9092
+```
+
+Environment variables override the property file and are overridden by flags. They are named as:
 
 ```bash
 AIRGAP_UPSTREAM_{variable name in upper case}
@@ -281,6 +397,13 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | tcpRetryInterval | AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL | 1000 | (TCP only) Milliseconds to wait between send retries when the downstream is unreachable |
 | tcpRetryTimes | AIRGAP_UPSTREAM_TCP_RETRY_TIMES | 0 | (TCP only) Maximum number of send retries. `0` means retry indefinitely (no message loss). Set to a positive integer to give up after that many attempts |
 | tcpRetryErrorLevel | AIRGAP_UPSTREAM_TCP_RETRY_ERROR_LEVEL | WARN | (TCP only) Log level used for each retry attempt message. Valid values: `DEBUG`, `INFO`, `WARN`, `ERROR` |
+| tcpTLSEnabled | AIRGAP_UPSTREAM_TCP_TLS_ENABLED | false | (TCP only) Enable TLS 1.2+ on the TCP connection. Requires `tcpTLSCAFile`. Set to `true` to encrypt the TCP transport |
+| tcpTLSCertFile | AIRGAP_UPSTREAM_TCP_TLS_CERT_FILE | | (TCP+TLS) Client certificate PEM file. Required for mTLS when downstream has `tcpTLSClientAuth=require` |
+| tcpTLSKeyFile | AIRGAP_UPSTREAM_TCP_TLS_KEY_FILE | | (TCP+TLS) Client private key PEM file. Required together with `tcpTLSCertFile` |
+| tcpTLSKeyPasswordFile | AIRGAP_UPSTREAM_TCP_TLS_KEY_PASSWORD_FILE | | (TCP+TLS) Path to a file containing the password to decrypt an encrypted `tcpTLSKeyFile` |
+| tcpTLSCAFile | AIRGAP_UPSTREAM_TCP_TLS_CA_FILE | | (TCP+TLS) CA certificate PEM file used to verify the downstream server certificate. Required when `tcpTLSEnabled=true` |
+| tcpTLSServerCNRegex | AIRGAP_UPSTREAM_TCP_TLS_SERVER_CN_REGEX | | (TCP+TLS) Go regular expression matched against the server certificate Common Name. Enables connecting by IP address or through a load balancer where different backends may present different CNs. The CA chain is always verified. Example: `^nu\.sitia\.airgap\.downstream-[0-9]+$`. Also accepted as `tcpTLSServerName` (legacy) |
+| tcpTLSCipherSuites | AIRGAP_UPSTREAM_TCP_TLS_CIPHER_SUITES | | (TCP+TLS) TLS protocol policy. Two formats are accepted: (1) `TLS1.3` or empty — enforce TLS 1.3 only (default and recommended; cipher suites are fixed by the TLS 1.3 standard and are all NIST-approved); (2) a comma-separated list of TLS 1.2 cipher suite names — use TLS 1.2 with those specific NIST-approved suites (e.g. `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`). Only names from Go's `tls.CipherSuites()` are accepted; insecure legacy suites are rejected at startup |
 
 ### Example use case: Two clusters, same topic name, no topic rename possible
 
@@ -374,6 +497,7 @@ The property privateKeyFiles should point to one or more private key files that 
 | internalTopic | AIRGAP_DOWNSTREAM_INTERNAL_TOPIC | | Topic name in Kafka to write to (internal logging). Defaults to empty (disabled) — set to a topic name (e.g. `airgap-internal`) to enable writing internal status and error messages to Kafka. Topic name for events from the upstream topics will have the same name as the upstream topic, if not translated by the setting AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |
 | topicTranslations | AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS | | Rename topics with a specified name to another name. Used in multi downstreams setup (see Redundancy and Load Balancing.md) |
 | logStatistics | AIRGAP_DOWNSTREAM_LOG_STATISTICS | 0 | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
+| enableRxqOvfl | AIRGAP_DOWNSTREAM_ENABLE_RXQ_OVFL | false | (Linux only) Enable SO_RXQ_OVFL socket monitoring to track kernel-level packet drops in the socket receive queue. When enabled, statistics include `SO_RXQ_OVFL` (drops since last interval) and `SO_RXQ_OVFL_TOTAL` (total drops since start). Note: This only detects drops at the socket buffer level; drops at NIC, kernel, or hypervisor layers are NOT visible. In VM environments, compare `upstream.total_messages_sent` vs `downstream.total_received` for true packet loss. See [Monitoring.md](doc/Monitoring.md) for details on VMware/hypervisor packet loss detection. |
 | numReceivers | AIRGAP_DOWNSTREAM_NUM_RECEIVERS | 1 | Number of UDP receivers to start that concurrently binds to the targetPort |
 | channelBufferSize | AIRGAP_DOWNSTREAM_CHANNEL_BUFFER_SIZE | 16384 | Size of the buffered Go channel used between the UDP socket reader goroutines and the worker goroutines in the UDP receiver. It determines how many UDP packets can be queued in memory between being read from the socket and being processed. |
 | batchSize | AIRGAP_DOWNSTREAM_BATCH_SIZE | 32 | How many messages are grouped together and sent to Kafka in a single batch |
@@ -384,6 +508,13 @@ The property privateKeyFiles should point to one or more private key files that 
 | maxNrMessages | AIRGAP_DOWNSTREAM_MAX_NR_MESSAGES | 4096 | Maximum value of the `nrMessages` field accepted in a single packet. A packet claiming more fragments than this is rejected before any memory is allocated for it. At MTU 1500 a 1 MiB payload fragments into at most ~730 parts; the default of 4096 gives ample headroom while blocking implausibly large values that would create cache entries that can never complete. |
 | maxTCPConnections | AIRGAP_DOWNSTREAM_MAX_TCP_CONNECTIONS | 256 | Maximum number of simultaneously active TCP connections (TCP transport only). Each accepted connection owns a goroutine; an attacker who opens many connections and sends nothing can exhaust memory and goroutine stacks. Connections beyond this limit are closed immediately with a warning. Raise if you have many legitimate concurrent senders. |
 | keyExchangeMinIntervalSecs | AIRGAP_DOWNSTREAM_KEY_EXCHANGE_MIN_INTERVAL_SECS | 1 | Minimum number of seconds that must elapse between two accepted `KEY_EXCHANGE` messages. Each key-exchange packet triggers RSA-OAEP decryption for every loaded private key; without a floor a packet flood pins a CPU core. Legitimate key rotation happens every hundreds of seconds so a value of 1 has no effect in normal operation. Set to `0` to disable rate-limiting entirely. |
+| tcpTLSCertFile | AIRGAP_DOWNSTREAM_TCP_TLS_CERT_FILE | | (TCP only) Server certificate file (X.509, `.crt`). When set, TLS is enabled on the TCP listener. See the **Keys** section for how to generate this |
+| tcpTLSKeyFile | AIRGAP_DOWNSTREAM_TCP_TLS_KEY_FILE | | (TCP+TLS) Server private key PEM file |
+| tcpTLSKeyPasswordFile | AIRGAP_DOWNSTREAM_TCP_TLS_KEY_PASSWORD_FILE | | (TCP+TLS) Path to a file containing the password to decrypt an encrypted `tcpTLSKeyFile` |
+| tcpTLSCAFile | AIRGAP_DOWNSTREAM_TCP_TLS_CA_FILE | | (TCP+TLS) CA certificate PEM file used to verify client certificates. Required when `tcpTLSClientAuth` is `allow` or `require` |
+| tcpTLSClientAuth | AIRGAP_DOWNSTREAM_TCP_TLS_CLIENT_AUTH | none | (TCP+TLS) Client certificate policy: `none` — no client cert required (one-way TLS); `allow` — request and verify client cert if presented; `require` — client cert is mandatory (mTLS). For `allow` and `require`, `tcpTLSCAFile` must also be set |
+| tcpTLSClientCNRegex | AIRGAP_DOWNSTREAM_TCP_TLS_CLIENT_CN_REGEX | | (TCP+TLS) Go regular expression matched against the client certificate Common Name. Connections whose CN does not match are rejected. Only evaluated when a client cert is presented (`allow` or `require` mode). Example: `^upstream-[0-9]+$` |
+| tcpTLSCipherSuites | AIRGAP_DOWNSTREAM_TCP_TLS_CIPHER_SUITES | | (TCP+TLS) TLS protocol policy. Two formats are accepted: (1) `TLS1.3` or empty — enforce TLS 1.3 only (default and recommended; cipher suites are fixed by the TLS 1.3 standard and are all NIST-approved); (2) a comma-separated list of TLS 1.2 cipher suite names — use TLS 1.2 with those specific NIST-approved suites (e.g. `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`). Only names from Go's `tls.CipherSuites()` are accepted; insecure legacy suites are rejected at startup |
 
 ### Listening Port Security
 

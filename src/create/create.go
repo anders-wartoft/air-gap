@@ -188,6 +188,8 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 				Logger.Errorf("Failed to parse gap message: %v", err)
 				return keepRunning
 			}
+			Logger.Debugf("Parsed gap window: topic=%s, partition=%d, windowMin=%d, windowMax=%d, gaps=%v",
+				pw.topic, pw.partition, pw.windowMin, pw.windowMax, pw.relGaps)
 			keyStr := fmt.Sprintf("%s-%d-%d", pw.topic, pw.partition, pw.windowMin)
 			lastEntries[keyStr] = pw
 			return keepRunning
@@ -267,11 +269,18 @@ func writeResults(lastEntries map[string]parsedWindow, config TransferConfigurat
 		for _, w := range windows {
 			for _, gap := range w.relGaps {
 				if len(gap) == 1 {
-					absoluteGaps = append(absoluteGaps, []interface{}{float64(gap[0] + w.windowMin)})
+					absOffset := gap[0] + w.windowMin
+					Logger.Debugf("Converting gap [%d] in window [%d..%d] to absolute offset [%d]",
+						gap[0], w.windowMin, w.windowMax, absOffset)
+					absoluteGaps = append(absoluteGaps, []interface{}{float64(absOffset)})
 				} else if len(gap) == 2 {
+					absFrom := gap[0] + w.windowMin
+					absTo := gap[1] + w.windowMin
+					Logger.Debugf("Converting gap [%d,%d] in window [%d..%d] to absolute offsets [%d,%d]",
+						gap[0], gap[1], w.windowMin, w.windowMax, absFrom, absTo)
 					absoluteGaps = append(absoluteGaps, []interface{}{
-						float64(gap[0] + w.windowMin),
-						float64(gap[1] + w.windowMin),
+						float64(absFrom),
+						float64(absTo),
 					})
 				}
 			}

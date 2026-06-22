@@ -6,27 +6,16 @@ import (
 	"testing"
 )
 
-// buildGapMessage produces a JSON byte slice as emitted by the Java dedup app
-// to the gap topic. The gap offsets are relative to windowMin, matching the
-// format written by PartitionDedupApp.emitGapsForPartition.
-func buildGapMessage(topic string, partition int, windowMin, windowMax float64, gaps [][]float64) json.RawMessage {
-	gapsI := make([]interface{}, len(gaps))
-	for i, g := range gaps {
-		gi := make([]interface{}, len(g))
-		for j, v := range g {
-			gi[j] = v
-		}
-		gapsI[i] = gi
+// buildGapWindow creates a parsedWindow for testing. The gaps are relative
+// offsets as they would be parsed from the gap topic.
+func buildGapWindow(topic string, partition int, windowMin, windowMax int64, gaps [][]int64) parsedWindow {
+	return parsedWindow{
+		topic:     topic,
+		partition: partition,
+		windowMin: windowMin,
+		windowMax: windowMax,
+		relGaps:   gaps,
 	}
-	m := map[string]interface{}{
-		"topic":      topic,
-		"partition":  partition,
-		"window_min": windowMin,
-		"window_max": windowMax,
-		"gaps":       gapsI,
-	}
-	b, _ := json.Marshal(m)
-	return json.RawMessage(b)
 }
 
 // parseBundleFile reads the file written by writeResults and unmarshals it into
@@ -113,10 +102,10 @@ func tempFile(t *testing.T) string {
 // Expected absolute gaps for partition 0: [3], [7,9], [1005], [1010,1015]
 // Expected absolute gaps for partition 1: [2]
 func TestWriteResults_MultipleWindowsMergedToAbsoluteOffsets(t *testing.T) {
-	lastEntries := map[string]json.RawMessage{
-		"transfer-0-0":    buildGapMessage("transfer", 0, 0, 999, [][]float64{{3}, {7, 9}}),
-		"transfer-0-1000": buildGapMessage("transfer", 0, 1000, 1999, [][]float64{{5}, {10, 15}}),
-		"transfer-1-0":    buildGapMessage("transfer", 1, 0, 999, [][]float64{{2}}),
+	lastEntries := map[string]parsedWindow{
+		"transfer-0-0":    buildGapWindow("transfer", 0, 0, 999, [][]int64{{3}, {7, 9}}),
+		"transfer-0-1000": buildGapWindow("transfer", 0, 1000, 1999, [][]int64{{5}, {10, 15}}),
+		"transfer-1-0":    buildGapWindow("transfer", 1, 0, 999, [][]int64{{2}}),
 	}
 	out := tempFile(t)
 	writeResults(lastEntries, TransferConfiguration{limit: "all", resendFileName: out})
@@ -175,9 +164,9 @@ func TestWriteResults_MultipleWindowsMergedToAbsoluteOffsets(t *testing.T) {
 //
 // Expected: only gap [8] emitted (absolute 8 < absolute 1005).
 func TestWriteResults_FirstMode_PicksGloballyFirstAbsoluteGap(t *testing.T) {
-	lastEntries := map[string]json.RawMessage{
-		"transfer-0-1000": buildGapMessage("transfer", 0, 1000, 1999, [][]float64{{5}}),
-		"transfer-0-0":    buildGapMessage("transfer", 0, 0, 999, [][]float64{{8}}),
+	lastEntries := map[string]parsedWindow{
+		"transfer-0-1000": buildGapWindow("transfer", 0, 1000, 1999, [][]int64{{5}}),
+		"transfer-0-0":    buildGapWindow("transfer", 0, 0, 999, [][]int64{{8}}),
 	}
 	out := tempFile(t)
 	writeResults(lastEntries, TransferConfiguration{limit: "first", resendFileName: out})
@@ -209,10 +198,10 @@ func TestWriteResults_FirstMode_PicksGloballyFirstAbsoluteGap(t *testing.T) {
 //
 // Expected absolute gaps: [2], [50,55], [1100,1102], [2000], [2500]
 func TestWriteResults_ThreeWindows_AllAbsoluteOffsets(t *testing.T) {
-	lastEntries := map[string]json.RawMessage{
-		"events-0-0":    buildGapMessage("events", 0, 0, 999, [][]float64{{2}, {50, 55}}),
-		"events-0-1000": buildGapMessage("events", 0, 1000, 1999, [][]float64{{100, 102}}),
-		"events-0-2000": buildGapMessage("events", 0, 2000, 2999, [][]float64{{0}, {500}}),
+	lastEntries := map[string]parsedWindow{
+		"events-0-0":    buildGapWindow("events", 0, 0, 999, [][]int64{{2}, {50, 55}}),
+		"events-0-1000": buildGapWindow("events", 0, 1000, 1999, [][]int64{{100, 102}}),
+		"events-0-2000": buildGapWindow("events", 0, 2000, 2999, [][]int64{{0}, {500}}),
 	}
 	out := tempFile(t)
 	writeResults(lastEntries, TransferConfiguration{limit: "all", resendFileName: out})
@@ -239,8 +228,8 @@ func TestWriteResults_ThreeWindows_AllAbsoluteOffsets(t *testing.T) {
 // TestWriteResults_EmptyGaps verifies that a window with no gaps produces an
 // empty gaps array in the output (no entries are dropped).
 func TestWriteResults_EmptyGaps(t *testing.T) {
-	lastEntries := map[string]json.RawMessage{
-		"transfer-0-0": buildGapMessage("transfer", 0, 0, 999, [][]float64{}),
+	lastEntries := map[string]parsedWindow{
+		"transfer-0-0": buildGapWindow("transfer", 0, 0, 999, [][]int64{}),
 	}
 	out := tempFile(t)
 	writeResults(lastEntries, TransferConfiguration{limit: "all", resendFileName: out})
@@ -259,9 +248,9 @@ func TestWriteResults_EmptyGaps(t *testing.T) {
 // window has no gaps and another does, the merged result contains only the gaps
 // from the gapped window at their correct absolute offsets.
 func TestWriteResults_OnlyEmptyWindowsMergedWithGappedWindow(t *testing.T) {
-	lastEntries := map[string]json.RawMessage{
-		"transfer-0-0":    buildGapMessage("transfer", 0, 0, 999, [][]float64{}),
-		"transfer-0-1000": buildGapMessage("transfer", 0, 1000, 1999, [][]float64{{7}, {20, 25}}),
+	lastEntries := map[string]parsedWindow{
+		"transfer-0-0":    buildGapWindow("transfer", 0, 0, 999, [][]int64{}),
+		"transfer-0-1000": buildGapWindow("transfer", 0, 1000, 1999, [][]int64{{7}, {20, 25}}),
 	}
 	out := tempFile(t)
 	writeResults(lastEntries, TransferConfiguration{limit: "all", resendFileName: out})

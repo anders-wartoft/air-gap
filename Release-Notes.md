@@ -1,5 +1,123 @@
 # Release Notes
 
+## 0.1.12-SNAPSHOT
+
+### Packet Loss Monitoring and VMware Optimization
+
+#### SO_RXQ_OVFL Socket Queue Overflow Monitoring (Downstream)
+
+- **New `enableRxqOvfl` configuration parameter** (Linux only): Enables tracking of kernel socket buffer drops via the `SO_RXQ_OVFL` socket option. When enabled, downstream statistics include `SO_RXQ_OVFL` (interval drops) and `SO_RXQ_OVFL_TOTAL` (cumulative) counters.
+- Requires `ReadMsgUDP` with ancillary data parsing (40-byte out-of-band buffer) to extract drop counts from the kernel.
+- Configurable via property file (`enableRxqOvfl=true`), environment variable (`AIRGAP_DOWNSTREAM_ENABLE_RXQ_OVFL=true`), or CLI flag (`--enableRxqOvfl=true`).
+- **Important limitation**: `SO_RXQ_OVFL` only measures drops between kernel UDP stack and socket buffer. It does **not** capture NIC drops, kernel backlog drops, or hypervisor-level packet loss in virtual environments. See `doc/Monitoring.md` for multi-layer monitoring strategy.
+
+#### Message-Level Tracking (Upstream)
+
+- **New atomic counters**: `messages_sent`, `messages_dropped`, `total_messages_sent`, `total_messages_dropped` now distinguish Kafka messages from UDP fragments (one large message may produce multiple fragments).
+- **Fixed critical mutex bug**: Added missing `Lock()` before `Unlock()` in transport success path that caused "sync: unlock of unlocked mutex" panic, preventing statistics logging.
+- Enables accurate end-to-end message loss calculation: compare upstream `total_messages_sent` with downstream `total_received` to measure air-gap delivery rate.
+- Statistics output format unchanged; new fields added to JSON logs when `logStatistics` is enabled.
+
+#### UDP Broadcast Optimization for Virtual Environments
+
+- **Documented existing broadcast support**: Confirmed `targetIP=255.255.255.255` (global broadcast) works with automatic `SO_BROADCAST` socket option setting (implemented in 0.1.11). Broadcast support was already present but undocumented.
+- **New optimized configuration files**:
+  - `config/upstream-broadcast-vm.properties`: Conservative settings for VM environments (EPS=3000, compression enabled at 1KB threshold, statistics logging)
+  - `config/downstream-broadcast-vm.properties`: Tuned buffers for high-throughput broadcast reception:
+    - `rcvBufSize=16777216` (16MB, up from 4MB default)
+    - `numReceivers=20` (up from 10 default)
+    - `channelBufferSize=32768` (up from 16384)
+    - `readBufferMultiplier=32` (up from 16)
+    - Includes system tuning commands (`sysctl` for 32MB max buffer)
+    - Includes firewall DNAT configuration to avoid duplication with multiple receivers
+- **Realistic expectations documented**: In constrained VM environments with UDP broadcast, expect 5-10% packet loss even with optimizations. The deduplication and gap-based resend architecture is designed to handle this.
+
+#### Comprehensive VMware and Virtualization Documentation
+
+- **New `doc/Monitoring.md` section** (lines 307-541): "Special Case: VMware and Hypervisor Packet Loss"
+  - Explains why `SO_RXQ_OVFL=0` doesn't mean "no drops" in virtual environments
+  - Step-by-step diagnostic process for identifying hypervisor vs application drops
+  - VMware detection checklist (`hostnamectl`, `lspci`, `/mnt/hgfs/` mount points)
+  - Visual diagram showing invisible hypervisor packet drop layer
+  - Six ranked solutions: reduce EPS, VMXNET3 driver, tune vNIC, pin CPU resources, bare metal, accept and monitor
+  - VMware-specific monitoring strategy (what NOT to trust vs what to monitor)
+- **Multi-layer monitoring strategy** documented in `doc/Monitoring.md`:
+  1. End-to-End: Compare upstream sent vs downstream received (ultimate truth)
+  2. Application: Message/fragment counters, SO_RXQ_OVFL
+  3. NIC: `ip -s link`, `ethtool -S` counters
+  4. Kernel: `netstat -s`, `/proc/net/snmp`
+  5. VM-Specific: Hypervisor metrics (invisible to guest OS)
+- **New FAQ entry**: "UDP broadcast is dropping packets in VMware/virtual environments - what can I do?" (`doc/FAQ.md`)
+  - 10 optimization strategies beyond lowering EPS:
+    1. Enable compression (50-80% bandwidth reduction)
+    2. Increase downstream receive buffers (OS and application-level)
+    3. Increase receiver threads (better CPU utilization)
+    4. Enable SO_RXQ_OVFL monitoring (diagnostic)
+    5. Use better virtual NIC drivers (VMXNET3 vs E1000)
+    6. Pin VMs to dedicated CPU cores (avoid contention)
+    7. Increase VM NIC queue depth (ESXi advanced)
+    8. DSCP/TOS QoS marking (not yet implemented)
+    9. Switch to TCP (alternative if broadcast drops unacceptable)
+    10. Deploy redundant upstreams (high availability)
+  - Recommended configuration for broadcast in VMs
+  - Expected results and success criteria
+  - Monitoring commands and verification steps
+  - Links to `doc/Monitoring.md` for detailed drop analysis
+
+#### VMware Drop Detection Tooling
+
+- **New script**: `tools/dev/vmware-drop-detector.sh`
+  - Automated diagnosis of hypervisor vs application packet drops
+  - Parses upstream and downstream JSON logs for total message comparison
+  - Calculates loss rate and compares with `SO_RXQ_OVFL_TOTAL`
+  - If `SO_RXQ_OVFL=0` but packets missing → diagnoses as hypervisor drops
+  - Provides actionable solutions based on diagnosis type
+  - Requires `jq` for JSON parsing
+
+### Documentation Enhancements
+
+- **README.md**:
+  - Added `enableRxqOvfl` parameter documentation with VMware warning (line 501)
+  - Expanded UDP Broadcast section (lines 588-633) with configuration instructions, macOS loopback behavior note, and broadcast duplication solution with firewall DNAT examples
+  - Added `nic` parameter requirement when using `targetIP=255.255.255.255`
+- **doc/Monitoring.md**:
+  - New "Understanding Packet Drops and Loss Detection" section with packet path diagram
+  - "Where Packets Can Be Dropped" taxonomy (5 layers)
+  - Interpreting combined metrics with diagnostic scenarios
+  - Complete VMware troubleshooting guide (307+ lines)
+- **doc/FAQ.md**:
+  - New comprehensive FAQ on UDP broadcast packet loss in VMs (240+ lines)
+  - Link to Monitoring.md from SO_RXQ_OVFL monitoring section
+
+### TLS Enhancements
+
+- **PKCS#8 encrypted private key support**: Full implementation of PKCS#8 EncryptedPrivateKeyInfo decryption (previously commented out/unsupported). Supports modern OpenSSL 3.x key formats generated with `openssl genrsa -aes256` or `openssl genpkey -algorithm RSA -aes256`.
+- **PBES2 with PBKDF2**: Supports PBES2 (Password-Based Encryption Scheme 2) with PBKDF2 key derivation using multiple hash algorithms:
+  - HMAC-SHA1 (legacy compatibility)
+  - HMAC-SHA-256 (recommended)
+  - HMAC-SHA-384
+  - HMAC-SHA-512
+- **AES encryption support**: AES-128-CBC, AES-192-CBC, and AES-256-CBC cipher modes
+- **Exported TLS certificate loader**: New `LoadTLSCertificate()` function in `src/kafka/getkafka.go` allows non-Kafka components (e.g., TCP transport) to reuse the same key-decryption logic without duplicating PKCS#8 parsing code
+- **Better error messages**: Clear diagnostics for wrong password ("invalid PKCS#7 padding") and unsupported key formats
+- Both legacy PEM (`Proc-Type: 4,ENCRYPTED`) and modern PKCS#8 (`ENCRYPTED PRIVATE KEY`) formats are now supported
+
+### Test Fixes
+
+- **Fixed `src/create/create_test.go`** for binary format migration:
+  - Replaced `buildGapMessage()` helper (JSON-based) with `buildGapWindow()` (struct-based)
+  - Changed test data types from `map[string]json.RawMessage` to `map[string]parsedWindow`
+  - Fixed gap array types from `[][]float64` to `[][]int64`
+  - All 5 test cases now passing
+
+### Internal Changes
+
+- Added atomic operation imports (`sync/atomic`) to `src/udp/receiver.go` and `src/upstream/upstream.go`
+- Extended `TransportReceiver` interface in `src/downstream/interfaces.go` to accept `enableRxqOvfl` parameter
+- Socket option constant: `SO_RXQ_OVFL = 40` defined in `src/udp/receiver.go`
+- Configuration parsing extended across 20+ locations in `src/downstream/configuration.go` for `enableRxqOvfl`
+- Statistics logger updates in `src/downstream/downstream.go` for conditional SO_RXQ_OVFL output
+
 ## 0.1.11-SNAPSHOT
 
 ### Upstream / Resend — NIC binding for broadcast sends

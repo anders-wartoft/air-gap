@@ -25,8 +25,8 @@ public class GapDetector implements java.io.Serializable {
 
     /** Track the highest offset ever received */
     private long lastReceived = Long.MIN_VALUE;
-    /** Track the lowest offset ever received */
-    private long minReceived = Long.MAX_VALUE;
+    /** Track the lowest offset ever received (start from 0 to detect gaps at beginning) */
+    private long minReceived = 0;
 
     private int windowSize; // max offsets per window
     private int maxWindows;  // max number of windows to keep

@@ -8,7 +8,7 @@ package downstream
 type TransportReceiver interface {
 	Listen(ip string, port int, rcvBufSize int, handler func([]byte), mtu uint16, stopChan <-chan struct{}, numReceivers int)
 	Close() error
-	Setup(mtu uint16, numReceivers int, channelBufferSize int, readBufferMultiplier uint16)
+	Setup(mtu uint16, numReceivers int, channelBufferSize int, readBufferMultiplier uint16, enableRxqOvfl bool)
 }
 
 // UDPReceiver is deprecated, use TransportReceiver instead

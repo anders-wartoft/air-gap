@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/mtu"
 	"sitia.nu/airgap/src/protocol"
+	"sitia.nu/airgap/src/udp"
 	"sitia.nu/airgap/src/version"
 )
 
@@ -102,6 +104,7 @@ func RunDownstream(transportReceiver TransportReceiver, stopChan <-chan struct{}
 		config.numReceivers,
 		config.channelBufferSize,
 		config.readBufferMultiplier,
+		config.enableRxqOvfl,
 	)
 	go transportReceiver.Listen(
 		config.targetIP,
@@ -173,6 +176,9 @@ func handleUdpMessage(msg []byte) {
 			Logger.Fatalf("Partition out of int32 range: %d", partition)
 			os.Exit(1)
 		}
+		if len(payload) == 0 {
+			Logger.Debugf("Writing empty payload for messageID=%s to topic=%s partition=%d, messageType=%d", messageID, topic, partition, messageType)
+		}
 		kafkaWriter.Write(messageID, topic, int32(partition), payload)
 		atomic.AddInt64(&receivedEvents, 1)
 		atomic.AddInt64(&sentEvents, 1)
@@ -197,6 +203,9 @@ func handleUdpMessage(msg []byte) {
 		if partition < 0 || partition > 2147483647 {
 			Logger.Fatalf("Partition out of int32 range: %d", partition)
 			os.Exit(1)
+		}
+		if len(decrypted) == 0 {
+			Logger.Debugf("Writing empty decrypted payload for messageID=%s to topic=%s partition=%d", messageID, topic, partition)
 		}
 		kafkaWriter.Write(messageID, topic, int32(partition), decrypted)
 		atomic.AddInt64(&receivedEvents, 1)
@@ -248,6 +257,13 @@ func logStatistics(stopChan <-chan struct{}) {
 			kafkaStatus := kafkaStatus
 			kafkaStatusMu.Unlock()
 
+			// Get SO_RXQ_OVFL drop counts if enabled
+			var rxqOvflDrops, rxqOvflDropsTotal uint64
+			if config.enableRxqOvfl {
+				rxqOvflDrops = udp.RxqOvflDrops.Swap(0)
+				rxqOvflDropsTotal = udp.RxqOvflDropsTotal.Load()
+			}
+
 			stats := map[string]any{
 				"id":               config.id,
 				"time":             time.Now().Unix(),
@@ -262,6 +278,13 @@ func logStatistics(stopChan <-chan struct{}) {
 				"kafka_status":     kafkaStatus,
 				"cache_entries":    cache.GetCacheSize(),
 			}
+
+			// Only include SO_RXQ_OVFL stats if enabled
+			if config.enableRxqOvfl {
+				stats["SO_RXQ_OVFL"] = rxqOvflDrops
+				stats["SO_RXQ_OVFL_TOTAL"] = rxqOvflDropsTotal
+			}
+
 			if Logger.CanLog(logging.INFO) {
 				b, _ := json.Marshal(stats)
 				Logger.Info("STATISTICS: " + string(b))
@@ -278,11 +301,16 @@ func Main(build string) {
 	Logger.Printf("Build number: %s", BuildNumber)
 
 	var fileName string
-	if len(os.Args) > 2 {
-		Logger.Fatal("Too many command line parameters. Only one allowed.")
-	}
-	if len(os.Args) == 2 {
-		fileName = os.Args[1]
+	var overrideArgs []string
+	// Parse command line: first non-dashed argument is the property file, --key=value args are overrides.
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, "--") {
+			overrideArgs = append(overrideArgs, arg)
+		} else if fileName == "" {
+			fileName = arg
+		} else {
+			Logger.Fatal("Too many non-dashed command line parameters. Only one property file allowed.")
+		}
 	}
 
 	configuration := defaultConfiguration()
@@ -291,10 +319,12 @@ func Main(build string) {
 		Logger.Fatalf("Failed to read configuration: %v", err)
 	}
 	configuration = overrideConfiguration(configuration)
+	configuration = parseCommandLineOverrides(overrideArgs, configuration)
 	configuration = checkConfiguration(configuration)
 	config = configuration
 
 	if config.logFileName != "" {
+		Logger.Printf("pid:%d", os.Getpid())
 		Logger.Print("Configuring log to: " + config.logFileName)
 		if err := Logger.SetLogFile(config.logFileName); err != nil {
 			Logger.Fatal(err)
@@ -367,13 +397,19 @@ func Main(build string) {
 			receiver.Close()
 			return
 		case <-hup:
-			Logger.Printf("SIGHUP received: reopening logs for logrotate. New name: %s", config.logFileName)
+			Logger.Printf("SIGHUP received: reopening logs with name %s and reloading TLS certificates", config.logFileName)
 			if config.logFileName != "" {
+				Logger.Printf("Reopening logs for logrotate. New name: %s", config.logFileName)
 				if err := Logger.SetLogFile(config.logFileName); err != nil {
 					Logger.Errorf("Failed reopening log file: %v", err)
 				}
 			}
-			Logger.Printf("Logrotate completed")
+			if tcpAdapter, ok := receiver.(*TCPAdapter); ok {
+				if err := tcpAdapter.ReloadTLSCert(); err != nil {
+					Logger.Errorf("TLS certificate reload failed: %v", err)
+				}
+			}
+			Logger.Printf("SIGHUP handling completed")
 		case <-done:
 			Logger.Printf("RunDownstream finished, exiting")
 			sendMessage(protocol.TYPE_STATUS, "", config.topic,

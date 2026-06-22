@@ -60,6 +60,9 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.io.InputStream;
+import java.util.jar.Manifest;
+import java.util.jar.Attributes;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -67,6 +70,27 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.roaringbitmap.RoaringBitmap;
 
 public class PartitionDedupApp {
+    private static final String APP_VERSION;
+    private static final String BUILD_NUMBER;
+    static {
+        String ver = "unknown";
+        String build = "unknown";
+        try (InputStream is = PartitionDedupApp.class.getResourceAsStream("/META-INF/MANIFEST.MF")) {
+            if (is != null) {
+                Manifest mf = new Manifest(is);
+                Attributes attrs = mf.getMainAttributes();
+                String v = attrs.getValue("Implementation-Version");
+                String b = attrs.getValue("Build-Number");
+                if (v != null) ver = v;
+                if (b != null) build = b;
+            }
+        } catch (Exception e) {
+            // ignore; defaults remain "unknown"
+        }
+        APP_VERSION = ver;
+        BUILD_NUMBER = build;
+    }
+
     // Configurable window size and max windows for GapDetector
     public static final long WINDOW_SIZE = Long.parseLong(System.getenv().getOrDefault("WINDOW_SIZE", "1000"));
     public static final int MAX_WINDOWS = Integer.parseInt(System.getenv().getOrDefault("MAX_WINDOWS", "5"));
@@ -292,7 +316,7 @@ public class PartitionDedupApp {
     }
 
     public static void main(String[] args) {
-        System.out.println("Starting PartitionDedupApp... runId=" + RUN_ID);
+        System.out.println("Starting PartitionDedupApp " + APP_VERSION + " build " + BUILD_NUMBER + " ... runId=" + RUN_ID);
         Properties props = new Properties();
         props.put(StreamsConfig.APPLICATION_ID_CONFIG, APPLICATION_ID);
         props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
@@ -345,7 +369,7 @@ public class PartitionDedupApp {
 
         validateRuntimeConfiguration();
 
-        LOG.info("Starting PartitionDedupApp... runId={}", RUN_ID);
+        LOG.info("Starting PartitionDedupApp {} build {} ... runId={}", APP_VERSION, BUILD_NUMBER, RUN_ID);
 
         LOG.info("BOOTSTRAP_SERVERS={}", BOOTSTRAP_SERVERS);
         LOG.info("RAW_TOPICS={}", RAW_TOPICS);
@@ -1128,7 +1152,13 @@ public class PartitionDedupApp {
                         key,
                         parts.length);
                 totalNonStandardKeyPassthrough.merge(this.partition, 1L, Long::sum);
-                context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
+                // Don't forward empty payloads even for non-standard keys
+                boolean emptyPayload = (value == null || value.length == 0);
+                if (!emptyPayload) {
+                    context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
+                } else {
+                    LOG.trace("Dropping empty-payload non-standard key {}", key);
+                }
                 return;
             }
             String topic = parts[0];
@@ -1146,7 +1176,13 @@ public class PartitionDedupApp {
                         parts[2],
                         e.getMessage());
                 totalNonStandardKeyPassthrough.merge(this.partition, 1L, Long::sum);
-                context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
+                // Don't forward empty payloads even for non-standard keys
+                boolean emptyPayload = (value == null || value.length == 0);
+                if (!emptyPayload) {
+                    context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
+                } else {
+                    LOG.trace("Dropping empty-payload non-standard key {} (parse error)", key);
+                }
                 return;
             }
             LOG.trace("Processing record from topic={}, partition={}, offset={}", topic, partition, offset);

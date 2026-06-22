@@ -93,6 +93,10 @@ func getStartOffsetForResult(filterType string, result GapResult) int64 {
 			return result.Gaps[0][0]
 		}
 	case "all":
+		// Optimization: start from the first gap instead of offset 0
+		if len(result.Gaps) > 0 && len(result.Gaps[0]) > 0 {
+			return result.Gaps[0][0]
+		}
 		return 0
 	case "manual":
 		if len(result.Gaps) > 0 && len(result.Gaps[0]) > 0 {

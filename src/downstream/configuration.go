@@ -54,10 +54,19 @@ type TransferConfiguration struct {
 	keyPasswordFile       string            // File containing the password to decrypt the key file
 	maximumDecompressSize int
 	// Security limits - protect the downstream listening port from DoS
-	maxCacheEntries            int // Maximum in-flight fragment-reassembly entries (OOM protection)
-	maxNrMessages              int // Maximum nrMessages value accepted in a single packet
-	maxTCPConnections          int // Maximum concurrent TCP connections
-	keyExchangeMinIntervalSecs int // Minimum seconds between accepted KEY_EXCHANGE messages
+	maxCacheEntries            int  // Maximum in-flight fragment-reassembly entries (OOM protection)
+	maxNrMessages              int  // Maximum nrMessages value accepted in a single packet
+	maxTCPConnections          int  // Maximum concurrent TCP connections
+	keyExchangeMinIntervalSecs int  // Minimum seconds between accepted KEY_EXCHANGE messages
+	enableRxqOvfl              bool // Enable SO_RXQ_OVFL to track socket-level packet drops (has small performance overhead)
+	// TCP TLS settings
+	tcpTLSCertFile        string // server certificate file for TCP TLS
+	tcpTLSKeyFile         string // server private key file for TCP TLS
+	tcpTLSKeyPasswordFile string // password file for encrypted TCP TLS key
+	tcpTLSCAFile          string // CA certificate to verify client certs (mTLS)
+	tcpTLSClientAuth      string // client auth mode: "none" (default), "allow", "require"
+	tcpTLSClientCNRegex   string // regex to match client Common Name (used with allow/require)
+	tcpTLSCipherSuites    string // TLS protocol policy: empty or "TLS1.3" = TLS 1.3 only; comma-separated TLS 1.2 cipher names = TLS 1.2 with those suites
 }
 
 // Builder pattern setters for TransferConfiguration
@@ -156,6 +165,9 @@ func defaultConfiguration() TransferConfiguration {
 	config.maxNrMessages = int(protocol.DefaultMaxNrMessages)
 	config.maxTCPConnections = 256
 	config.keyExchangeMinIntervalSecs = 1
+	config.enableRxqOvfl = false     // default: disabled for maximum performance
+	config.tcpTLSClientAuth = "none" // default: no client authentication
+	config.tcpTLSCipherSuites = ""   // default: TLS 1.3 enforced
 	return config
 }
 
@@ -372,6 +384,39 @@ func readConfiguration(fileName string, result TransferConfiguration) (TransferC
 			}
 			result.keyExchangeMinIntervalSecs = tmp
 			Logger.Printf("keyExchangeMinIntervalSecs: %d", result.keyExchangeMinIntervalSecs)
+		case "enableRxqOvfl":
+			tmp := strings.ToLower(value)
+			if tmp != "true" && tmp != "false" {
+				Logger.Fatalf("Error in config enableRxqOvfl. Illegal value: %s. Legal values are true or false", value)
+			}
+			result.enableRxqOvfl = tmp == "true"
+			Logger.Printf("enableRxqOvfl: %t", result.enableRxqOvfl)
+		case "tcpTLSCertFile":
+			result.tcpTLSCertFile = value
+			Logger.Printf("tcpTLSCertFile: %s", value)
+		case "tcpTLSKeyFile":
+			result.tcpTLSKeyFile = value
+			Logger.Printf("tcpTLSKeyFile: %s", value)
+		case "tcpTLSKeyPasswordFile":
+			result.tcpTLSKeyPasswordFile = value
+		case "tcpTLSCAFile":
+			result.tcpTLSCAFile = value
+			Logger.Printf("tcpTLSCAFile: %s", value)
+		case "tcpTLSClientAuth":
+			mode := strings.ToLower(value)
+			switch mode {
+			case "none", "allow", "require":
+				result.tcpTLSClientAuth = mode
+				Logger.Printf("tcpTLSClientAuth: %s", mode)
+			default:
+				Logger.Fatalf("Error in config tcpTLSClientAuth. Illegal value: %s. Legal values are none, allow, require", value)
+			}
+		case "tcpTLSClientCNRegex":
+			result.tcpTLSClientCNRegex = value
+			Logger.Printf("tcpTLSClientCNRegex: %s", value)
+		case "tcpTLSCipherSuites":
+			result.tcpTLSCipherSuites = value
+			Logger.Printf("tcpTLSCipherSuites: %s", value)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -574,6 +619,48 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		Logger.Print("Overriding keyExchangeMinIntervalSecs with environment variable: " + prefix + "KEY_EXCHANGE_MIN_INTERVAL_SECS with value: " + v)
 		config.keyExchangeMinIntervalSecs = tmp
 	}
+	if v := os.Getenv(prefix + "ENABLE_RXQ_OVFL"); v != "" {
+		tmp := strings.ToLower(v)
+		if tmp != "true" && tmp != "false" {
+			Logger.Fatalf("Error in env var %sENABLE_RXQ_OVFL. Illegal value: %s. Legal values are true or false", prefix, v)
+		}
+		Logger.Print("Overriding enableRxqOvfl with environment variable: " + prefix + "ENABLE_RXQ_OVFL with value: " + v)
+		config.enableRxqOvfl = tmp == "true"
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_CERT_FILE"); v != "" {
+		Logger.Print("Overriding tcpTLSCertFile with environment variable: " + prefix + "TCP_TLS_CERT_FILE with value: " + v)
+		config.tcpTLSCertFile = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_KEY_FILE"); v != "" {
+		Logger.Print("Overriding tcpTLSKeyFile with environment variable: " + prefix + "TCP_TLS_KEY_FILE with value: " + v)
+		config.tcpTLSKeyFile = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_KEY_PASSWORD_FILE"); v != "" {
+		Logger.Print("Overriding tcpTLSKeyPasswordFile with environment variable: " + prefix + "TCP_TLS_KEY_PASSWORD_FILE")
+		config.tcpTLSKeyPasswordFile = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_CA_FILE"); v != "" {
+		Logger.Print("Overriding tcpTLSCAFile with environment variable: " + prefix + "TCP_TLS_CA_FILE with value: " + v)
+		config.tcpTLSCAFile = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_CLIENT_AUTH"); v != "" {
+		mode := strings.ToLower(v)
+		switch mode {
+		case "none", "allow", "require":
+			Logger.Print("Overriding tcpTLSClientAuth with environment variable: " + prefix + "TCP_TLS_CLIENT_AUTH with value: " + v)
+			config.tcpTLSClientAuth = mode
+		default:
+			Logger.Fatalf("Error in env var %sTCP_TLS_CLIENT_AUTH. Illegal value: %s. Legal values are none, allow, require", prefix, v)
+		}
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_CLIENT_CN_REGEX"); v != "" {
+		Logger.Print("Overriding tcpTLSClientCNRegex with environment variable: " + prefix + "TCP_TLS_CLIENT_CN_REGEX with value: " + v)
+		config.tcpTLSClientCNRegex = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_CIPHER_SUITES"); v != "" {
+		Logger.Print("Overriding tcpTLSCipherSuites with environment variable: " + prefix + "TCP_TLS_CIPHER_SUITES with value: " + v)
+		config.tcpTLSCipherSuites = v
+	}
 	return config
 }
 
@@ -611,6 +698,192 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Printf("  maxNrMessages: %d", config.maxNrMessages)
 	Logger.Printf("  maxTCPConnections: %d", config.maxTCPConnections)
 	Logger.Printf("  keyExchangeMinIntervalSecs: %d", config.keyExchangeMinIntervalSecs)
+	Logger.Printf("  enableRxqOvfl: %t", config.enableRxqOvfl)
+	if config.transport == "tcp" && config.tcpTLSCertFile != "" {
+		Logger.Printf("  tcpTLSCertFile: %s", config.tcpTLSCertFile)
+		Logger.Printf("  tcpTLSKeyFile: %s", config.tcpTLSKeyFile)
+		Logger.Printf("  tcpTLSCAFile: %s", config.tcpTLSCAFile)
+		Logger.Printf("  tcpTLSClientAuth: %s", config.tcpTLSClientAuth)
+		if config.tcpTLSClientCNRegex != "" {
+			Logger.Printf("  tcpTLSClientCNRegex: %s", config.tcpTLSClientCNRegex)
+		}
+		upper := strings.ToUpper(strings.TrimSpace(config.tcpTLSCipherSuites))
+		if upper == "" || upper == "TLS1.3" {
+			Logger.Printf("  tcpTLS protocol: TLS 1.3 (enforced)")
+		} else {
+			Logger.Printf("  tcpTLS protocol: TLS 1.2 with cipher suites: %s", config.tcpTLSCipherSuites)
+		}
+	}
+}
+
+// parseCommandLineOverrides parses --name=value arguments and applies them to the config struct.
+func parseCommandLineOverrides(args []string, config TransferConfiguration) TransferConfiguration {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		kv := strings.SplitN(arg[2:], "=", 2)
+		if len(kv) != 2 {
+			Logger.Warnf("Ignoring malformed command line override: %s", arg)
+			continue
+		}
+		key := kv[0]
+		value := kv[1]
+		switch key {
+		case "id":
+			config.id = value
+		case "nic":
+			config.nic = value
+		case "targetIP":
+			config.targetIP = value
+		case "targetPort":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 || v > 65535 {
+				Logger.Fatalf("Error parsing --targetPort: %s", value)
+			}
+			config.targetPort = v
+		case "bootstrapServers":
+			config.bootstrapServers = value
+		case "mtu":
+			if value == "auto" {
+				config.mtu = 0
+			} else {
+				v, err := strconv.Atoi(value)
+				if err != nil || v < 0 || v > 65535 {
+					Logger.Fatalf("Error parsing --mtu: %s", value)
+				}
+				// codeql[incorrect-integer-conversion]: value is checked to fit in uint16 above
+				config.mtu = uint16(v)
+			}
+		case "privateKeyFiles":
+			config.privateKeyGlob = value
+		case "target":
+			switch value {
+			case "kafka", "cmd", "null":
+				config.target = value
+			default:
+				Logger.Fatalf("Unknown --target %s. Legal values are: kafka, cmd, null", value)
+			}
+		case "transport":
+			t := strings.ToLower(value)
+			if t != "udp" && t != "tcp" {
+				Logger.Fatalf("Unknown --transport %s. Legal values are: udp, tcp", value)
+			}
+			config.transport = t
+		case "logLevel":
+			config.logLevel = strings.ToUpper(value)
+		case "logFileName":
+			config.logFileName = value
+		case "certFile":
+			config.certFile = value
+		case "keyFile":
+			config.keyFile = value
+		case "caFile":
+			config.caFile = value
+		case "keyPasswordFile":
+			config.keyPasswordFile = value
+		case "topicTranslations":
+			config.topicTranslations = value
+		case "logStatistics":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 || v > 60 {
+				Logger.Fatalf("Error parsing --logStatistics: %s", value)
+			}
+			config.logStatistics = int32(v)
+		case "numReceivers":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 1 {
+				Logger.Fatalf("Error parsing --numReceivers: %s", value)
+			}
+			config.numReceivers = v
+		case "channelBufferSize":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 1 {
+				Logger.Fatalf("Error parsing --channelBufferSize: %s", value)
+			}
+			config.channelBufferSize = v
+		case "batchSize":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 1 || v > 512 {
+				Logger.Fatalf("Error parsing --batchSize: %s", value)
+			}
+			config.batchSize = v
+		case "readBufferMultiplier":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 1 || v > 65535 {
+				Logger.Fatalf("Error parsing --readBufferMultiplier: %s", value)
+			}
+			// codeql[incorrect-integer-conversion]: value is checked to fit in uint16 above
+			config.readBufferMultiplier = uint16(v)
+		case "rcvBufSize":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 1 {
+				Logger.Fatalf("Error parsing --rcvBufSize: %s", value)
+			}
+			config.rcvBufSize = v
+		case "internalTopic":
+			config.topic = value
+		case "maximumDecompressSize":
+			v, err := convertUnitSufix(value)
+			if err != nil {
+				Logger.Fatalf("Error parsing --maximumDecompressSize: %s", value)
+			}
+			config.maximumDecompressSize = v
+		case "maxCacheEntries":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 1 {
+				Logger.Fatalf("Error parsing --maxCacheEntries: %s", value)
+			}
+			config.maxCacheEntries = v
+		case "maxNrMessages":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 1 || v > 65535 {
+				Logger.Fatalf("Error parsing --maxNrMessages: %s", value)
+			}
+			config.maxNrMessages = v
+		case "maxTCPConnections":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 1 {
+				Logger.Fatalf("Error parsing --maxTCPConnections: %s", value)
+			}
+			config.maxTCPConnections = v
+		case "keyExchangeMinIntervalSecs":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 {
+				Logger.Fatalf("Error parsing --keyExchangeMinIntervalSecs: %s", value)
+			}
+			config.keyExchangeMinIntervalSecs = v
+		case "enableRxqOvfl":
+			v, err := strconv.ParseBool(value)
+			if err != nil {
+				Logger.Fatalf("Error parsing --enableRxqOvfl: %s. Legal values are true or false", value)
+			}
+			config.enableRxqOvfl = v
+		case "tcpTLSCertFile":
+			config.tcpTLSCertFile = value
+		case "tcpTLSKeyFile":
+			config.tcpTLSKeyFile = value
+		case "tcpTLSKeyPasswordFile":
+			config.tcpTLSKeyPasswordFile = value
+		case "tcpTLSCAFile":
+			config.tcpTLSCAFile = value
+		case "tcpTLSClientAuth":
+			mode := strings.ToLower(value)
+			switch mode {
+			case "none", "allow", "require":
+				config.tcpTLSClientAuth = mode
+			default:
+				Logger.Fatalf("Error in --tcpTLSClientAuth. Illegal value: %s. Legal values are none, allow, require", value)
+			}
+		case "tcpTLSClientCNRegex":
+			config.tcpTLSClientCNRegex = value
+		case "tcpTLSCipherSuites":
+			config.tcpTLSCipherSuites = value
+		default:
+			Logger.Warnf("Unknown command line override: --%s", key)
+		}
+	}
+	return config
 }
 
 // Check the configuration. On fail, will terminate the application
@@ -695,6 +968,27 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	}
 	if result.rcvBufSize < 1 {
 		Logger.Fatal("Invalid configuration: rcvBufSize must be a positive integer")
+	}
+	// Validate TCP TLS settings
+	if result.tcpTLSCertFile != "" || result.tcpTLSKeyFile != "" {
+		if result.tcpTLSCertFile == "" {
+			Logger.Fatal("Missing required configuration: tcpTLSCertFile (required when tcpTLSKeyFile is set)")
+		}
+		if result.tcpTLSKeyFile == "" {
+			Logger.Fatal("Missing required configuration: tcpTLSKeyFile (required when tcpTLSCertFile is set)")
+		}
+	}
+	if result.tcpTLSClientAuth != "none" && result.tcpTLSClientAuth != "allow" && result.tcpTLSClientAuth != "require" {
+		Logger.Fatalf("Invalid tcpTLSClientAuth '%s'. Legal values are: none, allow, require", result.tcpTLSClientAuth)
+	}
+	if (result.tcpTLSClientAuth == "allow" || result.tcpTLSClientAuth == "require") && result.tcpTLSCAFile == "" {
+		Logger.Fatal("Missing required configuration: tcpTLSCAFile (required when tcpTLSClientAuth is allow or require)")
+	}
+	if result.tcpTLSClientAuth != "none" && result.transport != "tcp" {
+		Logger.Fatal("Error: tcpTLSClientAuth requires transport=tcp")
+	}
+	if result.tcpTLSCertFile != "" && result.transport != "tcp" {
+		Logger.Fatal("Error: tcpTLSCertFile requires transport=tcp")
 	}
 
 	logConfiguration(result)

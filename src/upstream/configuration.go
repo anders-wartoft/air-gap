@@ -55,6 +55,13 @@ type TransferConfiguration struct {
 	tcpRetryInterval             int                      // milliseconds between TCP send retries (default 1000)
 	tcpRetryTimes                int                      // max TCP send retries, 0 = infinite (default 0)
 	tcpRetryErrorLevel           string                   // log level for TCP retry messages (default "WARN")
+	tcpTLSEnabled                bool                     // enable TLS for TCP transport (default false)
+	tcpTLSCertFile               string                   // client certificate file for TCP mTLS
+	tcpTLSKeyFile                string                   // client private key file for TCP mTLS
+	tcpTLSKeyPasswordFile        string                   // password file for encrypted TCP TLS key
+	tcpTLSCAFile                 string                   // CA certificate file to verify downstream server cert
+	tcpTLSServerCNRegex          string                   // regex matched against server certificate CN; allows IP-based connections and load-balanced setups
+	tcpTLSCipherSuites           string                   // TLS protocol policy: empty or "TLS1.3" = TLS 1.3 only; comma-separated TLS 1.2 cipher names = TLS 1.2 with those suites
 }
 
 func DefaultConfiguration() TransferConfiguration {
@@ -77,6 +84,8 @@ func DefaultConfiguration() TransferConfiguration {
 	config.tcpRetryInterval = 1000     // default: 1 second between retries
 	config.tcpRetryTimes = 0           // default: infinite retries
 	config.tcpRetryErrorLevel = "WARN" // default: warn level for retry errors
+	config.tcpTLSEnabled = false       // default: plain TCP
+	config.tcpTLSCipherSuites = ""     // default: TLS 1.3 enforced
 	return config
 }
 
@@ -323,6 +332,35 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 			default:
 				Logger.Fatalf("Error in config tcpRetryErrorLevel. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR", value)
 			}
+		case "tcpTLSEnabled":
+			tmp, err := strconv.ParseBool(value)
+			if err != nil {
+				Logger.Fatalf("Error in config tcpTLSEnabled. Illegal value: %s. Legal values are true or false", value)
+			} else {
+				result.tcpTLSEnabled = tmp
+				Logger.Printf("tcpTLSEnabled: %t", tmp)
+			}
+		case "tcpTLSCertFile":
+			result.tcpTLSCertFile = value
+			Logger.Printf("tcpTLSCertFile: %s", value)
+		case "tcpTLSKeyFile":
+			result.tcpTLSKeyFile = value
+			Logger.Printf("tcpTLSKeyFile: %s", value)
+		case "tcpTLSKeyPasswordFile":
+			result.tcpTLSKeyPasswordFile = value
+		case "tcpTLSCAFile":
+			result.tcpTLSCAFile = value
+			Logger.Printf("tcpTLSCAFile: %s", value)
+		case "tcpTLSServerName":
+			// Legacy name, still accepted
+			result.tcpTLSServerCNRegex = value
+			Logger.Printf("tcpTLSServerCNRegex (via tcpTLSServerName): %s", value)
+		case "tcpTLSServerCNRegex":
+			result.tcpTLSServerCNRegex = value
+			Logger.Printf("tcpTLSServerCNRegex: %s", value)
+		case "tcpTLSCipherSuites":
+			result.tcpTLSCipherSuites = value
+			Logger.Printf("tcpTLSCipherSuites: %s", value)
 		default:
 			Logger.Fatalf("Unknown configuration key: %s", key)
 		}
@@ -534,7 +572,209 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			Logger.Fatalf("Error in environment variable AIRGAP_UPSTREAM_TCP_RETRY_ERROR_LEVEL. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR", tcpRetryErrorLevel)
 		}
 	}
+	if v := os.Getenv(prefix + "TCP_TLS_ENABLED"); v != "" {
+		tmp, err := strconv.ParseBool(v)
+		if err != nil {
+			Logger.Fatalf("Error in environment variable %sTCP_TLS_ENABLED. Illegal value: %s. Legal values are true or false", prefix, v)
+		}
+		Logger.Print("Overriding tcpTLSEnabled with environment variable: " + prefix + "TCP_TLS_ENABLED with value: " + v)
+		config.tcpTLSEnabled = tmp
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_CERT_FILE"); v != "" {
+		Logger.Print("Overriding tcpTLSCertFile with environment variable: " + prefix + "TCP_TLS_CERT_FILE with value: " + v)
+		config.tcpTLSCertFile = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_KEY_FILE"); v != "" {
+		Logger.Print("Overriding tcpTLSKeyFile with environment variable: " + prefix + "TCP_TLS_KEY_FILE with value: " + v)
+		config.tcpTLSKeyFile = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_KEY_PASSWORD_FILE"); v != "" {
+		Logger.Print("Overriding tcpTLSKeyPasswordFile with environment variable: " + prefix + "TCP_TLS_KEY_PASSWORD_FILE")
+		config.tcpTLSKeyPasswordFile = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_CA_FILE"); v != "" {
+		Logger.Print("Overriding tcpTLSCAFile with environment variable: " + prefix + "TCP_TLS_CA_FILE with value: " + v)
+		config.tcpTLSCAFile = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_SERVER_NAME"); v != "" {
+		Logger.Print("Overriding tcpTLSServerCNRegex with environment variable: " + prefix + "TCP_TLS_SERVER_NAME with value: " + v)
+		config.tcpTLSServerCNRegex = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_SERVER_CN_REGEX"); v != "" {
+		Logger.Print("Overriding tcpTLSServerCNRegex with environment variable: " + prefix + "TCP_TLS_SERVER_CN_REGEX with value: " + v)
+		config.tcpTLSServerCNRegex = v
+	}
+	if v := os.Getenv(prefix + "TCP_TLS_CIPHER_SUITES"); v != "" {
+		Logger.Print("Overriding tcpTLSCipherSuites with environment variable: " + prefix + "TCP_TLS_CIPHER_SUITES with value: " + v)
+		config.tcpTLSCipherSuites = v
+	}
 
+	return config
+}
+
+// parseCommandLineOverrides parses --name=value arguments and applies them to the config struct.
+func parseCommandLineOverrides(args []string, config TransferConfiguration) TransferConfiguration {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		kv := strings.SplitN(arg[2:], "=", 2)
+		if len(kv) != 2 {
+			Logger.Warnf("Ignoring malformed command line override: %s", arg)
+			continue
+		}
+		key := kv[0]
+		value := kv[1]
+		switch key {
+		case "id":
+			config.id = value
+		case "nic":
+			config.nic = value
+		case "targetIP":
+			config.targetIP = value
+		case "targetPort":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 || v > 65535 {
+				Logger.Fatalf("Error parsing --targetPort: %s", value)
+			}
+			config.targetPort = v
+		case "transport":
+			t := strings.ToLower(value)
+			if t != "udp" && t != "tcp" {
+				Logger.Fatalf("Unknown --transport %s. Legal values are: udp, tcp", value)
+			}
+			config.transport = t
+		case "bootstrapServers":
+			config.bootstrapServers = value
+		case "topic":
+			config.topic = value
+		case "groupID":
+			config.groupID = value
+		case "payloadSize":
+			if value == "auto" {
+				config.payloadSize = 0
+			} else {
+				v, err := strconv.Atoi(value)
+				if err != nil || v < 0 || v > 65535 {
+					Logger.Fatalf("Error parsing --payloadSize: %s", value)
+				}
+				// codeql[incorrect-integer-conversion]: value is checked to fit in uint16 above
+				config.payloadSize = uint16(v)
+			}
+		case "topicTranslations":
+			config.topicTranslations = value
+		case "from":
+			config.from = value
+		case "encryption":
+			config.encryption = strings.ToLower(value) == "true"
+		case "publicKeyFile":
+			config.publicKeyFile = value
+		case "generateNewSymmetricKeyEvery":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 {
+				Logger.Fatalf("Error parsing --generateNewSymmetricKeyEvery: %s", value)
+			}
+			config.generateNewSymmetricKeyEvery = v
+		case "logLevel":
+			config.logLevel = strings.ToUpper(value)
+		case "logFileName":
+			config.logFileName = value
+		case "sendingThreads":
+			if err := json.Unmarshal([]byte(value), &config.sendingThreads); err != nil {
+				Logger.Fatalf("Error parsing --sendingThreads: %v", err)
+			}
+		case "certFile":
+			config.certFile = value
+		case "keyFile":
+			config.keyFile = value
+		case "caFile":
+			config.caFile = value
+		case "keyPasswordFile":
+			config.keyPasswordFile = value
+		case "source":
+			config.source = value
+		case "deliverFilter":
+			config.deliverFilter = value
+		case "logStatistics":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 {
+				Logger.Fatalf("Error parsing --logStatistics: %s", value)
+			}
+			if v > math.MaxInt32 {
+				Logger.Fatalf("Error parsing --logStatistics: value %d exceeds max int32", v)
+			}
+			// codeql[incorrect-integer-conversion]: value is checked to fit in int32 above
+			config.logStatistics = int32(v)
+		case "compressWhenLengthExceeds":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 {
+				Logger.Fatalf("Error parsing --compressWhenLengthExceeds: %s", value)
+			}
+			config.compressWhenLengthExceeds = v
+		case "inputFilterRules":
+			config.inputFilterRules = value
+		case "inputFilterDefaultAction":
+			config.inputFilterDefaultAction = strings.ToLower(value)
+		case "inputFilterTimeout":
+			v, err := strconv.Atoi(value)
+			if err != nil || v <= 0 {
+				Logger.Fatalf("Error parsing --inputFilterTimeout: %s", value)
+			}
+			config.inputFilterTimeout = v
+		case "partitionStartValue":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 {
+				Logger.Fatalf("Error parsing --partitionStartValue: %s", value)
+			}
+			config.partitionStartValue = v
+		case "eps":
+			v, err := strconv.ParseFloat(value, 64)
+			if err != nil || v < -1 {
+				Logger.Fatalf("Error parsing --eps: %s. Legal values are float >= -1", value)
+			}
+			config.eps = v
+		case "tcpRetryInterval":
+			v, err := strconv.Atoi(value)
+			if err != nil || v <= 0 {
+				Logger.Fatalf("Error parsing --tcpRetryInterval: %s", value)
+			}
+			config.tcpRetryInterval = v
+		case "tcpRetryTimes":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 {
+				Logger.Fatalf("Error parsing --tcpRetryTimes: %s", value)
+			}
+			config.tcpRetryTimes = v
+		case "tcpRetryErrorLevel":
+			level := strings.ToUpper(value)
+			switch level {
+			case "DEBUG", "INFO", "WARN", "ERROR":
+				config.tcpRetryErrorLevel = level
+			default:
+				Logger.Fatalf("Error in --tcpRetryErrorLevel. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR", value)
+			}
+		case "tcpTLSEnabled":
+			v, err := strconv.ParseBool(value)
+			if err != nil {
+				Logger.Fatalf("Error parsing --tcpTLSEnabled: %s. Legal values are true or false", value)
+			}
+			config.tcpTLSEnabled = v
+		case "tcpTLSCertFile":
+			config.tcpTLSCertFile = value
+		case "tcpTLSKeyFile":
+			config.tcpTLSKeyFile = value
+		case "tcpTLSKeyPasswordFile":
+			config.tcpTLSKeyPasswordFile = value
+		case "tcpTLSCAFile":
+			config.tcpTLSCAFile = value
+		case "tcpTLSServerName", "tcpTLSServerCNRegex":
+			config.tcpTLSServerCNRegex = value
+		case "tcpTLSCipherSuites":
+			config.tcpTLSCipherSuites = value
+		default:
+			Logger.Warnf("Unknown command line override: --%s", key)
+		}
+	}
 	return config
 }
 
@@ -664,6 +904,23 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	default:
 		Logger.Fatalf("Error in config tcpRetryErrorLevel. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR", result.tcpRetryErrorLevel)
 	}
+	// Validate TCP TLS configuration
+	if result.tcpTLSEnabled {
+		if result.transport != "tcp" {
+			Logger.Fatal("Error: tcpTLSEnabled=true requires transport=tcp")
+		}
+		if result.tcpTLSCAFile == "" {
+			Logger.Fatal("Missing required configuration: tcpTLSCAFile (required when tcpTLSEnabled=true)")
+		}
+	}
+	if result.tcpTLSCertFile != "" || result.tcpTLSKeyFile != "" {
+		if result.tcpTLSCertFile == "" {
+			Logger.Fatal("Missing required configuration: tcpTLSCertFile (required when tcpTLSKeyFile is set)")
+		}
+		if result.tcpTLSKeyFile == "" {
+			Logger.Fatal("Missing required configuration: tcpTLSKeyFile (required when tcpTLSCertFile is set)")
+		}
+	}
 	// Set up a filtering scheme, if configured. You can filter every other, third, fifth message etc
 	// by setting filterConfig to a string like "2,3,22,23,42,43". This will send messages 2 and 3
 	// of every group of 23 messages. The last group (42,43) is just to verify that the user has
@@ -697,6 +954,7 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		result.inputFilter = nil
 		Logger.Printf("No input filtering is enabled.")
 	}
+	Logger.Printf("pid:%d", os.Getpid())
 
 	return result
 }
@@ -750,5 +1008,20 @@ func logConfiguration(config TransferConfiguration) {
 		Logger.Printf("  tcpRetryInterval: %dms", config.tcpRetryInterval)
 		Logger.Printf("  tcpRetryTimes: %s", tcpRetryTimesStr)
 		Logger.Printf("  tcpRetryErrorLevel: %s", config.tcpRetryErrorLevel)
+		Logger.Printf("  tcpTLSEnabled: %t", config.tcpTLSEnabled)
+		if config.tcpTLSEnabled {
+			Logger.Printf("  tcpTLSCertFile: %s", config.tcpTLSCertFile)
+			Logger.Printf("  tcpTLSKeyFile: %s", config.tcpTLSKeyFile)
+			Logger.Printf("  tcpTLSCAFile: %s", config.tcpTLSCAFile)
+			if config.tcpTLSServerCNRegex != "" {
+				Logger.Printf("  tcpTLSServerCNRegex: %s", config.tcpTLSServerCNRegex)
+			}
+			upper := strings.ToUpper(strings.TrimSpace(config.tcpTLSCipherSuites))
+			if upper == "" || upper == "TLS1.3" {
+				Logger.Printf("  tcpTLS protocol: TLS 1.3 (enforced)")
+			} else {
+				Logger.Printf("  tcpTLS protocol: TLS 1.2 with cipher suites: %s", config.tcpTLSCipherSuites)
+			}
+		}
 	}
 }

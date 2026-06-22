@@ -2,9 +2,14 @@ package downstream
 
 import (
 	"bufio"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +33,7 @@ func NewUDPAdapter(config TransferConfiguration) *UDPAdapter {
 		config.numReceivers,
 		config.channelBufferSize,
 		config.readBufferMultiplier,
+		config.enableRxqOvfl,
 	)
 
 	return a
@@ -39,8 +45,9 @@ func (a *UDPAdapter) Setup(
 	numReceivers int,
 	channelBufferSize int,
 	readBufferMultiplier uint16,
+	enableRxqOvfl bool,
 ) {
-	a.inner.Setup(mtu, numReceivers, channelBufferSize, readBufferMultiplier)
+	a.inner.Setup(mtu, numReceivers, channelBufferSize, readBufferMultiplier, enableRxqOvfl)
 }
 
 // Listen delegates to UDPAdapterLinux.Listen, converting stopChan to a proper channel.
@@ -81,14 +88,145 @@ type TCPAdapter struct {
 	closed         bool
 	closeMutex     sync.Mutex
 	activeConns    atomic.Int64
-	maxConnections int // configured via maxTCPConnections; caps goroutine exhaustion
+	maxConnections int            // configured via maxTCPConnections; caps goroutine exhaustion
+	tlsConfig      *tls.Config    // nil for plain TCP
+	clientCNRegex  *regexp.Regexp // nil if no CN validation required
+	// TLS cert hot-reload: file paths stored so ReloadTLSCert can re-read them on SIGHUP
+	certFile        string
+	keyFile         string
+	keyPasswordFile string
+	certPtr         atomic.Pointer[tls.Certificate] // serves every new TLS handshake
+}
+
+// buildDownstreamTLSConfig constructs a *tls.Config for the downstream TCP server.
+// certFile and keyFile are required. caFile is required when clientAuth is "allow" or "require".
+//
+// cipherSuites controls the TLS protocol version policy:
+//   - empty string or "TLS1.3" → enforce TLS 1.3 only (recommended, NIST-approved suites only)
+//   - comma-separated cipher suite names → use TLS 1.2 with those specific NIST-approved suites;
+//     only names from crypto/tls.CipherSuites() are accepted
+func buildDownstreamTLSConfig(certFile, keyFile, keyPasswordFile, caFile, clientAuth, cipherSuites string) (*tls.Config, error) {
+	cert, err := kafka.LoadTLSCertificate(certFile, keyFile, keyPasswordFile)
+	if err != nil {
+		return nil, fmt.Errorf("tcpTLS: failed to load server certificate: %w", err)
+	}
+
+	cfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	// Apply TLS version and cipher suite policy
+	upper := strings.ToUpper(strings.TrimSpace(cipherSuites))
+	if upper == "" || upper == "TLS1.3" {
+		// Enforce TLS 1.3 only. Cipher suites for 1.3 are fixed by the standard
+		// (TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256)
+		// and cannot be configured — all are NIST-approved.
+		cfg.MinVersion = tls.VersionTLS13
+	} else {
+		// TLS 1.2 with caller-specified NIST-approved cipher suites
+		cfg.MinVersion = tls.VersionTLS12
+		ids, err := parseDownstreamCipherSuites(cipherSuites)
+		if err != nil {
+			return nil, fmt.Errorf("tcpTLS: %w", err)
+		}
+		cfg.CipherSuites = ids
+	}
+
+	// Set client auth policy
+	switch clientAuth {
+	case "require":
+		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+	case "allow":
+		cfg.ClientAuth = tls.RequestClientCert
+	default: // "none"
+		cfg.ClientAuth = tls.NoClientCert
+	}
+
+	// Load CA pool for verifying client certificates
+	if caFile != "" {
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("tcpTLS: failed to read CA file %q: %w", caFile, err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("tcpTLS: no valid CA certificates found in %q", caFile)
+		}
+		cfg.ClientCAs = caPool
+	}
+
+	return cfg, nil
+}
+
+// parseDownstreamCipherSuites converts a comma-separated list of cipher suite names to IDs.
+// Only cipher suites from tls.CipherSuites() (Go's secure list) are accepted.
+func parseDownstreamCipherSuites(csv string) ([]uint16, error) {
+	secure := tls.CipherSuites()
+	byName := make(map[string]uint16, len(secure))
+	for _, cs := range secure {
+		byName[cs.Name] = cs.ID
+	}
+	var ids []uint16
+	for _, name := range strings.Split(csv, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		id, ok := byName[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown or insecure cipher suite %q; use a name from crypto/tls.CipherSuites()", name)
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("tcpTLSCipherSuites is set but contains no valid entries")
+	}
+	return ids, nil
 }
 
 // NewTCPAdapter creates a new TCP receiver adapter
 func NewTCPAdapter(config TransferConfiguration) *TCPAdapter {
-	return &TCPAdapter{
+	adapter := &TCPAdapter{
 		maxConnections: config.maxTCPConnections,
 	}
+
+	if config.tcpTLSCertFile != "" {
+		tlsCfg, err := buildDownstreamTLSConfig(
+			config.tcpTLSCertFile,
+			config.tcpTLSKeyFile,
+			config.tcpTLSKeyPasswordFile,
+			config.tcpTLSCAFile,
+			config.tcpTLSClientAuth,
+			config.tcpTLSCipherSuites,
+		)
+		if err != nil {
+			Logger.Fatalf("Error building TCP TLS configuration: %v", err)
+		}
+		// Store cert files for hot-reload on SIGHUP
+		adapter.certFile = config.tcpTLSCertFile
+		adapter.keyFile = config.tcpTLSKeyFile
+		adapter.keyPasswordFile = config.tcpTLSKeyPasswordFile
+		// Move the initial cert into the atomic pointer and wire up GetCertificate
+		// so every new handshake picks up the latest cert without restarting.
+		initialCert := tlsCfg.Certificates[0]
+		adapter.certPtr.Store(&initialCert)
+		tlsCfg.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return adapter.certPtr.Load(), nil
+		}
+		tlsCfg.Certificates = nil
+		adapter.tlsConfig = tlsCfg
+		Logger.Printf("TCP TLS configured: clientAuth=%s", config.tcpTLSClientAuth)
+	}
+
+	if config.tcpTLSClientCNRegex != "" {
+		re, err := regexp.Compile(config.tcpTLSClientCNRegex)
+		if err != nil {
+			Logger.Fatalf("Invalid tcpTLSClientCNRegex %q: %v", config.tcpTLSClientCNRegex, err)
+		}
+		adapter.clientCNRegex = re
+	}
+
+	return adapter
 }
 
 // Setup initializes the TCP adapter (no-op for TCP as it doesn't need tuning like UDP)
@@ -97,6 +235,7 @@ func (t *TCPAdapter) Setup(
 	_ int,
 	_ int,
 	_ uint16,
+	_ bool, // enableRxqOvfl unused for TCP
 ) {
 	// TCP doesn't require setup tuning like UDP does
 }
@@ -113,14 +252,24 @@ func (t *TCPAdapter) Listen(
 	_ int, // numReceivers unused for TCP
 ) {
 	addr := fmt.Sprintf("%s:%d", ip, port)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		Logger.Fatalf("Failed to listen on TCP %s: %v", addr, err)
+	var listener net.Listener
+	var err error
+	if t.tlsConfig != nil {
+		listener, err = tls.Listen("tcp", addr, t.tlsConfig)
+		if err != nil {
+			Logger.Fatalf("Failed to listen on TLS TCP %s: %v", addr, err)
+		}
+		Logger.Infof("TLS TCP listener started on %s", addr)
+	} else {
+		listener, err = net.Listen("tcp", addr)
+		if err != nil {
+			Logger.Fatalf("Failed to listen on TCP %s: %v", addr, err)
+		}
+		Logger.Infof("TCP listener started on %s", addr)
 	}
 
 	t.listener = listener
 	t.stopChan = stopChan
-	Logger.Infof("TCP listener started on %s", addr)
 
 	// Accept connections in a goroutine
 	t.wg.Add(1)
@@ -133,8 +282,13 @@ func (t *TCPAdapter) Listen(
 			default:
 			}
 
-			// Set a timeout for Accept so we can check stopChan periodically
-			listener.(*net.TCPListener).SetDeadline(time.Now().Add(1 * time.Second))
+			// Set a timeout for Accept so we can check stopChan periodically.
+			// For TLS listeners the underlying type is *tls.listener (not *net.TCPListener),
+			// so we use the net.Listener SetDeadline method via a type assertion to net.Conn,
+			// or simply call the listener's own deadline setter.
+			if dl, ok := listener.(interface{ SetDeadline(time.Time) error }); ok {
+				dl.SetDeadline(time.Now().Add(1 * time.Second))
+			}
 
 			conn, err := listener.Accept()
 			if err != nil {
@@ -157,10 +311,77 @@ func (t *TCPAdapter) Listen(
 				Logger.Warnf("Max TCP connections (%d) reached, rejecting connection from %s", t.maxConnections, conn.RemoteAddr())
 				continue
 			}
+			Logger.Debugf("[TLS downstream] Accepted TCP connection from %s (active: %d)", conn.RemoteAddr(), t.activeConns.Load())
 			t.wg.Add(1)
 			go t.handleConnection(conn, callback, stopChan)
 		}
 	}()
+}
+
+// tlsVersionName returns a human-readable TLS version string for a ConnectionState.Version value.
+func tlsVersionName(v uint16) string {
+	switch v {
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	default:
+		return fmt.Sprintf("TLS 0x%04x", v)
+	}
+}
+
+// ReloadTLSCert re-reads the server certificate and key from disk and atomically
+// replaces the live certificate. Existing connections are not affected; the new
+// cert is used for every handshake that starts after this call returns.
+// Intended to be called from the SIGHUP handler.
+func (t *TCPAdapter) ReloadTLSCert() error {
+	if t.tlsConfig == nil {
+		return nil // TLS not enabled
+	}
+	cert, err := kafka.LoadTLSCertificate(t.certFile, t.keyFile, t.keyPasswordFile)
+	if err != nil {
+		return fmt.Errorf("[TLS downstream] certificate reload failed: %w", err)
+	}
+	t.certPtr.Store(&cert)
+	Logger.Infof("[TLS downstream] Server certificate reloaded from %s", t.certFile)
+	return nil
+}
+
+// logTLSHandshakeError logs a TLS handshake failure with a human-readable hint.
+func logTLSHandshakeError(remoteAddr string, err error) {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "RSA key larger than"):
+		Logger.Errorf("[TLS downstream] Handshake failed from %s: client certificate has an oversized RSA key — regenerate with a 2048- or 4096-bit key (%s)", remoteAddr, msg)
+	case strings.Contains(msg, "certificate has expired") || strings.Contains(msg, "certificate is not yet valid"):
+		Logger.Errorf("[TLS downstream] Handshake failed from %s: certificate validity period error — check system clock and certificate dates (%s)", remoteAddr, msg)
+	case strings.Contains(msg, "certificate signed by unknown authority") || strings.Contains(msg, "x509: "):
+		Logger.Errorf("[TLS downstream] Handshake failed from %s: certificate chain error — check tcpTLSCAFile matches the client's issuing CA (%s)", remoteAddr, msg)
+	case strings.Contains(msg, "bad certificate") || strings.Contains(msg, "unknown certificate"):
+		Logger.Warnf("[TLS downstream] Handshake failed from %s: remote rejected our server certificate — check tcpTLSCertFile/tcpTLSKeyFile on this side (%s)", remoteAddr, msg)
+	case strings.Contains(msg, "no certificate"):
+		Logger.Warnf("[TLS downstream] Handshake failed from %s: client sent no certificate (clientAuth=require needs a client cert) (%s)", remoteAddr, msg)
+	default:
+		Logger.Warnf("[TLS downstream] Handshake failed from %s: %s", remoteAddr, msg)
+	}
+}
+
+// logClientKeyInfo logs the public key type and size of a peer certificate at DEBUG level.
+func logClientKeyInfo(cert *x509.Certificate) {
+	switch pub := cert.PublicKey.(type) {
+	case interface{ Size() int }: // *rsa.PublicKey
+		bits := pub.Size() * 8
+		Logger.Debugf("[TLS downstream] Client cert public key: RSA %d-bit", bits)
+		if bits > 8192 {
+			Logger.Errorf("[TLS downstream] Client cert RSA key is %d bits — Go rejects RSA keys > 8192 bits. Regenerate the client certificate with a 2048- or 4096-bit key.", bits)
+		}
+	default:
+		Logger.Debugf("[TLS downstream] Client cert public key type: %T", cert.PublicKey)
+	}
 }
 
 // handleConnection reads messages from a TCP connection and invokes the callback
@@ -169,8 +390,57 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 	defer t.activeConns.Add(-1)
 	defer conn.Close()
 
-	reader := bufio.NewReader(conn)
 	remoteAddr := conn.RemoteAddr().String()
+
+	// For TLS connections, verify the client CN if a regex is configured
+	if t.clientCNRegex != nil {
+		if tlsConn, ok := conn.(*tls.Conn); ok {
+			// Complete the TLS handshake so we can inspect peer certificates
+			Logger.Debugf("[TLS downstream] Starting handshake with %s", remoteAddr)
+			if err := tlsConn.Handshake(); err != nil {
+				logTLSHandshakeError(remoteAddr, err)
+				return
+			}
+			state := tlsConn.ConnectionState()
+			Logger.Debugf("[TLS downstream] Handshake complete with %s, peer certs: %d, %s / %s", remoteAddr, len(state.PeerCertificates), tlsVersionName(state.Version), tls.CipherSuiteName(state.CipherSuite))
+			if len(state.PeerCertificates) == 0 {
+				Logger.Warnf("[TLS downstream] No client certificate presented from %s (clientAuth=require) — rejecting", remoteAddr)
+				return
+			}
+			leaf := state.PeerCertificates[0]
+			Logger.Debugf("[TLS downstream] Client cert subject: %s", leaf.Subject.String())
+			Logger.Debugf("[TLS downstream] Client cert issuer:  %s", leaf.Issuer.String())
+			Logger.Debugf("[TLS downstream] Client cert CN:      %s", leaf.Subject.CommonName)
+			logClientKeyInfo(leaf)
+			cn := leaf.Subject.CommonName
+			if !t.clientCNRegex.MatchString(cn) {
+				Logger.Warnf("[TLS downstream] Client CN %q from %s rejected by pattern %q — update tcpTLSClientCNRegex or regenerate the client certificate", cn, remoteAddr, t.clientCNRegex.String())
+				return
+			}
+			Logger.Infof("[TLS downstream] Authenticated client CN %q from %s (pattern %q)", cn, remoteAddr, t.clientCNRegex.String())
+		}
+	} else if t.tlsConfig != nil {
+		// TLS without CN regex: still log handshake details at DEBUG
+		if tlsConn, ok := conn.(*tls.Conn); ok {
+			Logger.Debugf("[TLS downstream] Starting handshake with %s (no CN check)", remoteAddr)
+			if err := tlsConn.Handshake(); err != nil {
+				logTLSHandshakeError(remoteAddr, err)
+				return
+			}
+			state := tlsConn.ConnectionState()
+			Logger.Debugf("[TLS downstream] Handshake complete with %s, peer certs: %d, %s / %s", remoteAddr, len(state.PeerCertificates), tlsVersionName(state.Version), tls.CipherSuiteName(state.CipherSuite))
+			if len(state.PeerCertificates) > 0 {
+				leaf := state.PeerCertificates[0]
+				Logger.Debugf("[TLS downstream] Client cert CN: %s", leaf.Subject.CommonName)
+				logClientKeyInfo(leaf)
+				Logger.Infof("[TLS downstream] Authenticated client CN %q from %s (CA-chain only)", leaf.Subject.CommonName, remoteAddr)
+			} else {
+				Logger.Infof("[TLS downstream] TLS connection established with %s (one-way TLS, no client cert)", remoteAddr)
+			}
+		}
+	}
+
+	reader := bufio.NewReader(conn)
 	Logger.Infof("New TCP connection from %s", remoteAddr)
 
 	for {

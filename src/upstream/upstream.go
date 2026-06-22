@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -64,13 +65,17 @@ var config TransferConfiguration
 var nextKeyGeneration time.Time
 var keepRunning = true
 
-var receivedEvents int64
-var sentEvents int64
+var receivedEvents int64  // Kafka messages received
+var sentEvents int64      // UDP fragments sent (one message can be multiple fragments)
+var messagesSent int64    // Actual Kafka messages successfully sent (not fragments)
+var messagesDropped int64 // Messages that failed to send after all retries
 var filteredEvents int64
 var unfilteredEvents int64
 var filterTimeouts int64
 var totalReceived int64
 var totalSent int64
+var totalMessagesSent int64    // Total messages sent since start
+var totalMessagesDropped int64 // Total messages dropped since start
 var totalFiltered int64
 var totalUnfiltered int64
 var totalFilterTimeouts int64
@@ -165,11 +170,15 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 				time.Sleep(interval)
 				recv := atomic.SwapInt64(&receivedEvents, 0)
 				sent := atomic.SwapInt64(&sentEvents, 0)
+				msgsSent := atomic.SwapInt64(&messagesSent, 0)
+				msgsDropped := atomic.SwapInt64(&messagesDropped, 0)
 				filtered := atomic.SwapInt64(&filteredEvents, 0)
 				unfiltered := atomic.SwapInt64(&unfilteredEvents, 0)
 				filterTimeoutsInterval := atomic.SwapInt64(&filterTimeouts, 0)
 				totalRecv := atomic.LoadInt64(&totalReceived)
 				totalSnt := atomic.LoadInt64(&totalSent)
+				totalMsgsSent := atomic.LoadInt64(&totalMessagesSent)
+				totalMsgsDropped := atomic.LoadInt64(&totalMessagesDropped)
 				totalFilt := atomic.LoadInt64(&totalFiltered)
 				totalUnfilt := atomic.LoadInt64(&totalUnfiltered)
 				totalFiltTimeouts := atomic.LoadInt64(&totalFilterTimeouts)
@@ -184,23 +193,27 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 				kafkaStatusMu.Unlock()
 
 				stats := map[string]any{
-					"id":                    config.id,
-					"time":                  time.Now().Unix(),
-					"time_start":            timeStart,
-					"interval":              config.logStatistics,
-					"received":              recv,
-					"sent":                  sent,
-					"filtered":              filtered,
-					"unfiltered":            unfiltered,
-					"filter_timeouts":       filterTimeoutsInterval,
-					"eps":                   recv / int64(config.logStatistics),
-					"total_received":        totalRecv,
-					"total_sent":            totalSnt,
-					"total_filtered":        totalFilt,
-					"total_unfiltered":      totalUnfilt,
-					"total_filter_timeouts": totalFiltTimeouts,
-					"transport_status":      transportStatus,
-					"kafka_status":          kafkaStatus,
+					"id":                     config.id,
+					"time":                   time.Now().Unix(),
+					"time_start":             timeStart,
+					"interval":               config.logStatistics,
+					"received":               recv,
+					"sent":                   sent,
+					"messages_sent":          msgsSent,
+					"messages_dropped":       msgsDropped,
+					"filtered":               filtered,
+					"unfiltered":             unfiltered,
+					"filter_timeouts":        filterTimeoutsInterval,
+					"eps":                    recv / int64(config.logStatistics),
+					"total_received":         totalRecv,
+					"total_sent":             totalSnt,
+					"total_messages_sent":    totalMsgsSent,
+					"total_messages_dropped": totalMsgsDropped,
+					"total_filtered":         totalFilt,
+					"total_unfiltered":       totalUnfilt,
+					"total_filter_timeouts":  totalFiltTimeouts,
+					"transport_status":       transportStatus,
+					"kafka_status":           kafkaStatus,
 				}
 				if Logger.CanLog(logging.INFO) {
 					b, _ := json.Marshal(stats)
@@ -413,10 +426,10 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 		transportErr = udpClient.SendMessages(messages)
 		if transportErr == nil {
 			// Success - update counters and status
-			atomic.AddInt64(&sentEvents, int64(len(messages)))
+			atomic.AddInt64(&sentEvents, int64(len(messages))) // Count UDP fragments
 			atomic.AddInt64(&totalSent, int64(len(messages)))
-
-			// Clear error status if send succeeded
+			atomic.AddInt64(&messagesSent, 1) // Count original Kafka message
+			atomic.AddInt64(&totalMessagesSent, 1)
 			transportStatusMu.Lock()
 			if transportStatus != "running" {
 				previousTransportStatus = transportStatus
@@ -480,6 +493,10 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 	}
 	transportStatusMu.Unlock()
 
+	// Track dropped message
+	atomic.AddInt64(&messagesDropped, 1)
+	atomic.AddInt64(&totalMessagesDropped, 1)
+
 	// Return false to prevent this message from being marked as consumed
 	// The message will be reprocessed when the receiver comes back up
 	Logger.Errorf("Failed to send message id=%s after %d retries (%dms): %v. Message will be retried.",
@@ -493,11 +510,16 @@ func Main(build string) {
 	Logger.Printf("Build number: %s", BuildNumber)
 
 	var fileName string
-	if len(os.Args) > 2 {
-		Logger.Fatal("Too many command line parameters. Only one allowed.")
-	}
-	if len(os.Args) == 2 {
-		fileName = os.Args[1]
+	var overrideArgs []string
+	// Parse command line: first non-dashed argument is the property file, --key=value args are overrides.
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, "--") {
+			overrideArgs = append(overrideArgs, arg)
+		} else if fileName == "" {
+			fileName = arg
+		} else {
+			Logger.Fatal("Too many non-dashed command line parameters. Only one property file allowed.")
+		}
 	}
 
 	// Signals
@@ -518,6 +540,7 @@ func Main(build string) {
 		Logger.Fatalf("Error reading configuration file %s: %v", fullPath, err)
 	}
 	conf = overrideConfiguration(conf)
+	conf = parseCommandLineOverrides(overrideArgs, conf)
 	conf = checkConfiguration(conf)
 	config = conf
 
@@ -541,9 +564,36 @@ func Main(build string) {
 	switch config.transport {
 	case "tcp":
 		Logger.Printf("Creating TCP transport to %s", address)
-		adapter, errTCP := NewTCPAdapter(address)
+		var tcpTLSConfig *tls.Config
+		if config.tcpTLSEnabled {
+			Logger.Printf("Building TLS configuration for TCP transport")
+			var err error
+			tcpTLSConfig, err = buildUpstreamTLSConfig(
+				config.tcpTLSCAFile,
+				config.tcpTLSCertFile,
+				config.tcpTLSKeyFile,
+				config.tcpTLSKeyPasswordFile,
+				config.tcpTLSCipherSuites,
+				config.tcpTLSServerCNRegex,
+			)
+			if err != nil {
+				Logger.Fatalf("Error building TCP TLS configuration: %v", err)
+			}
+			Logger.Printf("TCP TLS configured (mTLS=%t, cipherSuites=%q)", config.tcpTLSCertFile != "", config.tcpTLSCipherSuites)
+		}
+		adapter, errTCP := NewTCPAdapter(address, tcpTLSConfig)
 		if errTCP != nil {
 			Logger.Fatalf("Error creating TCP adapter: %v", errTCP)
+		}
+		if config.tcpTLSEnabled {
+			adapter.SetTLSReloadParams(
+				config.tcpTLSCAFile,
+				config.tcpTLSCertFile,
+				config.tcpTLSKeyFile,
+				config.tcpTLSKeyPasswordFile,
+				config.tcpTLSCipherSuites,
+				config.tcpTLSServerCNRegex,
+			)
 		}
 		transportAdapter = adapter
 	case "udp":
@@ -582,13 +632,24 @@ func Main(build string) {
 			transportAdapter.Close()
 			return
 		case <-hup:
-			Logger.Printf("SIGHUP received: reopening logs for logrotate. New name: %s", config.logFileName)
-			if config.logFileName != "" {
-				if err := Logger.SetLogFile(config.logFileName); err != nil {
-					Logger.Errorf("Failed reopening log file: %v", err)
+			// Run SIGHUP work in a separate goroutine so the signal loop stays
+			// responsive — ReloadTLSConfig may need to acquire t.mu which could be
+			// briefly held by a send goroutine, and SetLogFile does I/O.
+			go func() {
+				Logger.Printf("SIGHUP received: reopening logs with name %s and reloading TLS certificates", config.logFileName)
+				if config.logFileName != "" {
+					Logger.Printf("Reopening logs for logrotate. New name: %s", config.logFileName)
+					if err := Logger.SetLogFile(config.logFileName); err != nil {
+						Logger.Errorf("Failed reopening log file: %v", err)
+					}
 				}
-			}
-			Logger.Printf("Logrotate completed")
+				if tcpAdapter, ok := transportAdapter.(*TCPAdapter); ok {
+					if err := tcpAdapter.ReloadTLSConfig(); err != nil {
+						Logger.Errorf("TLS certificate reload failed: %v", err)
+					}
+				}
+				Logger.Printf("SIGHUP handling completed")
+			}()
 		}
 	}
 }

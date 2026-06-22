@@ -54,6 +54,7 @@ func (a *MockUDP) Setup(
 	numReceivers int,
 	channelBufferSize int,
 	readBufferMultiplier uint16,
+	enableRxqOvfl bool,
 ) {
 }
 
