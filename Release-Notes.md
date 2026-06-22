@@ -112,8 +112,8 @@
 
 ### Code Quality
 
-- **Suppressed CodeQL alert for `InsecureSkipVerify`**: Added `lgtm[go/disabled-certificate-check]` suppression on a dedicated line before the `InsecureSkipVerify` assignment in `src/upstream/adapters.go` line 105 (alert #35). The use of `InsecureSkipVerify: true` is intentional and secure because certificate chain validation and CN regex matching are performed manually via the `VerifyConnection` callback. This allows connecting by IP address or through load balancers while maintaining full certificate verification.
-- **Suppressed CodeQL alerts for integer conversions**: Updated all integer conversion suppressions from `codeql[...]` to `lgtm[go/incorrect-integer-conversion]` format for proper CodeQL recognition. Covers alerts #29, #30, #31, #32, and #33 in `src/downstream/configuration.go` (lines 756, 793, 818) and `src/upstream/configuration.go` (lines 662, 707). All integer conversions in configuration parsing are validated with explicit range checks before conversion to ensure values fit within the target type (uint16 or int32).
+- **CodeQL alert for `InsecureSkipVerify`**: Alert #34/35 persists despite suppression attempts. `InsecureSkipVerify: true` is required for connecting by IP address and through load balancers (Go's default hostname verification would fail). The `VerifyConnection` callback performs manual certificate chain validation and CN regex matching. **Recommendation**: Dismiss alert in GitHub UI with justification, as inline CodeQL suppressions are not reliably recognized.
+- **CodeQL alerts for integer conversions**: Removed suppression comments in favor of inline safety comments (alerts #29-#33). All conversions have explicit bounds checks immediately before conversion. The checks use fatal errors on overflow, ensuring safe conversion to smaller types (uint16, int32). CodeQL's pattern matching may not recognize these checks; if alerts persist, dismiss in GitHub UI with reference to the bounds validation code.
 
 ### Internal Changes
 
