@@ -384,23 +384,23 @@ mount | grep vboxsf  # VirtualBox
 ┌─────────────────────────────────────────────────┐
 │           [Hypervisor Host OS]                  │
 │                                                 │
-│  ┌───────────────────────────────────────┐     │
+│  ┌───────────────────────────────────────┐      │
 │  │        Virtual Switch (vSwitch)       │ ◄─── DROPS HERE (invisible to guest)
-│  │        - Limited TX/RX queues         │
-│  │        - Shared with other VMs        │
-│  │        - Buffer overflows in bursts   │
-│  └───────────────┬───────────────────────┘     │
+│  │        - Limited TX/RX queues         │      │
+│  │        - Shared with other VMs        │      │
+│  │        - Buffer overflows in bursts   │      │
+│  └───────────────┬───────────────────────┘      │
 │                  │                              │
-│  ┌───────────────┴───────────────────────┐     │
-│  │    [VM Guest - Downstream Linux]      │     │
-│  │                                        │     │
+│  ┌───────────────┴───────────────────────┐      │
+│  │    [VM Guest - Downstream Linux]      │      │
+│  │                                       │      │
 │  │   ethtool -S ────► Shows 0 drops  ✗   │ ◄─── Cannot see hypervisor drops
-│  │   netstat -s ────► Shows 0 drops  ✗   │
-│  │   SO_RXQ_OVFL ───► Shows 0 drops  ✗   │
-│  │   /proc/net/udp ─► Shows 0 drops  ✗   │
-│  │                                        │
-│  │   Only total_received shows truth! ✓  │
-│  └────────────────────────────────────────┘     │
+│  │   netstat -s ────► Shows 0 drops  ✗   │      │
+│  │   SO_RXQ_OVFL ───► Shows 0 drops  ✗   │      │
+│  │   /proc/net/udp ─► Shows 0 drops  ✗   │      │
+│  │                                       │      │
+│  │   Only total_received shows truth! ✓  │      │
+│  └───────────────────────────────────────┘      │
 └─────────────────────────────────────────────────┘
 ```
 
