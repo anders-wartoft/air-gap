@@ -2,6 +2,8 @@ module sitia.nu/airgap
 
 go 1.25.0
 
+toolchain go1.25.12
+
 require (
 	github.com/IBM/sarama v1.43.2
 	github.com/RoaringBitmap/roaring v1.9.4
