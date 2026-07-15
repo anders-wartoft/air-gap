@@ -13,6 +13,5 @@ plan/
 # Build system
 .build-number-incremented
 **/pom.xml.versionsBackup
-src/version/version.go
 .github/
 tests/chaos-testing/out/
