@@ -1,14 +1,14 @@
 module sitia.nu/airgap
 
-go 1.24.13
+go 1.25.0
 
 require (
 	github.com/IBM/sarama v1.43.2
+	github.com/RoaringBitmap/roaring v1.9.4
 	github.com/google/uuid v1.6.0
 )
 
 require (
-	github.com/RoaringBitmap/roaring v1.9.4 // indirect
 	github.com/bits-and-blooms/bitset v1.12.0 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
@@ -32,7 +32,7 @@ require (
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475 // indirect
-	golang.org/x/crypto v0.45.0 // indirect
-	golang.org/x/net v0.47.0 // indirect
-	golang.org/x/sys v0.38.0
+	golang.org/x/crypto v0.54.0
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sys v0.47.0
 )
