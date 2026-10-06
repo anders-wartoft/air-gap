@@ -67,7 +67,7 @@ func NewFilter(config string) (*Filter, error) {
 }
 
 func (f *Filter) Check(number int64) bool {
-	pos := ((number - 1) % int64(f.k)) + 1
+	pos := posMod(number-1, f.k) + 1
 	for i := 0; i < len(f.groups[0]); i++ {
 		if f.groups[0][i] == pos {
 			return true
@@ -77,13 +77,22 @@ func (f *Filter) Check(number int64) bool {
 }
 
 func isValidNumber(number int64, groups [][]int64, k int64) bool {
-	pos := ((number - 1) % int64(k)) + 1
+	pos := posMod(number-1, k) + 1
 	for i := 0; i < len(groups[0]); i++ {
 		if groups[0][i] == pos {
 			return true
 		}
 	}
 	return false
+}
+
+// posMod returns a mathematically correct non-negative modulo so that
+// posMod(-1, 2) == 1 (not -1 as plain Go `%` returns). This matters
+// for callers that feed in zero-indexed values such as Kafka offsets:
+// without it, number=0 produces pos=0 which no filter group contains,
+// silently dropping offset 0 of every partition on every chain.
+func posMod(a, m int64) int64 {
+	return ((a % m) + m) % m
 }
 
 func inGroup(nr int64, groups [][]int64) bool {
@@ -99,8 +108,14 @@ func inGroup(nr int64, groups [][]int64) bool {
 
 func doSelfTest(groups [][]int64, k int64) error {
 	largestNumber := int(groups[2][len(groups[2])-1]) // Convert largestNumber to int
-	// Perform self test logic here
-	for i := 0; i < largestNumber; i++ {
+	// Verify that every number the user explicitly listed in the three
+	// groups lands in the group the filter would assign it to. The
+	// range is [1, largestNumber] inclusive — "number" is 1-indexed by
+	// design (see the comment at the top of the file). Zero-indexed
+	// callers (e.g. Kafka offset 0) are handled by posMod in Check,
+	// but the self-test is a user-input sanity check, not a modulo
+	// identity proof.
+	for i := 1; i <= largestNumber; i++ {
 		valid := isValidNumber(int64(i), groups, k) // Convert i to int64
 		isInGroups := inGroup(int64(i), groups)     // Convert i to int64
 		Logger.Printf("%d: isValid returned %v inGroup returned %v",

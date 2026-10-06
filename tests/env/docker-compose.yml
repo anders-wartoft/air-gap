@@ -1,0 +1,865 @@
+# Freestanding air-gap test environment.
+#
+# Orthogonal update axes:
+#   OS         -> UPSTREAM_BASE_IMAGE / DOWNSTREAM_BASE_IMAGE (.env)
+#   Kafka      -> KAFKA_IMAGE (.env)
+#   JVM/dedup  -> DEDUP_IMAGE (.env)
+#   Air-gap    -> rebuild binaries; the mounts pick them up automatically
+#   Configs    -> files in ../../config are mounted read-only
+#   Certs      -> files in ../../certs are mounted read-only (air-gap + Kafka)
+#
+# Kafka layout mirrors the real deployment:
+#   - upstream cluster:   kafka-upstream   (node 1) + kafka-upstream-2   (node 2)
+#   - downstream cluster: kafka-downstream (node 1) + kafka-downstream-2 (node 2)
+#   Both brokers of a cluster run on the same Compose project; clients
+#   bootstrap against both via "host:9092,host-2:8092".
+#
+# Default up (no profile) starts both Kafka clusters, upstream-a, downstream,
+# and topic-init.
+#
+# Optional profiles:
+#   dual            -> adds upstream-b (second upstream air-gap process)
+#   second-cluster  -> adds a second upstream cluster (kafka-upstream-b / -b-2),
+#                      used by TC-21 (two clusters, same topic name)
+#   dedup           -> adds the deduplicator
+#   create          -> adds the gap-dump create tool (one-shot)
+#   resend          -> adds the resend tool (one-shot)
+#
+# Services have no cross-side depends_on, so starting only
+#   kafka-upstream + kafka-upstream-2 + upstream-a[-b]   (upstream half)
+# on one machine and
+#   kafka-downstream + kafka-downstream-2 + downstream   (downstream half)
+# on another machine is safe.
+
+name: airgap-testenv
+
+networks:
+  airgap:
+    name: airgap-testenv
+
+services:
+  # ==========================================================================
+  # Upstream Kafka cluster (two brokers forming one KRaft cluster)
+  # ==========================================================================
+  kafka-upstream:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: kafka-upstream
+    networks:
+      airgap:
+        aliases:
+          - kafka-upstream.sitia.nu   # matches the SAN in the Kafka TLS cert
+    volumes:
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,SSL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-upstream:9092,SSL://kafka-upstream.sitia.nu:9094
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-upstream:9093,2@kafka-upstream-2:8093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL
+      KAFKA_SSL_KEYSTORE_FILENAME: kafka-upstream.keystore.jks
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: kafka-keystore-creds
+      KAFKA_SSL_KEY_CREDENTIALS: kafka-key-creds
+      KAFKA_SSL_TRUSTSTORE_FILENAME: kafka-trust.jks
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: kafka-truststore-creds
+      KAFKA_SSL_CLIENT_AUTH: none   # server-side TLS only; no mTLS
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 5
+
+  kafka-upstream-2:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: kafka-upstream-2
+    networks:
+      airgap:
+        aliases:
+          - kafka-upstream.sitia.nu
+    volumes:
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:8092,CONTROLLER://0.0.0.0:8093,SSL://0.0.0.0:8094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-upstream-2:8092,SSL://kafka-upstream.sitia.nu:8094
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-upstream:9093,2@kafka-upstream-2:8093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL
+      KAFKA_SSL_KEYSTORE_FILENAME: kafka-upstream.keystore.jks
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: kafka-keystore-creds
+      KAFKA_SSL_KEY_CREDENTIALS: kafka-key-creds
+      KAFKA_SSL_TRUSTSTORE_FILENAME: kafka-trust.jks
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: kafka-truststore-creds
+      KAFKA_SSL_CLIENT_AUTH: none
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 5
+
+  # ==========================================================================
+  # Second upstream Kafka cluster (two brokers), for TC-21 (two clusters, same
+  # topic name).  Enable with --profile second-cluster.
+  # ==========================================================================
+  kafka-upstream-b:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: kafka-upstream-b
+    profiles: ["second-cluster"]
+    networks:
+      - airgap
+    volumes:
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,SSL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-upstream-b:9092,SSL://kafka-upstream-b.sitia.nu:9094
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-upstream-b:9093,2@kafka-upstream-b-2:8093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL
+      KAFKA_SSL_KEYSTORE_FILENAME: kafka-upstream-b.keystore.jks
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: kafka-keystore-creds
+      KAFKA_SSL_KEY_CREDENTIALS: kafka-key-creds
+      KAFKA_SSL_TRUSTSTORE_FILENAME: kafka-trust.jks
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: kafka-truststore-creds
+      KAFKA_SSL_CLIENT_AUTH: none
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 5
+
+  kafka-upstream-b-2:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: kafka-upstream-b-2
+    profiles: ["second-cluster"]
+    networks:
+      - airgap
+    volumes:
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:8092,CONTROLLER://0.0.0.0:8093,SSL://0.0.0.0:8094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-upstream-b-2:8092,SSL://kafka-upstream-b.sitia.nu:8094
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-upstream-b:9093,2@kafka-upstream-b-2:8093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL
+      KAFKA_SSL_KEYSTORE_FILENAME: kafka-upstream-b.keystore.jks
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: kafka-keystore-creds
+      KAFKA_SSL_KEY_CREDENTIALS: kafka-key-creds
+      KAFKA_SSL_TRUSTSTORE_FILENAME: kafka-trust.jks
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: kafka-truststore-creds
+      KAFKA_SSL_CLIENT_AUTH: none
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 5
+
+  # ==========================================================================
+  # Downstream Kafka cluster (two brokers).
+  # ==========================================================================
+  kafka-downstream:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: kafka-downstream
+    networks:
+      airgap:
+        aliases:
+          - kafka-downstream.sitia.nu
+    volumes:
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,SSL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-downstream:9092,SSL://kafka-downstream.sitia.nu:9094
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-downstream:9093,2@kafka-downstream-2:8093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL
+      KAFKA_SSL_KEYSTORE_FILENAME: kafka-downstream.keystore.jks
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: kafka-keystore-creds
+      KAFKA_SSL_KEY_CREDENTIALS: kafka-key-creds
+      KAFKA_SSL_TRUSTSTORE_FILENAME: kafka-trust.jks
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: kafka-truststore-creds
+      KAFKA_SSL_CLIENT_AUTH: none
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 15
+
+  kafka-downstream-2:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: kafka-downstream-2
+    networks:
+      airgap:
+        aliases:
+          - kafka-downstream.sitia.nu
+    volumes:
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:8092,CONTROLLER://0.0.0.0:8093,SSL://0.0.0.0:8094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-downstream-2:8092,SSL://kafka-downstream.sitia.nu:8094
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-downstream:9093,2@kafka-downstream-2:8093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL
+      KAFKA_SSL_KEYSTORE_FILENAME: kafka-downstream.keystore.jks
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: kafka-keystore-creds
+      KAFKA_SSL_KEY_CREDENTIALS: kafka-key-creds
+      KAFKA_SSL_TRUSTSTORE_FILENAME: kafka-trust.jks
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: kafka-truststore-creds
+      KAFKA_SSL_CLIENT_AUTH: none
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 15
+
+  # ==========================================================================
+  # Topic bootstrap. Waits for its cluster to be reachable, then creates the
+  # standard topic set with the right partition counts and retention.
+  # Split per cluster so each half can run on its own machine.
+  # Runs to completion; air-gap services and dedup depend on
+  # service_completed_successfully.
+  # ==========================================================================
+  topic-init-upstream:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: topic-init-upstream
+    networks:
+      - airgap
+    depends_on:
+      kafka-upstream:
+        condition: service_started
+      kafka-upstream-2:
+        condition: service_started
+    environment:
+      BOOTSTRAP: ${TOPIC_INIT_UPSTREAM_BOOTSTRAP:-kafka-upstream:9092,kafka-upstream-2:8092}
+      RETENTION_MS: ${TOPIC_INIT_RETENTION_MS:-43200000}
+      PARTITIONS: ${TOPIC_INIT_UPSTREAM_PARTITIONS:-5}
+      TOPICS: ${TOPIC_INIT_UPSTREAM_TOPICS:-transfer transfer2}
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -eu
+        TOPICS_CMD=/usr/bin/kafka-topics
+        command -v "$$TOPICS_CMD" >/dev/null 2>&1 || TOPICS_CMD=kafka-topics.sh
+        tries=60
+        echo "[topic-init-upstream] waiting for upstream Kafka at $$BOOTSTRAP ..."
+        while (( tries-- > 0 )); do
+          "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --list >/dev/null 2>&1 && break
+          sleep 2
+        done
+        for t in $$TOPICS; do
+          if "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --describe --topic "$$t" >/dev/null 2>&1; then
+            echo "[topic-init-upstream] $$t exists"
+          else
+            echo "[topic-init-upstream] creating $$t (partitions=$$PARTITIONS)"
+            "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --create \
+              --topic "$$t" --partitions "$$PARTITIONS" \
+              --config "retention.ms=$$RETENTION_MS"
+          fi
+        done
+        echo "[topic-init-upstream] done"
+    restart: "no"
+
+  topic-init-downstream:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: topic-init-downstream
+    networks:
+      - airgap
+    depends_on:
+      kafka-downstream:
+        condition: service_started
+      kafka-downstream-2:
+        condition: service_started
+    environment:
+      BOOTSTRAP: ${TOPIC_INIT_DOWNSTREAM_BOOTSTRAP:-kafka-downstream:9092,kafka-downstream-2:8092}
+      RETENTION_MS: ${TOPIC_INIT_RETENTION_MS:-43200000}
+      PARTITIONS: ${TOPIC_INIT_DOWNSTREAM_PARTITIONS:-15}
+      TOPICS: ${TOPIC_INIT_DOWNSTREAM_TOPICS:-transfer transfer2 transfer-11a transfer-11b transfer-12a transfer-12b dedup dedup2 gaps gaps2}
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -eu
+        TOPICS_CMD=/usr/bin/kafka-topics
+        command -v "$$TOPICS_CMD" >/dev/null 2>&1 || TOPICS_CMD=kafka-topics.sh
+        tries=60
+        echo "[topic-init-downstream] waiting for downstream Kafka at $$BOOTSTRAP ..."
+        while (( tries-- > 0 )); do
+          "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --list >/dev/null 2>&1 && break
+          sleep 2
+        done
+        for t in $$TOPICS; do
+          if "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --describe --topic "$$t" >/dev/null 2>&1; then
+            echo "[topic-init-downstream] $$t exists"
+          else
+            echo "[topic-init-downstream] creating $$t (partitions=$$PARTITIONS)"
+            "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --create \
+              --topic "$$t" --partitions "$$PARTITIONS" \
+              --config "retention.ms=$$RETENTION_MS"
+          fi
+        done
+        echo "[topic-init-downstream] done"
+    restart: "no"
+
+  # Same, but for the second upstream cluster (profile second-cluster).
+  topic-init-upstream-b:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: topic-init-upstream-b
+    profiles: ["second-cluster"]
+    networks:
+      - airgap
+    depends_on:
+      kafka-upstream-b:
+        condition: service_started
+      kafka-upstream-b-2:
+        condition: service_started
+    environment:
+      BOOTSTRAP: ${TOPIC_INIT_UPSTREAM_B_BOOTSTRAP:-kafka-upstream-b:9092,kafka-upstream-b-2:8092}
+      RETENTION_MS: ${TOPIC_INIT_RETENTION_MS:-43200000}
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -eu
+        TOPICS_CMD=/usr/bin/kafka-topics
+        command -v "$$TOPICS_CMD" >/dev/null 2>&1 || TOPICS_CMD=kafka-topics.sh
+        tries=60
+        echo "[topic-init-b] waiting for upstream cluster B at $$BOOTSTRAP ..."
+        while (( tries-- > 0 )); do
+          "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --list >/dev/null 2>&1 && break
+          sleep 2
+        done
+        for t in transfer transfer2; do
+          if ! "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --describe --topic "$$t" >/dev/null 2>&1; then
+            "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --create \
+              --topic "$$t" --partitions 5 --config "retention.ms=$$RETENTION_MS"
+          fi
+        done
+        echo "[topic-init-b] done"
+    restart: "no"
+
+  # ==========================================================================
+  # Air-gap upstream (one image, used for upstream + downstream + create + resend).
+  # ==========================================================================
+  upstream-a:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-upstream:local
+    hostname: upstream-a
+    networks:
+      - airgap
+    depends_on:
+      topic-init-upstream:
+        condition: service_completed_successfully
+      # downstream is required: false so the up-only role (which never
+      # starts `downstream`) still works. When both are launched together
+      # (the common `all` role), we wait for the downstream container to
+      # be running before we try to UDP-dial the "downstream" hostname —
+      # that way we never see the cosmetic
+      #   [FATAL] lookup downstream on 127.0.0.11:53: no such host
+      # cascade followed by `restart: on-failure` loops.
+      downstream:
+        condition: service_started
+        required: false
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - ../../config:/airgap/config:ro
+      - ../../certs:/airgap/certs:ro
+      # Read-write: TC-24's live SIGHUP cert-rotation test points
+      # tcpTLSCertFile/KeyFile at writable copies here (the certs/ mount
+      # above is read-only) so it can overwrite them mid-run without a
+      # container recreate. Harmless for every other testcase (unused).
+      - ../../tmp:/airgap/tmp
+    environment:
+      AIRGAP_CONFIG: ${UPSTREAM_A_CONFIG:-/airgap/config/upstream-docker.properties}
+      AIRGAP_UPSTREAM_NIC: ${UPSTREAM_A_NIC:-eth0}
+      AIRGAP_UPSTREAM_TARGET_IP: ${UPSTREAM_A_TARGET_IP:-downstream}
+      AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS: ${UPSTREAM_A_BOOTSTRAP:-kafka-upstream:9092,kafka-upstream-2:8092}
+    command: ["upstream"]
+    # Safety net for other restart causes; the downstream-race one above is
+    # now prevented at startup.
+    restart: on-failure:10
+
+  upstream-b:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-upstream:local
+    hostname: upstream-b
+    profiles: ["dual"]
+    networks:
+      - airgap
+    depends_on:
+      topic-init-upstream:
+        condition: service_completed_successfully
+      downstream:
+        condition: service_started
+        required: false
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - ../../config:/airgap/config:ro
+      - ../../certs:/airgap/certs:ro
+    environment:
+      AIRGAP_CONFIG: ${UPSTREAM_B_CONFIG:-/airgap/config/upstream-docker.properties}
+      AIRGAP_UPSTREAM_NIC: ${UPSTREAM_B_NIC:-eth0}
+      AIRGAP_UPSTREAM_TARGET_IP: ${UPSTREAM_B_TARGET_IP:-downstream}
+      AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS: ${UPSTREAM_B_BOOTSTRAP:-kafka-upstream:9092,kafka-upstream-2:8092}
+    command: ["upstream"]
+    restart: on-failure:10
+
+  downstream:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-downstream:local
+    hostname: downstream
+    networks:
+      - airgap
+    depends_on:
+      topic-init-downstream:
+        condition: service_completed_successfully
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - ../../config:/airgap/config:ro
+      - ../../certs:/airgap/certs:ro
+    environment:
+      AIRGAP_CONFIG: ${DOWNSTREAM_CONFIG:-/airgap/config/downstream-docker.properties}
+      AIRGAP_DOWNSTREAM_NIC: ${DOWNSTREAM_NIC:-eth0}
+      AIRGAP_DOWNSTREAM_BOOTSTRAP_SERVERS: ${DOWNSTREAM_BOOTSTRAP:-kafka-downstream:9092,kafka-downstream-2:8092}
+      # Holds this container's actual binary launch back by N seconds while
+      # the rest of the stack (incl. upstream-a) starts normally. Used by
+      # TC-20 to recreate "downstream starts late" and prove upstream
+      # retries/buffers rather than losing events. See entrypoint.sh.
+      STARTUP_DELAY: ${DOWNSTREAM_STARTUP_DELAY:-0}
+    command: ["downstream"]
+
+  # ==========================================================================
+  # Deduplicator (JVM).  Independent image via DEDUP_IMAGE.
+  # Testcase env file provides every setting; topics are guaranteed to exist
+  # because this service depends on topic-init-downstream completion.
+  # ==========================================================================
+  dedup:
+    image: ${DEDUP_IMAGE:-eclipse-temurin:17-jre-noble}
+    hostname: dedup
+    profiles: ["dedup"]
+    networks:
+      - airgap
+    depends_on:
+      topic-init-downstream:
+        condition: service_completed_successfully
+    env_file:
+      - ${DEDUP_ENV_FILE:-../../config/testcases/dedup-9.env}
+    environment:
+      BOOTSTRAP_SERVERS: ${DEDUP_BOOTSTRAP:-kafka-downstream:9092,kafka-downstream-2:8092}
+      STATE_DIR_CONFIG: /tmp/dedup-state
+    volumes:
+      - ../../java-streams/target:/airgap/dedup-jar:ro
+      - ../../config:/airgap/config:ro
+      - ../../certs:/airgap/certs:ro
+    working_dir: /airgap
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        JAR=$$(ls /airgap/dedup-jar/air-gap-deduplication-fat-*.jar 2>/dev/null | head -1)
+        if [ -z "$$JAR" ]; then
+          echo "[dedup] no fat jar under /airgap/dedup-jar/. Build it with: make build-java" >&2
+          exit 2
+        fi
+        mkdir -p "$$STATE_DIR_CONFIG"
+        echo "[dedup] jar=$$JAR state=$$STATE_DIR_CONFIG bootstrap=$$BOOTSTRAP_SERVERS raw=$${RAW_TOPICS-} clean=$${CLEAN_TOPIC-} gap=$${GAP_TOPIC-}"
+        exec java -Dlog4j.configurationFile=/airgap/config/testcases/log4j2.xml -jar "$$JAR"
+
+  # ==========================================================================
+  # One-shot: dump gap descriptors from the downstream Kafka to /airgap/tmp.
+  # ==========================================================================
+  create:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-downstream:local
+    hostname: create
+    profiles: ["create"]
+    networks:
+      - airgap
+    depends_on:
+      topic-init-downstream:
+        condition: service_completed_successfully
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - ../../config:/airgap/config:ro
+      - ../../certs:/airgap/certs:ro
+      - ../../tmp:/airgap/tmp
+    environment:
+      AIRGAP_CONFIG: ${CREATE_CONFIG:-/airgap/config/create.properties}
+      AIRGAP_CREATE_BOOTSTRAP_SERVERS: ${CREATE_BOOTSTRAP:-kafka-downstream:9092,kafka-downstream-2:8092}
+    command: ["create"]
+    restart: "no"
+
+  # ==========================================================================
+  # One-shot: replay a gap file through a fresh upstream against upstream Kafka.
+  # ==========================================================================
+  resend:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-upstream:local
+    hostname: resend
+    profiles: ["resend"]
+    networks:
+      - airgap
+    depends_on:
+      topic-init-upstream:
+        condition: service_completed_successfully
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - ../../config:/airgap/config:ro
+      - ../../certs:/airgap/certs:ro
+      - ../../tmp:/airgap/tmp
+    environment:
+      AIRGAP_CONFIG: ${RESEND_CONFIG:-/airgap/config/resend.properties}
+      AIRGAP_RESEND_NIC: ${RESEND_NIC:-eth0}
+      AIRGAP_RESEND_TARGET_IP: ${RESEND_TARGET_IP:-downstream}
+      AIRGAP_RESEND_BOOTSTRAP_SERVERS: ${RESEND_BOOTSTRAP:-kafka-upstream:9092,kafka-upstream-2:8092}
+    command: ["resend"]
+    restart: "no"
+
+  # ==========================================================================
+  # LogGenerator producer — reads an LG properties file, writes to Kafka,
+  # terminates when `-l N` is reached. The runner uses --exit-code-from to
+  # tear the whole stack down when this service exits.
+  # Jar is resolved by glob from ./bin so the LogGenerator version in the
+  # filename is irrelevant; drop in any LogGenerator-*.jar.
+  # ==========================================================================
+  lg-producer:
+    image: ${LG_IMAGE:-eclipse-temurin:17-jre-noble}
+    hostname: lg-producer
+    profiles: ["lg-producer"]
+    networks:
+      - airgap
+    depends_on:
+      topic-init-upstream:
+        condition: service_completed_successfully
+      upstream-a:
+        condition: service_started
+      # Optional: when the dedup profile is active, wait for its container
+      # to be running before launching LG. compose's required: false means
+      # this is harmless when dedup isn't in play (TC-1/2/3/4/5/6/7).
+      dedup:
+        condition: service_started
+        required: false
+    volumes:
+      - ./bin:/airgap/lg-bin:ro
+      - ../../config:/airgap/config:ro
+      - ../../tmp:/airgap/tmp
+    environment:
+      LG_CONFIG: ${LG_PRODUCER_CONFIG:-/airgap/config/testcases/upstream-lg-1.properties}
+      LG_ARGS: ${LG_PRODUCER_ARGS:-}
+      LG_SED: ${LG_PRODUCER_SED:-}
+      # Grace period before producing. Set in manifests (e.g.
+      # tests/env/testcases/10.env) that need dedup / Kafka Streams to
+      # finish REBALANCING → RUNNING before the first event. Default 0
+      # means "produce as soon as compose dependency chain is satisfied".
+      LG_STARTUP_DELAY: ${LG_STARTUP_DELAY:-0}
+    entrypoint: ["/airgap/lg-entrypoint.sh"]
+    configs:
+      - source: lg_entrypoint
+        target: /airgap/lg-entrypoint.sh
+        mode: 0755
+    restart: "no"
+
+  # ==========================================================================
+  # Second LogGenerator producer — for TC-21 (two upstream Kafka clusters,
+  # same topic name). Identical shape to lg-producer but targets the
+  # second-cluster's topic-init/upstream-b instead, via LG_PRODUCER_B_CONFIG.
+  # Not used as the compose --exit-code-from source (only one container can
+  # be); run-testcase.sh separately polls this container's own exit so
+  # cluster B's stream is never truncated early by cluster A's producer
+  # finishing first.
+  # ==========================================================================
+  lg-producer-b:
+    image: ${LG_IMAGE:-eclipse-temurin:17-jre-noble}
+    hostname: lg-producer-b
+    profiles: ["lg-producer-b"]
+    networks:
+      - airgap
+    depends_on:
+      topic-init-upstream-b:
+        condition: service_completed_successfully
+      upstream-b:
+        condition: service_started
+      dedup:
+        condition: service_started
+        required: false
+    volumes:
+      - ./bin:/airgap/lg-bin:ro
+      - ../../config:/airgap/config:ro
+      - ../../tmp:/airgap/tmp
+    environment:
+      LG_CONFIG: ${LG_PRODUCER_B_CONFIG:-/airgap/config/testcases/upstream-lg-1.properties}
+      LG_ARGS: ${LG_PRODUCER_B_ARGS:-}
+      LG_SED: ${LG_PRODUCER_B_SED:-}
+      LG_STARTUP_DELAY: ${LG_STARTUP_DELAY:-0}
+    entrypoint: ["/airgap/lg-entrypoint.sh"]
+    configs:
+      - source: lg_entrypoint
+        target: /airgap/lg-entrypoint.sh
+        mode: 0755
+    restart: "no"
+
+  # ==========================================================================
+  # LogGenerator sink — reads an LG properties file, consumes from Kafka (or
+  # listens on UDP), prints the received events, runs until Compose tears it
+  # down. For TC-1/2/3 which expect a UDP sink, stop the air-gap `downstream`
+  # service first (it binds UDP/1234 on the same network).
+  # ==========================================================================
+  lg-sink:
+    image: ${LG_IMAGE:-eclipse-temurin:17-jre-noble}
+    hostname: lg-sink
+    profiles: ["lg-sink"]
+    networks:
+      - airgap
+    depends_on:
+      topic-init-downstream:
+        condition: service_completed_successfully
+    volumes:
+      - ./bin:/airgap/lg-bin:ro
+      - ../../config:/airgap/config:ro
+      - ../../tmp:/airgap/tmp
+    environment:
+      LG_CONFIG: ${LG_SINK_CONFIG:-/airgap/config/testcases/downstream-lg-9.properties}
+      LG_ARGS: ${LG_SINK_ARGS:-}
+      LG_SED: ${LG_SINK_SED:-}
+    entrypoint: ["/airgap/lg-entrypoint.sh"]
+    configs:
+      - source: lg_entrypoint
+        target: /airgap/lg-entrypoint.sh
+        mode: 0755
+    restart: "no"
+
+  # ==========================================================================
+  # TC-7 binary round-trip tester.
+  #
+  # Automates the manual TC-7 procedure from TESTCASES.md. Uses the
+  # Upload.go and Download.go tools shipped under tests/env/bin/ (written
+  # against segmentio/kafka-go). The tc7-upload-download-test.sh driver:
+  #   1. go build Upload.go + Download.go inside the container
+  #   2. generate a few hundred KB file of /dev/urandom bytes
+  #   3. upload it NUM_MESSAGES times to kafka-upstream[transfer]
+  #   4. let the air-gap chain carry each copy over UDP (each file is
+  #      fragmented into ~150 packets at payloadSize=1400)
+  #   5. read everything back from kafka-downstream[transfer]
+  #   6. md5sum compare every downloaded file against the original
+  #   7. emit LG-compatible summary lines so run-testcase.sh's existing
+  #      verdict parser works unchanged
+  # ==========================================================================
+  tc7-binary-test:
+    image: ${TC7_GO_IMAGE:-golang:1.24-alpine}
+    hostname: tc7-binary-test
+    profiles: ["tc7-binary-test"]
+    networks:
+      - airgap
+    depends_on:
+      topic-init-upstream:
+        condition: service_completed_successfully
+      topic-init-downstream:
+        condition: service_completed_successfully
+      upstream-a:
+        condition: service_started
+      downstream:
+        condition: service_started
+    volumes:
+      - ./bin:/tc:ro
+    environment:
+      UPSTREAM_BOOTSTRAP: ${TC7_UPSTREAM_BOOTSTRAP:-kafka-upstream:9092}
+      DOWNSTREAM_BOOTSTRAP: ${TC7_DOWNSTREAM_BOOTSTRAP:-kafka-downstream:9092}
+      TOPIC: ${TC7_TOPIC:-transfer}
+      NUM_MESSAGES: ${TC7_EXPECTED_COUNT:-10}
+      FILE_BYTES: ${TC7_FILE_BYTES:-204800}
+      TIMEOUT_SECONDS: ${TC7_TIMEOUT_SECONDS:-120}
+    entrypoint: ["sh", "/tc/tc7-upload-download-test.sh"]
+    restart: "no"
+
+  # ==========================================================================
+  # TC-8 settle-timer.
+  #
+  # Minimal busybox container that waits for upstream-a / downstream to come
+  # up, then sleeps a few seconds so both airgap processes have opened their
+  # /tmp/*.log files, and finally emits LG-compatible summary lines + exits.
+  # The runner uses this container's exit as its auto-exit signal, then
+  # runs VERIFY_SCRIPT=verify-tc8.sh which does the real SIGHUP test from
+  # the host side (docker exec mv + docker kill --signal=HUP + docker exec
+  # grep for the "Logrotate completed" / "SIGHUP received" markers).
+  # ==========================================================================
+  tc8-settle-timer:
+    image: ${TC8_SETTLE_IMAGE:-busybox:latest}
+    hostname: tc8-settle-timer
+    profiles: ["tc8-settle-timer"]
+    networks:
+      - airgap
+    depends_on:
+      upstream-a:
+        condition: service_started
+      downstream:
+        condition: service_started
+    environment:
+      SETTLE_SECONDS: ${TC8_SETTLE_SECONDS:-6}
+    # Sleep, then emit the three lines the verdict parser expects. The
+    # "2 lines" counts the two SIGHUP rotations (upstream + downstream)
+    # that verify-tc8.sh will perform.
+    #
+    # NOTE: `$$` escapes a `$` so docker compose passes the literal
+    # `${SETTLE_SECONDS}` and `$((...))` through to the container's shell
+    # at execution time, rather than substituting them at compose-parse
+    # time (which would leave empty strings because the chain's shell
+    # doesn't export these).
+    command:
+      - sh
+      - -c
+      - |
+        echo "[tc8-settle] waiting $${SETTLE_SECONDS}s for airgap services to open their log files..."
+        sleep "$${SETTLE_SECONDS}"
+        echo "transferred 2 lines in $$(( $${SETTLE_SECONDS} * 1000 )) milliseconds, settle marker"
+        echo "Number of unique received numbers: 2"
+        echo "Duplicate detection found: 0"
+        echo "Next expected number: 3"
+        echo "[tc8-settle] handing off to verify-tc8.sh"
+    restart: "no"
+
+  # ==========================================================================
+  # TC-22 settle-timer.
+  #
+  # Same shape as tc8-settle-timer: TC-22 has no Kafka/LogGenerator in its
+  # data path at all (source=random upstream, target=cmd downstream — see
+  # testcases/22.env), so there's no natural auto-exit anchor. This
+  # container just bounds the TOTAL test duration; the actual downstream
+  # stop/restart is orchestrated from the HOST side by run-testcase.sh's
+  # DOWNSTREAM_RESTART_AT_SECONDS / DOWNSTREAM_RESTART_DOWN_SECONDS
+  # watchdog (same pattern as TC-2's UPSTREAM_A_RESTART_AT_SECONDS, but
+  # `docker stop`+`docker start` instead of recreate — TC-22 wants the
+  # SAME container across the restart so `docker logs` captures one
+  # continuous, gap-checkable stream). VERIFY_SCRIPT=verify-tc22.sh does
+  # the real pass/fail check against downstream's log afterward.
+  # ==========================================================================
+  tc22-settle-timer:
+    image: ${TC8_SETTLE_IMAGE:-busybox:latest}
+    hostname: tc22-settle-timer
+    profiles: ["tc22-settle-timer"]
+    networks:
+      - airgap
+    depends_on:
+      upstream-a:
+        condition: service_started
+      downstream:
+        condition: service_started
+    environment:
+      SETTLE_SECONDS: ${TC22_SETTLE_SECONDS:-30}
+    command:
+      - sh
+      - -c
+      - |
+        echo "[tc22-settle] running for $${SETTLE_SECONDS}s total (downstream stop/restart happens mid-window, orchestrated by run-testcase.sh)..."
+        sleep "$${SETTLE_SECONDS}"
+        # Harmless placeholder lines, same trick as tc8-settle-timer: with no
+        # LG_SINK_CONFIG, run-testcase.sh's generic verdict block falls back
+        # to treating THIS container as both producer and sink, so it needs
+        # SOMETHING matching "transferred N lines" / "Number of unique
+        # received numbers" to avoid reporting a false "did not report"
+        # failure. The REAL pass/fail for TC-22 is verify-tc22.sh.
+        echo "transferred 1 lines in $$(( $${SETTLE_SECONDS} * 1000 )) milliseconds, settle marker"
+        echo "Number of unique received numbers: 1"
+        echo "Duplicate detection found: 0"
+        echo "Next expected number: 2"
+        echo "[tc22-settle] done, handing off to verify-tc22.sh"
+    restart: "no"
+
+  # ==========================================================================
+  # TC-24 settle-timer.
+  #
+  # Same pattern as TC-22's: no Kafka/LogGenerator in TC-24's data path
+  # either (source=random upstream, target=cmd downstream, TLS/mTLS over
+  # TCP). Kept SHORT here — just long enough for upstream-a's initial TLS
+  # handshake with downstream to complete — because ALL of TC-24's actual
+  # testing (two concurrent mTLS clients, cleartext-rejection probe,
+  # CN-disabled mode, live SIGHUP cert rotation) happens in
+  # POST_DRAIN_SCRIPT=tc24-tls-test.sh, which runs once this exits.
+  # ==========================================================================
+  tc24-settle-timer:
+    image: ${TC8_SETTLE_IMAGE:-busybox:latest}
+    hostname: tc24-settle-timer
+    profiles: ["tc24-settle-timer"]
+    networks:
+      - airgap
+    depends_on:
+      upstream-a:
+        condition: service_started
+      downstream:
+        condition: service_started
+    environment:
+      SETTLE_SECONDS: ${TC24_SETTLE_SECONDS:-8}
+    command:
+      - sh
+      - -c
+      - |
+        echo "[tc24-settle] waiting $${SETTLE_SECONDS}s for the initial mTLS handshake to settle..."
+        sleep "$${SETTLE_SECONDS}"
+        echo "transferred 1 lines in $$(( $${SETTLE_SECONDS} * 1000 )) milliseconds, settle marker"
+        echo "Number of unique received numbers: 1"
+        echo "Duplicate detection found: 0"
+        echo "Next expected number: 2"
+        echo "[tc24-settle] done, handing off to tc24-tls-test.sh"
+    restart: "no"
+
+  # ==========================================================================
+  # TC-25 settle-timer.
+  #
+  # Same pattern again: no Kafka/LogGenerator in TC-25's data path either
+  # (source=random upstream, target=cmd downstream). Bounds the initial
+  # negative-control settle window; ALL of TC-25's actual testing
+  # (negative control, positive control, blast/stress check) happens in
+  # POST_DRAIN_SCRIPT=tc25-rxqovfl-test.sh, which runs once this exits.
+  # ==========================================================================
+  tc25-settle-timer:
+    image: ${TC8_SETTLE_IMAGE:-busybox:latest}
+    hostname: tc25-settle-timer
+    profiles: ["tc25-settle-timer"]
+    networks:
+      - airgap
+    depends_on:
+      upstream-a:
+        condition: service_started
+      downstream:
+        condition: service_started
+    environment:
+      SETTLE_SECONDS: ${TC25_SETTLE_SECONDS:-12}
+    command:
+      - sh
+      - -c
+      - |
+        echo "[tc25-settle] waiting $${SETTLE_SECONDS}s for the negative-control baseline to settle..."
+        sleep "$${SETTLE_SECONDS}"
+        echo "transferred 1 lines in $$(( $${SETTLE_SECONDS} * 1000 )) milliseconds, settle marker"
+        echo "Number of unique received numbers: 1"
+        echo "Duplicate detection found: 0"
+        echo "Next expected number: 2"
+        echo "[tc25-settle] done, handing off to tc25-rxqovfl-test.sh"
+    restart: "no"
+
+configs:
+  lg_entrypoint:
+    file: ./lg-entrypoint.sh
