@@ -69,20 +69,45 @@ protocol (or run both side-by-side for comparison).
 
 ## Prerequisites
 
-1. Build the air-gap binaries for the architecture the containers will run on
-   (Linux):
+1. From `tests/env`, build the air-gap binaries for the architecture the
+   containers will run on (Linux). `-C ../..` runs make from the repository
+   root, where the Makefile is:
 
    ```bash
-   make build-go              # produces target/linux-amd64/{upstream,downstream,create,resend,gaps}
+   make -C ../.. build-go              # produces target/linux-amd64/{upstream,downstream,create,resend,gaps}
    # or
-   make build-go-all          # linux-amd64 + linux-arm64
-   make build-java            # produces java-streams/target/air-gap-deduplication-fat-*.jar
+   make -C ../.. build-go-all          # linux-amd64 + linux-arm64 + darwin-arm64
+   make -C ../.. build-java            # produces java-streams/target/air-gap-deduplication-fat-*.jar
    ```
 
    Default binary mount is `../../target/linux-amd64`. On Apple Silicon / arm64
    Linux hosts, set `AIRGAP_BIN_DIR=../../target/linux-arm64` in `.env`.
 
 2. Install Docker and the Compose plugin (v2).
+
+3. Generate the Kafka broker keystores before starting the Compose stack for
+   the first time. From `tests/env`, run:
+
+   ```bash
+   ./generate-kafka-certs.sh
+   ```
+
+   The Compose brokers need these files at startup because their SSL listeners
+   are enabled even when clients use PLAINTEXT. The script requires `openssl`
+   and `keytool` (from a JDK); see
+   [Kafka SSL / PLAINTEXT dual listener](#kafka-ssl--plaintext-dual-listener)
+   for details.
+
+4. Obtain the external LogGenerator JAR and manually place it in
+   `tests/env/bin/`. Its filename must match `LogGenerator-*.jar`, for example:
+
+   ```text
+   tests/env/bin/LogGenerator-1.1-6.jar
+   ```
+
+   LogGenerator is not included in this repository and is separate from the
+   dedup JAR built with `make build-java`. See
+   [LogGenerator automation](#loggenerator-automation) for details.
 
 ## Quick usage
 
@@ -216,6 +241,8 @@ A client picks one or the other via its `bootstrap.servers` list and
 listener from `KAFKA_LISTENERS` / `KAFKA_ADVERTISED_LISTENERS` and keep SSL.
 
 ### One-time setup
+
+Run this before the first `docker compose up` (see Prerequisites, step 3):
 
 ```bash
 cd tests/env
@@ -405,7 +432,8 @@ safe.
 ### Two-machine prerequisites
 
 * Both machines must have Docker + Compose and a checked-out copy of this repo
-  with the air-gap binaries built (`make build-go`, `make build-java`).
+  with the air-gap binaries built from the repository root (`make build-go`,
+  `make build-java`).
 * An IP route from the upstream machine to the downstream machine on
   **UDP/1234** (or **TCP/1234** for the TCP-based testcases 6, 20, 22, 24).
 * For a real data-diode: a one-way link that physically prevents return
