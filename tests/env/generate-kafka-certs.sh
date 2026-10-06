@@ -154,11 +154,13 @@ gen_client_credentials() {
         openssl rand -hex 32 > "$base.pw"
         regenerate_encrypted=1
     fi
-    if [[ ! -f "$base.key.enc" || "$regenerate_encrypted" == 1 ]]; then
+    if [[ ! -s "$base.key.enc" || "$regenerate_encrypted" == 1 ]]; then
         echo "[certs] generating $name encrypted key"
-        openssl pkcs8 -topk8 -in "$base.key" -out "$base.key.enc" \
-            -v2 aes-256-cbc -v2prf hmacWithSHA256 \
+        # LibreSSL lacks -v2prf; the Go loader supports both default PRFs.
+        openssl pkcs8 -topk8 -in "$base.key" -out "$tmp_split/$name.key.enc" \
+            -v2 aes-256-cbc \
             -passout "file:$base.pw"
+        mv "$tmp_split/$name.key.enc" "$base.key.enc"
     fi
     # Read-only bind mounts must be readable by the container's test user.
     chmod 644 "$base.crt" "$base.key" "$base.key.enc" "$base.pw"

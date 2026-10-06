@@ -43,8 +43,11 @@ for broker in kafka-upstream kafka-upstream-b kafka-downstream; do
             capture && !done { print }
             /-----END CERTIFICATE-----/ { done = 1 }
         ' > broker.crt
-    openssl verify -purpose sslserver -verify_hostname "$broker.sitia.nu" \
+    openssl verify -purpose sslserver \
         -CAfile certs/tmp/kafka-ca.crt broker.crt
+    openssl x509 -in broker.crt -text -noout |
+        grep 'DNS:' | tr ',' '\n' | sed 's/^[[:space:]]*//' |
+        grep -Fx "DNS:$broker.sitia.nu"
 done
 cksum certs/tmp/* certs/kafka/ssl/*.keystore.jks \
     certs/kafka/ssl/*-creds > before
@@ -57,4 +60,8 @@ rm certs/tmp/airgap-upstream.pw certs/tmp/airgap-downstream.key
 generate
 check_client upstream
 check_client downstream
-echo "PASS: fresh setup, broker trust, encrypted keys, repeat setup, and partial recovery"
+
+: > certs/tmp/airgap-upstream.key.enc
+generate
+check_client upstream
+echo "PASS: fresh setup, broker trust, encrypted keys, repeat setup, and partial/empty-key recovery"

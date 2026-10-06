@@ -273,8 +273,10 @@ The runner calls this script before every testcase; direct Compose runs need
 the manual setup above. Existing client credentials are kept. If a plain key
 or certificate is missing, the pair and its encrypted key are regenerated;
 if a password is missing, a new password and matching encrypted key are
-generated. Generated credentials stay ignored by Git, are readable inside
-the test containers, and must **never** be used in production.
+generated. Missing or empty encrypted keys are regenerated too. Key generation
+supports both OpenSSL and macOS's bundled LibreSSL. Generated credentials stay
+ignored by Git, are readable inside the test containers, and must **never** be
+used in production.
 
 To verify fresh-clone generation, broker trust, encrypted-key/password
 matching, repeat setup, and recovery of missing files without Docker:
