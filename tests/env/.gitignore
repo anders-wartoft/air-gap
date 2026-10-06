@@ -1,1 +1,8 @@
 .env
+
+# LogGenerator is external to this repo (see README.md's "LogGenerator
+# automation" section) — drop the jar in locally, don't commit it.
+bin/*.jar
+
+# Stray backup/scratch copies of docker-compose.yml.
+docker-compose.yml.bak*

@@ -1,0 +1,16 @@
+# This directory is populated by ../../tests/env/generate-kafka-certs.sh,
+# which is idempotent and regenerates every file below from scratch if
+# missing (test-only CA + per-cluster keystores + the combined truststore
+# + the Confluent-image credential files). None of it is hand-authored,
+# so none of it belongs in version control — including, especially,
+# testenv-ca.key (a CA private key).
+#
+# The exceptions are kafka-downstream.keystore.jks and
+# kafka-downstream.truststore.jks: these ship intentionally with the repo
+# as the one pre-existing sample cert pair (see generate-kafka-certs.sh's
+# own comment on gen_cluster_keystore), so they're explicitly un-ignored
+# below.
+*
+!.gitignore
+!kafka-downstream.keystore.jks
+!kafka-downstream.truststore.jks
