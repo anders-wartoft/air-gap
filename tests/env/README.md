@@ -85,16 +85,17 @@ protocol (or run both side-by-side for comparison).
 
 2. Install Docker and the Compose plugin (v2).
 
-3. Generate the Kafka broker keystores before starting the Compose stack for
-   the first time. From `tests/env`, run:
+3. Install `openssl` and `keytool` (from a JDK). The testcase runner
+   automatically generates the Kafka broker keystores and air-gap client
+   credentials before starting containers. If using Compose directly,
+   generate them first from `tests/env`:
 
    ```bash
    ./generate-kafka-certs.sh
    ```
 
    The Compose brokers need these files at startup because their SSL listeners
-   are enabled even when clients use PLAINTEXT. The script requires `openssl`
-   and `keytool` (from a JDK); see
+   are enabled even when clients use PLAINTEXT. See
    [Kafka SSL / PLAINTEXT dual listener](#kafka-ssl--plaintext-dual-listener)
    for details.
 
@@ -262,6 +263,25 @@ That script is idempotent. It generates:
 * `kafka-keystore-creds` / `kafka-key-creds` / `kafka-truststore-creds` —
   one-line password files consumed by the Confluent image's
   `KAFKA_SSL_*_CREDENTIALS` env vars.
+* `certs/tmp/kafka-ca.crt` — a PEM CA bundle containing both the generated
+  test-env CA and the CA from the shipped downstream truststore.
+* `certs/tmp/airgap-{upstream,downstream}.{crt,key,key.enc,pw}` —
+  client certificates, plain keys, passphrase-encrypted PKCS#8 keys, and
+  their generated password files (including the files required by TC-18).
+
+The runner calls this script before every testcase; direct Compose runs need
+the manual setup above. Existing client credentials are kept. If a plain key
+or certificate is missing, the pair and its encrypted key are regenerated;
+if a password is missing, a new password and matching encrypted key are
+generated. Generated credentials stay ignored by Git, are readable inside
+the test containers, and must **never** be used in production.
+
+To verify fresh-clone generation, broker trust, encrypted-key/password
+matching, repeat setup, and recovery of missing files without Docker:
+
+```bash
+bash test-generate-kafka-certs.sh
+```
 
 Default password is `changeit`; override with
 `KAFKA_KEYSTORE_PASSWORD=... ./generate-kafka-certs.sh` for a one-off, or set

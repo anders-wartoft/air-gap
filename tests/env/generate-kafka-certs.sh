@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # generate-kafka-certs.sh — populate certs/kafka/ssl/ with Kafka broker keystores
-# plus a combined truststore, so every broker can advertise an SSL listener
-# alongside the PLAINTEXT listener.
+# plus a combined truststore and certs/tmp/ client credentials for the TLS tests.
 #
 # Idempotent: an existing keystore is kept; the truststore is always rebuilt
 # so new CAs (ours + any pre-existing kafka-*.truststore.jks) are visible.
@@ -17,6 +16,13 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SSL_DIR="$HERE/../../certs/kafka/ssl"
+CLIENT_DIR="$HERE/../../certs/tmp"
+for tool in openssl keytool; do
+    command -v "$tool" >/dev/null || {
+        echo "[certs] required tool not found: $tool" >&2
+        exit 1
+    }
+done
 mkdir -p "$SSL_DIR"
 cd "$SSL_DIR"
 
@@ -96,11 +102,12 @@ cat "$CA_CRT" >"$tmp_all_pem"
 
 for jks in kafka-*.truststore.jks; do
     [[ -f "$jks" ]] || continue
-    openssl pkcs12 -in "$jks" -nokeys -passin "pass:$STOREPASS" 2>/dev/null \
-        >> "$tmp_all_pem" || true
+    keytool -list -rfc -storepass "$STOREPASS" -keystore "$jks" \
+        >> "$tmp_all_pem"
 done
 
 tmp_split="$(mktemp -d)"
+trap 'rm -f "$tmp_all_pem"; rm -rf "$tmp_split"' EXIT
 awk -v outdir="$tmp_split" '
     BEGIN { n = 0; out = "" }
     /-----BEGIN CERTIFICATE-----/ { n++; out = outdir "/cert_" n ".pem"; capture = 1 }
@@ -108,8 +115,12 @@ awk -v outdir="$tmp_split" '
     /-----END CERTIFICATE-----/   { capture = 0 }
 ' "$tmp_all_pem"
 
+mkdir -p "$CLIENT_DIR"
+# Both broker CAs must be available, including the shipped downstream CA.
+: > "$CLIENT_DIR/kafka-ca.crt"
 for f in "$tmp_split"/cert_*.pem; do
     [[ -f "$f" ]] || continue
+    cat "$f" >> "$CLIENT_DIR/kafka-ca.crt"
     # Alias: short fingerprint hash so duplicates don't double-import.
     alias="ca-$(openssl x509 -in "$f" -noout -fingerprint -sha256 2>/dev/null \
         | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' | cut -c1-16)"
@@ -120,7 +131,42 @@ for f in "$tmp_split"/cert_*.pem; do
     keytool -importcert -noprompt -storepass "$STOREPASS" \
         -alias "$alias" -file "$f" -keystore "$TRUST" >/dev/null
 done
-rm -rf "$tmp_split"
+# Generate only local test credentials; these directories remain gitignored.
+gen_client_credentials() {
+    local name="$1"
+    local base="$CLIENT_DIR/$name"
+    local regenerate_encrypted=0
+    if [[ ! -f "$base.key" || ! -f "$base.crt" ]]; then
+        echo "[certs] generating $name client certificate"
+        openssl genrsa -out "$base.key" 2048
+        openssl req -new -key "$base.key" -subj "/CN=$name" \
+            -out "$tmp_split/$name.csr"
+        printf '%s\n' 'basicConstraints=CA:FALSE' \
+            'keyUsage=digitalSignature,keyEncipherment' \
+            'extendedKeyUsage=clientAuth' > "$tmp_split/$name.ext"
+        openssl x509 -req -CA "$CA_CRT" -CAkey "$CA_KEY" \
+            -in "$tmp_split/$name.csr" -out "$base.crt" \
+            -days "$VALID_DAYS" -sha256 -CAcreateserial \
+            -extfile "$tmp_split/$name.ext"
+        regenerate_encrypted=1
+    fi
+    if [[ ! -f "$base.pw" ]]; then
+        openssl rand -hex 32 > "$base.pw"
+        regenerate_encrypted=1
+    fi
+    if [[ ! -f "$base.key.enc" || "$regenerate_encrypted" == 1 ]]; then
+        echo "[certs] generating $name encrypted key"
+        openssl pkcs8 -topk8 -in "$base.key" -out "$base.key.enc" \
+            -v2 aes-256-cbc -v2prf hmacWithSHA256 \
+            -passout "file:$base.pw"
+    fi
+    # Read-only bind mounts must be readable by the container's test user.
+    chmod 644 "$base.crt" "$base.key" "$base.key.enc" "$base.pw"
+}
+
+gen_client_credentials airgap-upstream
+gen_client_credentials airgap-downstream
+chmod 644 "$CLIENT_DIR/kafka-ca.crt"
 
 echo "[certs] done:"
 ls -1 "$SSL_DIR" | sed 's/^/  /'

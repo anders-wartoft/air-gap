@@ -490,12 +490,15 @@ Verify TLS to the Kafka brokers at both ends.
 **Setup.**
 
 * Both Kafka clusters have SSL on 9094 / 8094 (default in this environment).
-* Run `./generate-kafka-certs.sh` once (writes
-  `certs/kafka/ssl/kafka-*.keystore.jks` and `kafka-trust.jks`).
+* The runner automatically calls `./generate-kafka-certs.sh` (writes
+  `certs/kafka/ssl/kafka-*.keystore.jks`, `kafka-trust.jks`, and the client
+  certificates, keys, and passwords under `certs/tmp/`). Run it manually
+  before starting Compose directly.
 * The two broker clusters are signed by **different CAs** — the script's
   idempotent "keep existing" check means the shipped
   `kafka-downstream.keystore.jks` is still signed by `MyKafkaCA`
-  (= `certs/tmp/kafka-ca.crt`) while `kafka-upstream.keystore.jks` is a
+  (included in the `certs/tmp/kafka-ca.crt` CA bundle) while
+  `kafka-upstream.keystore.jks` is a
   freshly regenerated keystore signed by `airgap-testenv-ca`
   (= `certs/kafka/ssl/testenv-ca.crt`). The brokers' combined
   `kafka-trust.jks` trusts both CAs, so client certs from either CA work
@@ -2593,7 +2596,8 @@ Config files (all under [config/testcases/](../../config/testcases)):
 Kafka clusters are signed by DIFFERENT CAs.** `kafka-upstream`'s broker
 cert is signed by `airgap-testenv-ca` (regenerated more recently, at
 `certs/kafka/ssl/testenv-ca.crt`); `kafka-downstream`'s broker cert is
-still signed by the older `MyKafkaCA` (at `certs/tmp/kafka-ca.crt`).
+still signed by the older `MyKafkaCA` (included in the generated
+`certs/tmp/kafka-ca.crt` CA bundle, alongside `airgap-testenv-ca`).
 This is a pre-existing property of the repo's cert generation history,
 not something TC-17 introduced — TC-6's existing downstream config
 already works around it by using a different `caFile` than its
@@ -2602,8 +2606,8 @@ TLS pattern" and copy the wrong one (an early draft of this chain
 variant did exactly that, and the symptom was a confusing `tls: failed
 to verify certificate: x509: certificate signed by unknown authority`
 only on the downstream side). dedup's truststore
-(`kafka-trust.jks`) sidesteps this entirely by bundling BOTH CAs, so
-it alone doesn't need to pick a side.
+(`kafka-trust.jks`) and the generated PEM bundle (`certs/tmp/kafka-ca.crt`)
+sidestep this by bundling BOTH CAs.
 
 Two other environment-specific overrides are required because the
 compose services' `environment:` blocks always win over manifest

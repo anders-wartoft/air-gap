@@ -281,6 +281,8 @@ if (( PAUSE )); then
 fi
 echo
 
+bash "$HERE/generate-kafka-certs.sh"
+
 if [[ -n "$AUTO_EXIT_FROM" ]]; then
     # Compose names containers deterministically as <project>-<service>-<index>;
     # the project name is pinned via `name: airgap-testenv` in
