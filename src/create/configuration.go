@@ -285,6 +285,12 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 			Logger.Fatalf("Cannot write to resend file '%s': %v", result.resendFileName, err)
 		}
 	}
+	if result.logFileName != "" {
+		if err := Logger.SetLogFile(result.logFileName); err != nil {
+			Logger.Fatal(err)
+		}
+	}
+	result.WarnProductionConfiguration("startup")
 	return result
 }
 

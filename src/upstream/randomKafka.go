@@ -21,7 +21,7 @@ func (r *RandomKafkaAdapter) SetTLS(certFile, keyFile, caFile, keyPasswordFile s
 // Read starts generating messages and calls the handler for each one.
 // It respects ctx cancellation and stops when handler returns false.
 func (r *RandomKafkaAdapter) Read(
-	_ context.Context,
+	ctx context.Context,
 	name string,
 	offset int,
 	bootstrapServers, topic, group, from string,
@@ -30,11 +30,7 @@ func (r *RandomKafkaAdapter) Read(
 	Logger.Debugf("RandomKafkaAdapter Read() called: name=%s offset=%d topic=%q group=%q from=%q",
 		name, offset, topic, group, from)
 
-	// Create a background context we can cancel
-	ctx := context.Background()
-
-	// Launch background goroutine
-	go func() {
+	func() {
 		i := 0
 		Logger.Debugf("RandomKafkaAdapter goroutine started")
 		for {

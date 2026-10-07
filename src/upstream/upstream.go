@@ -147,7 +147,14 @@ func UpdateKafkaStatus(newStatus string) {
 }
 
 func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
-	var ctx context.Context
+	runUpstream(context.Background(), kafkaClient, udpClient, false)
+}
+
+func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient, wait bool) {
+	var workers sync.WaitGroup
+	if wait {
+		defer workers.Wait()
+	}
 
 	// Start time for statistics
 	timeStart = time.Now().Unix()
@@ -155,8 +162,10 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 	// Setup logging to file
 	if config.logFileName != "" {
 		Logger.Print("Configuring log to: " + config.logFileName)
-		if err := Logger.SetLogFile(config.logFileName); err != nil {
-			Logger.Fatal(err)
+		if !wait {
+			if err := Logger.SetLogFile(config.logFileName); err != nil {
+				Logger.Fatal(err)
+			}
 		}
 		Logger.Printf("Upstream version: %s, build number: %s", version.GitVersion, BuildNumber)
 		Logger.Print("Log to file started up")
@@ -164,10 +173,18 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 
 	// Stats logger
 	if config.logStatistics > 0 {
+		workers.Add(1)
 		go func() {
+			defer workers.Done()
 			interval := time.Duration(config.logStatistics) * time.Second
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
 			for {
-				time.Sleep(interval)
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
 				recv := atomic.SwapInt64(&receivedEvents, 0)
 				sent := atomic.SwapInt64(&sentEvents, 0)
 				msgsSent := atomic.SwapInt64(&messagesSent, 0)
@@ -260,8 +277,6 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 		Logger.Printf("No encryption will be used.")
 	}
 
-	ctx = context.Background()
-
 	var timeFrom time.Time
 	if config.from == "" {
 		// set timeFrom to beginning of time
@@ -288,7 +303,9 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 	}
 
 	for _, thread := range config.sendingThreads {
+		workers.Add(1)
 		go func(thread map[string]int) {
+			defer workers.Done()
 			// Use a token bucket per thread for EPS limiting
 			var bucket *TokenBucket
 			if config.eps > 0 {
@@ -301,7 +318,7 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 					if bucket != nil {
 						bucket.Take()
 					}
-					return kafkaHandler(timeFrom, udpClient, id, key, t, received)
+					return kafkaHandlerWithContext(ctx, timeFrom, udpClient, id, key, t, received)
 				}
 				Logger.Debugf("Starting Kafka read: %s offset %d", name, offset)
 				kafkaClient.Read(ctx, name, offset,
@@ -312,6 +329,10 @@ func RunUpstream(kafkaClient KafkaClient, udpClient UDPClient) {
 	}
 }
 func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, t time.Time, received []byte) bool {
+	return kafkaHandlerWithContext(context.Background(), timeFrom, udpClient, id, nil, t, received)
+}
+
+func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient UDPClient, id string, _ []byte, t time.Time, received []byte) bool {
 	atomic.AddInt64(&receivedEvents, 1)
 	atomic.AddInt64(&totalReceived, 1)
 
@@ -478,7 +499,11 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 					attempt, retryLimitStr, id, transportErr, retryIntervalMs)
 			}
 		}
-		time.Sleep(time.Duration(retryIntervalMs) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(time.Duration(retryIntervalMs) * time.Millisecond):
+		}
 	}
 
 	// All retries failed - update status and don't consume the message
@@ -547,9 +572,6 @@ func Main(build string) {
 	// Setup logging to file
 	if config.logFileName != "" {
 		Logger.Print("Configuring log to: " + config.logFileName)
-		if err := Logger.SetLogFile(config.logFileName); err != nil {
-			Logger.Fatal(err)
-		}
 		Logger.Printf("Downstream version: %s", BuildNumber)
 		Logger.Print("Log to file started up")
 	}
@@ -619,23 +641,35 @@ func Main(build string) {
 	}
 
 	// Run upstream
-	go RunUpstream(kafkaAdapter, transportAdapter)
+	runContext, cancelRun := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var reloadWorkers sync.WaitGroup
+	go func() {
+		runUpstream(runContext, kafkaAdapter, transportAdapter, true)
+		close(done)
+	}()
 
 	// Wait for exit signals
 	for {
 		select {
 		case <-sigterm:
 			Logger.Printf("Received SIGTERM, shutting down")
+			cancelRun()
+			<-done
+			reloadWorkers.Wait()
 			messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 				fmt.Appendf(nil, "%s Upstream %s terminating by signal...", protocol.GetTimestamp(), config.id), config.payloadSize)
 			transportAdapter.SendMessage(messages[0])
 			transportAdapter.Close()
+			config.WarnProductionConfiguration("shutdown")
 			return
 		case <-hup:
 			// Run SIGHUP work in a separate goroutine so the signal loop stays
 			// responsive — ReloadTLSConfig may need to acquire t.mu which could be
 			// briefly held by a send goroutine, and SetLogFile does I/O.
+			reloadWorkers.Add(1)
 			go func() {
+				defer reloadWorkers.Done()
 				Logger.Printf("SIGHUP received: reopening logs with name %s and reloading TLS certificates", config.logFileName)
 				if config.logFileName != "" {
 					Logger.Printf("Reopening logs for logrotate. New name: %s", config.logFileName)

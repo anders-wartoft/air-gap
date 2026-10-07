@@ -954,6 +954,12 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	}
 	Logger.Printf("pid:%d", os.Getpid())
 
+	if result.logFileName != "" {
+		if err := Logger.SetLogFile(result.logFileName); err != nil {
+			Logger.Fatal(err)
+		}
+	}
+	result.WarnProductionConfiguration("startup")
 	return result
 }
 

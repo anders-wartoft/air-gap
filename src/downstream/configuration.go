@@ -991,6 +991,12 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 
 	logConfiguration(result)
 	Logger.Print("Configuration OK")
+	if result.logFileName != "" {
+		if err := Logger.SetLogFile(result.logFileName); err != nil {
+			Logger.Fatal(err)
+		}
+	}
+	result.WarnProductionConfiguration("startup")
 	return result
 }
 func intPow(base int, exp uint) int {

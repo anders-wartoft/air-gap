@@ -196,7 +196,6 @@ func (u *UDPAdapterLinux) Listen(ip string, port int, rcvBufSize int, handler fu
 
 	// --- shutdown ---
 	u.Close()
-	close(packetChan)
 
 	// Give workers a small timeout to finish processing remaining messages
 	timeout := time.After(2 * time.Second)
@@ -210,7 +209,9 @@ func (u *UDPAdapterLinux) Listen(ip string, port int, rcvBufSize int, handler fu
 	case <-done:
 	case <-timeout:
 		Logger.Warnf("UDPAdapter shutdown timeout reached, some messages may be lost")
+		<-done
 	}
+	close(packetChan)
 }
 
 // Close closes all sockets

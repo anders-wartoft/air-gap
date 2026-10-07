@@ -3372,9 +3372,22 @@ Only upstream and downstream. No Kafka in the data path — the test uses
 
 **What it proves.**
 
-Upstream need not be restarted when downstream recycles. TCP transport
-preserves event ordering across the restart and loses nothing — Kafka's
-in-flight message is only marked as sent once downstream acknowledges.
+A passing run demonstrates reconnection without restarting upstream and no
+missing or duplicate messages in that run. The verifier checks the real
+downstream sequence; the generic timer-service verdict is not evidence of
+delivery.
+
+The current TCP protocol has no application-level delivery acknowledgment.
+A successful socket write is not proof that downstream processed the event,
+so this test does not establish a universal no-loss guarantee for in-flight
+messages during shutdown or failure.
+
+On orderly shutdown, downstream closes the TCP listener and active
+connections before its two-second flush delay. Keeping the listener open
+after handlers stop reading lets upstream reconnect and write events that
+are discarded. The local regression test
+`TestTCPShutdownClosesListenerBeforeFlushDelay` checks this shutdown ordering;
+it does not replace the Docker restart/delivery test.
 
 **Chain run (Docker).**
 
@@ -3904,3 +3917,137 @@ force-recreate patterns).
 deliberate design — see its section above for why a performance benchmark
 can't have a meaningful automated chain variant). `./run-testcases.sh`
 with no arguments runs the full suite.
+
+## TC-26 — Production configuration warning acceptance tests
+
+* Covers: REQ-50
+* Status: **Implemented**.
+* Runner: Unit and subprocess lifecycle tests, not the Docker chain runner. No Kafka, Docker,
+  LogGenerator, or real certificate files are required.
+* Scope: Upstream, downstream, create, resend, and Java dedup only.
+
+The rollout scenario is a previously verified test environment copied into
+production without changing its configuration. Warnings identify risks for
+review, not a universal definition of an invalid production deployment.
+
+### Initial warning catalog
+
+Each row requires one warning for its setting when its condition applies.
+Threshold comparisons are strict: equality at a stated floor is not warned.
+
+| Application | Setting / condition | Production risk |
+| --- | --- | --- |
+| All four Go applications | `logLevel=DEBUG` or `TRACE` | High log volume; debug logs may expose event data |
+| Upstream/downstream/resend | `logStatistics=0` | Delivery/loss counters are not periodically visible |
+| Upstream | `source=random` | Synthetic traffic rather than real Kafka input |
+| Upstream | non-empty `deliverFilter` | Intentionally skips some events; complementary senders must cover them |
+| Upstream | `transport=tcp` and `tcpRetryTimes>0` | Stops retrying after downstream outage; messages may be lost |
+| Upstream | active Kafka input without `caFile` | Kafka connection is plaintext |
+| Upstream | UDP without `encryption`, or TCP without `tcpTLSEnabled` | Transport payloads are plaintext |
+| Downstream | `target=cmd` or `null` | Console-only output or discarded events, not Kafka delivery |
+| Downstream | active Kafka output without `caFile` | Kafka connection is plaintext |
+| Downstream | `transport=tcp` without `tcpTLSCertFile` | TCP listener is plaintext |
+| Downstream | TLS TCP listener with `tcpTLSClientAuth=none` or `allow` | Client authentication is not mandatory |
+| Downstream | `channelBufferSize<16384` | Small queue increases backpressure/drop risk |
+| Downstream | UDP `rcvBufSize<4194304` | Small requested socket buffer increases overflow risk |
+| Downstream | UDP `readBufferMultiplier<16` | Reduced receive-buffer headroom |
+| Downstream | `maximumDecompressSize<1048576` | Larger legitimate decompressed events are rejected |
+| Create/resend | active Kafka connection without `caFile` | Kafka connection is plaintext |
+| Resend | `encryption=false` | UDP resend payloads are plaintext |
+| Resend | encryption enabled with `generateNewSymmetricKeyEvery=0` | One symmetric key is used for the entire job |
+| Java dedup | `WINDOW_SIZE<1000` | Windows roll quickly; old arrivals may bypass deduplication |
+| Java dedup | `MAX_WINDOWS<500` | Short retained history; delayed resends may bypass deduplication |
+| Java dedup | effective `state.dir` under `/tmp` or `/var/tmp` | Temporary local state may be removed, requiring restoration |
+| Java dedup | effective `num.standby.replicas=0` | No warm standby state for failover |
+| Java dedup | effective `security.protocol=PLAINTEXT` or `SASL_PLAINTEXT` | Kafka transport is unencrypted, even if SASL authenticates |
+
+The dedup floors use the [FAQ's 500,000-offset example](../../doc/FAQ.md).
+Warn for either small dimension even if a large other dimension compensates:
+these are explicit review heuristics. Include the retained offset capacity in
+the risk explanation; calculate it without 32-bit overflow.
+
+### Settings reviewed without fixed warning thresholds
+
+Worker counts, batch size, payload size/MTU, event rate limits, compression
+thresholds, partition translations/ranges, resend date/offset ranges,
+retry/commit/persistence/report intervals, fail-fast, and memory/reassembly
+limits depend on throughput, packet sizes, topology, and retention policy.
+Do not label their valid values unsafe based solely on arbitrary cutoffs.
+`limit=first` is a valid production setting: create finds the first missing gap
+in each partition, and resend replays from that offset onwards, not just that
+single offset. It must not trigger a production warning.
+Intentional input-content filters and redundant delivery filters require
+deployment-wide coverage review; warn about configured delivery sampling
+without claiming it is necessarily a mistake.
+
+UDP downstream has no "encryption required" switch; do not infer the
+sender's encryption policy from private-key filenames. `SO_RXQ_OVFL` is
+not inherently unsafe and must not trigger a warning. A configured CA is
+not proof of certificate validity or strong TLS policy. Certificate expiry,
+permissions, and deployment workload sizing need separate operational checks.
+Java logging is not a dedicated application environment setting; do not add
+a fictional `LOG_LEVEL` knob in this first catalog.
+
+### Executable unit acceptance contract
+
+Go: `TransferConfiguration.WarnProductionConfiguration(phase string)`, with
+either value or pointer receiver. Java: package-visible static
+`PartitionDedupApp.warnProductionConfiguration(Properties effective, String phase)`.
+The Java properties use resolved keys `WINDOW_SIZE`, `MAX_WINDOWS`,
+`state.dir`, `num.standby.replicas`, and `security.protocol`.
+
+Each warning is one log event with this searchable envelope:
+
+```text
+[WARN] [PRODUCTION-CONFIG] phase=startup setting=MAX_WINDOWS value=5 risk=...
+```
+
+For Java the logging framework supplies WARN severity. The message envelope
+is the same; the message itself need not contain a duplicate `[WARN]`.
+The risk must contain an explanation, not an empty placeholder.
+
+Tests cover every catalog row, boundary/equality controls, inactive paths,
+combined risks (no missing or duplicate warnings), startup/shutdown phase
+parity, repeated evaluations, configuration immutability, and warning
+visibility above WARN without changing the log threshold. Absence of the
+required method is an explicit test failure, never a skipped or passing test.
+
+From the repository root:
+
+```bash
+go test ./src/upstream ./src/downstream ./src/create ./src/resend -run ProductionWarnings -count=1
+mvn -f java-streams/pom.xml -Dtest=ProductionConfigurationWarningsTest test
+```
+
+Both commands include subprocess lifecycle checks. They must not be
+added to the Docker chain.
+
+### Lifecycle acceptance
+
+1. Start each application with multiple risk settings and valid dependencies.
+   Verify exactly one startup warning per setting as the final events from
+   configuration checking. Override a file risk via environment/CLI with a
+   safe value; verify no stale-file warning.
+2. Stop each daemon with SIGTERM and SIGINT. Also let create/resend finish
+   normally and let dedup terminate via its orderly fail-fast path.
+3. After all workers, Kafka clients, transports, final statistics, and
+   shutdown hooks finish, verify the shutdown warning block is the final
+   application log block, occurs once, and matches the effective settings.
+   Include both file and stderr logging.
+4. Repeat with no catalog risks: neither lifecycle phase emits production
+   warnings. Delivery, configuration, exit codes, and log level are unchanged.
+5. Use ERROR/FATAL thresholds: production warnings remain visible at WARN.
+   Concurrent cleanup must not write application logs after the warning block.
+
+Automated subprocess tests verify SIGINT/SIGTERM for the Go daemons, normal
+completion and SIGINT/SIGTERM for create/resend, and file logging for all four
+Go applications. They compare startup/shutdown warning sets and reject any
+application log after the final warning block. Kafka access uses test adapters;
+the Go daemon tests use real local UDP sockets. A TCP cleanup regression checks
+that idle connections are closed and their handlers joined.
+
+Java subprocess tests verify SIGTERM during startup and fail-fast termination
+against an unavailable local broker, preserving the fail-fast failure exit code.
+The JVM hook waits for main lifecycle cleanup and owns logger shutdown so Log4j
+cannot close before the final warning block. These checks do not replace a
+Kafka-backed delivery/rebalance integration run or Linux runtime verification.

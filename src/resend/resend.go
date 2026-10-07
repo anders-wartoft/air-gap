@@ -279,6 +279,10 @@ func filter(jsonFilter JsonFilter, topic string, partition int, offset int64) bo
 // Runs one Kafka reader goroutine per "result" entry and cancels all readers
 // when every partition has reached its recorded LastOffset.
 func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConfiguration, done chan<- struct{}) {
+	runResend(context.Background(), kafkaClient, udpClient, config, done)
+}
+
+func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient, config TransferConfiguration, done chan<- struct{}) {
 	// Start time for statistics
 	timeStart = time.Now().Unix()
 	Logger.Debugf("RunResend starting at: %s", time.Now().Format(time.RFC3339))
@@ -356,8 +360,6 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 	// Context that will be cancelled when all partitions are done
 	// ctx, cancel := context.WithCancel(context.Background())
 	// defer cancel()
-	ctx := context.Background()
-
 	// Track finished partitions
 	var wg sync.WaitGroup
 	var finished sync.Map // map[int]bool keyed by partition
@@ -503,7 +505,14 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 			if lastSendTime > 0 {
 				nextAllowed := lastSendTime + minInterval
 				if now < nextAllowed {
-					time.Sleep(time.Duration(nextAllowed - now))
+					timer := time.NewTimer(time.Duration(nextAllowed - now))
+					select {
+					case <-timer.C:
+					case <-ctx.Done():
+						timer.Stop()
+						limiterMu.Unlock()
+						return false
+					}
 					now = nextAllowed
 				}
 			}
@@ -571,6 +580,10 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 }
 
 func Main(build string) {
+	mainWithKafka(build, NewKafkaAdapter())
+}
+
+func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 	BuildNumber = build
 	Logger.Printf("Resend version: %s starting up...", version.GitVersion)
 	Logger.Printf("Build number: %s", BuildNumber)
@@ -606,10 +619,6 @@ func Main(build string) {
 	// Set the log file name
 	if config.logFileName != "" {
 		Logger.Print("Configuring log to: " + config.logFileName)
-		err := Logger.SetLogFile(config.logFileName)
-		if err != nil {
-			Logger.Fatal(err)
-		}
 		Logger.Printf("resend version: %s", version.GitVersion)
 		Logger.Print("Log to file started up")
 	}
@@ -618,11 +627,26 @@ func Main(build string) {
 	logConfiguration(config)
 
 	// Stats logger
+	statsContext, stopStats := context.WithCancel(context.Background())
+	var statsWorkers sync.WaitGroup
+	defer func() {
+		stopStats()
+		statsWorkers.Wait()
+		config.WarnProductionConfiguration("shutdown")
+	}()
 	if config.logStatistics > 0 {
+		statsWorkers.Add(1)
 		go func() {
+			defer statsWorkers.Done()
 			interval := time.Duration(config.logStatistics) * time.Second
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
 			for {
-				time.Sleep(interval)
+				select {
+				case <-statsContext.Done():
+					return
+				case <-ticker.C:
+				}
 				recv := atomic.SwapInt64(&receivedEvents, 0)
 				sent := atomic.SwapInt64(&sentEvents, 0)
 				totalRecv := atomic.LoadInt64(&totalReceived)
@@ -669,11 +693,12 @@ func Main(build string) {
 	}
 
 	// Choose Kafka adapter
-	kafkaAdapter := NewKafkaAdapter()
 	done := make(chan struct{})
 
 	// Run upstream
-	go RunResend(kafkaAdapter, udpAdapter, config, done)
+	runContext, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	go runResend(runContext, kafkaAdapter, udpAdapter, config, done)
 
 	// Wait for exit signals
 	for {
@@ -704,6 +729,8 @@ func Main(build string) {
 			return
 		case <-sigterm:
 			Logger.Printf("Received SIGTERM, shutting down")
+			cancelRun()
+			<-done
 			messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 				fmt.Appendf(nil, "%s %s shutting down", protocol.GetTimestamp(), config.id), config.payloadSize)
 			udpAdapter.SendMessage(messages[0])

@@ -30,6 +30,12 @@ type LoggerType struct{}
 
 var Logger = &LoggerType{}
 
+// ProductionWarning is always visible without changing the configured threshold.
+func (l *LoggerType) ProductionWarning(phase, setting string, value interface{}, risk string) {
+	logger.Printf("[WARN] [PRODUCTION-CONFIG] phase=%s setting=%s value=%v risk=%s",
+		phase, setting, value, risk)
+}
+
 // Quick check to see if we can log in some level
 func (l *LoggerType) CanLog(level LogLevel) bool {
 	return logLevel <= level

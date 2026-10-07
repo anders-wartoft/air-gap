@@ -784,6 +784,12 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		Logger.Printf("No input filtering is enabled.")
 	}
 
+	if result.logFileName != "" {
+		if err := Logger.SetLogFile(result.logFileName); err != nil {
+			Logger.Fatal(err)
+		}
+	}
+	result.WarnProductionConfiguration("startup")
 	return result
 }
 

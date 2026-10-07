@@ -80,6 +80,8 @@ func UpdateKafkaStatus(newStatus string) {
 
 // RunDownstream runs the downstream process
 func RunDownstream(transportReceiver TransportReceiver, stopChan <-chan struct{}) {
+	var workers sync.WaitGroup
+	defer workers.Wait()
 	timeStart = time.Now().Unix()
 
 	if config.mtu == 0 {
@@ -91,7 +93,11 @@ func RunDownstream(transportReceiver TransportReceiver, stopChan <-chan struct{}
 	}
 
 	if config.logStatistics > 0 {
-		go logStatistics(stopChan)
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			logStatistics(stopChan)
+		}()
 	}
 
 	Logger.Infof("Downstream version: %s", BuildNumber)
@@ -106,17 +112,34 @@ func RunDownstream(transportReceiver TransportReceiver, stopChan <-chan struct{}
 		config.readBufferMultiplier,
 		config.enableRxqOvfl,
 	)
-	go transportReceiver.Listen(
-		config.targetIP,
-		config.targetPort,
-		config.rcvBufSize,
-		handleUdpMessage,
-		config.mtu,
-		stopChan,
-		config.numReceivers,
-	)
+	listen := func() {
+		transportReceiver.Listen(
+			config.targetIP,
+			config.targetPort,
+			config.rcvBufSize,
+			handleUdpMessage,
+			config.mtu,
+			stopChan,
+			config.numReceivers,
+		)
+	}
+	if config.transport == "tcp" {
+		// TCP Listen installs the listener and launches its connection handlers.
+		listen()
+	} else {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			listen()
+		}()
+	}
 	// Wait for stop signal
 	<-stopChan
+	if config.transport == "tcp" {
+		if err := transportReceiver.Close(); err != nil {
+			Logger.Errorf("Failed to close TCP receiver: %v", err)
+		}
+	}
 
 	// Give a small timeout to flush remaining messages
 	time.Sleep(2 * time.Second)
@@ -326,9 +349,6 @@ func Main(build string) {
 	if config.logFileName != "" {
 		Logger.Printf("pid:%d", os.Getpid())
 		Logger.Print("Configuring log to: " + config.logFileName)
-		if err := Logger.SetLogFile(config.logFileName); err != nil {
-			Logger.Fatal(err)
-		}
 		Logger.Print("Log to file started up")
 	}
 
@@ -394,7 +414,13 @@ func Main(build string) {
 				fmt.Appendf(nil, "Downstream %s terminating by signal...", config.id))
 			kafka.FlushCache()
 			close(stopChan)
+			<-done
 			receiver.Close()
+			kafka.StopBackgroundThread()
+			if config.target == "kafka" {
+				kafka.CloseProducer()
+			}
+			config.WarnProductionConfiguration("shutdown")
 			return
 		case <-hup:
 			Logger.Printf("SIGHUP received: reopening logs with name %s and reloading TLS certificates", config.logFileName)
@@ -417,6 +443,11 @@ func Main(build string) {
 			kafka.FlushCache()
 			close(stopChan)
 			receiver.Close()
+			kafka.StopBackgroundThread()
+			if config.target == "kafka" {
+				kafka.CloseProducer()
+			}
+			config.WarnProductionConfiguration("shutdown")
 			return
 		}
 	}

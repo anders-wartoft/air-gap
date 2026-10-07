@@ -87,6 +87,7 @@ type TCPAdapter struct {
 	wg             sync.WaitGroup
 	closed         bool
 	closeMutex     sync.Mutex
+	connections    map[net.Conn]struct{}
 	activeConns    atomic.Int64
 	maxConnections int            // configured via maxTCPConnections; caps goroutine exhaustion
 	tlsConfig      *tls.Config    // nil for plain TCP
@@ -303,6 +304,12 @@ func (t *TCPAdapter) Listen(
 				Logger.Warnf("Error accepting TCP connection: %v", err)
 				continue
 			}
+			select {
+			case <-stopChan:
+				conn.Close()
+				return
+			default:
+			}
 
 			// Handle each connection in its own goroutine
 			if t.activeConns.Add(1) > int64(t.maxConnections) {
@@ -311,6 +318,18 @@ func (t *TCPAdapter) Listen(
 				Logger.Warnf("Max TCP connections (%d) reached, rejecting connection from %s", t.maxConnections, conn.RemoteAddr())
 				continue
 			}
+			t.closeMutex.Lock()
+			if t.closed {
+				t.closeMutex.Unlock()
+				t.activeConns.Add(-1)
+				conn.Close()
+				return
+			}
+			if t.connections == nil {
+				t.connections = make(map[net.Conn]struct{})
+			}
+			t.connections[conn] = struct{}{}
+			t.closeMutex.Unlock()
 			Logger.Debugf("[TLS downstream] Accepted TCP connection from %s (active: %d)", conn.RemoteAddr(), t.activeConns.Load())
 			t.wg.Add(1)
 			go t.handleConnection(conn, callback, stopChan)
@@ -387,6 +406,11 @@ func logClientKeyInfo(cert *x509.Certificate) {
 // handleConnection reads messages from a TCP connection and invokes the callback
 func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stopChan <-chan struct{}) {
 	defer t.wg.Done()
+	defer func() {
+		t.closeMutex.Lock()
+		delete(t.connections, conn)
+		t.closeMutex.Unlock()
+	}()
 	defer t.activeConns.Add(-1)
 	defer conn.Close()
 
@@ -541,15 +565,23 @@ func (t *TCPAdapter) readMessage(reader *bufio.Reader) ([]byte, error) {
 // Close gracefully shuts down the TCP listener and active connections
 func (t *TCPAdapter) Close() error {
 	t.closeMutex.Lock()
-	defer t.closeMutex.Unlock()
 
 	if t.closed {
+		t.closeMutex.Unlock()
 		return nil
 	}
 	t.closed = true
+	connections := make([]net.Conn, 0, len(t.connections))
+	for conn := range t.connections {
+		connections = append(connections, conn)
+	}
+	t.closeMutex.Unlock()
 
 	if t.listener != nil {
 		t.listener.Close()
+	}
+	for _, conn := range connections {
+		conn.Close()
 	}
 
 	// Wait for all goroutines to finish (with timeout)
@@ -564,6 +596,7 @@ func (t *TCPAdapter) Close() error {
 		Logger.Infof("TCP adapter closed gracefully")
 	case <-time.After(5 * time.Second):
 		Logger.Warnf("TCP adapter close timeout")
+		<-done
 	}
 
 	return nil

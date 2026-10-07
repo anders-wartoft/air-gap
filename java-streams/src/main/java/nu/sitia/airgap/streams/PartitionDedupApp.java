@@ -100,6 +100,11 @@ public class PartitionDedupApp {
             .synchronizedSet(new java.util.HashSet<>());
 
     // SLF4J logger for this class
+    static {
+        // Keep Log4j alive until our shutdown hook has emitted its final warnings.
+        System.setProperty("log4j.shutdownHookEnabled", "false");
+    }
+
     private static final Logger LOG = LoggerFactory.getLogger(PartitionDedupApp.class);
     private static final String RUN_ID = UUID.randomUUID().toString().substring(0, 8);
     // Support multiple input topics for Merge/Fan-in pattern
@@ -368,6 +373,8 @@ public class PartitionDedupApp {
         }
 
         validateRuntimeConfiguration();
+        props.setProperty("WINDOW_SIZE", Long.toString(WINDOW_SIZE));
+        props.setProperty("MAX_WINDOWS", Integer.toString(MAX_WINDOWS));
 
         LOG.info("Starting PartitionDedupApp {} build {} ... runId={}", APP_VERSION, BUILD_NUMBER, RUN_ID);
 
@@ -408,9 +415,15 @@ public class PartitionDedupApp {
         AtomicBoolean terminateRequested = new AtomicBoolean(false);
         AtomicReference<KafkaStreams> currentStreamsRef = new AtomicReference<>();
         AtomicInteger processExitCode = new AtomicInteger(0);
+        AtomicBoolean shutdownWarningsEmitted = new AtomicBoolean(false);
+        AtomicBoolean jvmShutdown = new AtomicBoolean(false);
+        CountDownLatch lifecycleFinished = new CountDownLatch(1);
+        Thread mainThread = Thread.currentThread();
 
         Thread shutdownHook = new Thread(() -> {
+            jvmShutdown.set(true);
             terminateRequested.set(true);
+            mainThread.interrupt();
             KafkaStreams currentStreams = currentStreamsRef.get();
             if (currentStreams != null) {
                 try {
@@ -419,10 +432,21 @@ public class PartitionDedupApp {
                     LOG.warn("Error while closing Kafka Streams in JVM shutdown hook", e);
                 }
             }
+            try {
+                lifecycleFinished.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOG.warn("Interrupted waiting for dedup lifecycle cleanup", e);
+            }
+            if (shutdownWarningsEmitted.compareAndSet(false, true)) {
+                warnProductionConfiguration(props, "shutdown");
+            }
+            org.apache.logging.log4j.LogManager.shutdown();
         }, "streams-shutdown-hook");
 
         try {
             Runtime.getRuntime().addShutdownHook(shutdownHook);
+            warnProductionConfiguration(props, "startup");
 
             int restartAttempt = 0;
             while (!terminateRequested.get()) {
@@ -555,13 +579,17 @@ public class PartitionDedupApp {
                     }
                 } finally {
                     if (failFastScheduler != null) {
-                        failFastScheduler.shutdownNow();
+                        stopMonitor(failFastScheduler);
                     }
-                    if (shuttingDown.compareAndSet(false, true)) {
-                        try {
-                            streams.close(Duration.ofSeconds(10));
-                        } catch (Exception closeError) {
-                            LOG.warn("Error while closing Kafka Streams in finally block", closeError);
+                    shuttingDown.set(true);
+                    boolean interrupted = Thread.interrupted();
+                    try {
+                        streams.close();
+                    } catch (Exception closeError) {
+                        LOG.warn("Error while closing Kafka Streams in finally block", closeError);
+                    } finally {
+                        if (interrupted) {
+                            Thread.currentThread().interrupt();
                         }
                     }
                     currentStreamsRef.compareAndSet(streams, null);
@@ -603,12 +631,75 @@ public class PartitionDedupApp {
                 LOG.debug("Failed to remove shutdown hook", removeHookError);
             }
 
-            if (processExitCode.get() != 0) {
-                LOG.info("Exiting process with code {} due to FAIL_FAST condition (runId={})", processExitCode.get(),
-                        RUN_ID);
+            lifecycleFinished.countDown();
+            if (!jvmShutdown.get() && shutdownWarningsEmitted.compareAndSet(false, true)) {
+                warnProductionConfiguration(props, "shutdown");
+                org.apache.logging.log4j.LogManager.shutdown();
+            }
+            if (!jvmShutdown.get() && processExitCode.get() != 0) {
                 System.exit(processExitCode.get());
             }
         }
+    }
+
+    static void stopMonitor(ScheduledExecutorService scheduler) {
+        scheduler.shutdownNow();
+        boolean interrupted = Thread.interrupted();
+        try {
+            while (!scheduler.isTerminated()) {
+                try {
+                    scheduler.awaitTermination(1, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    static void warnProductionConfiguration(Properties effective, String phase) {
+        long windowSize = Long.parseLong(effective.getProperty("WINDOW_SIZE"));
+        int maxWindows = Integer.parseInt(effective.getProperty("MAX_WINDOWS"));
+        String capacity = java.math.BigInteger.valueOf(windowSize)
+                .multiply(java.math.BigInteger.valueOf(maxWindows)).toString();
+        if (windowSize < 1000) {
+            productionWarning(phase, "WINDOW_SIZE", Long.toString(windowSize),
+                    "Small windows roll quickly; retained capacity " + capacity
+                    + " offsets per partition may let late events bypass deduplication.");
+        }
+        if (maxWindows < 500) {
+            productionWarning(phase, "MAX_WINDOWS", Integer.toString(maxWindows),
+                    "Short history retains " + capacity
+                    + " offsets per partition; delayed resends may bypass deduplication.");
+        }
+        String stateDir = effective.getProperty("state.dir", "");
+        java.nio.file.Path path = java.nio.file.Paths.get(stateDir).normalize();
+        if (path.startsWith("/tmp") || path.startsWith("/var/tmp")) {
+            productionWarning(phase, "state.dir", stateDir,
+                    "Temporary local state may be removed and require restoration.");
+        }
+        String standby = String.valueOf(effective.getOrDefault("num.standby.replicas", "0"));
+        if (Integer.parseInt(standby) == 0) {
+            productionWarning(phase, "num.standby.replicas", standby,
+                    "No warm standby state is available for failover.");
+        }
+        String security = effective.getProperty("security.protocol", "PLAINTEXT");
+        if ("PLAINTEXT".equals(security) || "SASL_PLAINTEXT".equals(security)) {
+            productionWarning(phase, "security.protocol", security,
+                    "Kafka transport is unencrypted even when SASL authentication is used.");
+        }
+    }
+
+    private static void productionWarning(String phase, String setting, String value, String risk) {
+        org.apache.logging.log4j.core.Logger logger =
+                (org.apache.logging.log4j.core.Logger) org.apache.logging.log4j.LogManager.getLogger(PartitionDedupApp.class);
+        logger.logMessage(PartitionDedupApp.class.getName(), org.apache.logging.log4j.Level.WARN, null,
+                new org.apache.logging.log4j.message.SimpleMessage(
+                        "[PRODUCTION-CONFIG] phase=" + phase + " setting=" + setting
+                        + " value=" + value + " risk=" + risk), null);
     }
 
     private static String resolveKafkaSecurityMode(Properties props) {
@@ -856,7 +947,8 @@ public class PartitionDedupApp {
         }
 
         Properties adminProps = createAdminProps(streamProps);
-        try (Admin admin = Admin.create(adminProps)) {
+        Admin admin = Admin.create(adminProps);
+        try {
             java.util.Set<String> existingTopics = admin.listTopics().names()
                     .get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
 
@@ -867,9 +959,15 @@ public class PartitionDedupApp {
                 }
             }
             return missingTopics;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            LOG.warn("Interrupted verifying source topics before startup", e);
+            return configuredTopics;
         } catch (Exception e) {
             LOG.warn("Unable to verify source topics before startup; treating as unavailable and retrying", e);
             return configuredTopics;
+        } finally {
+            admin.close(Duration.ofSeconds(5));
         }
     }
 

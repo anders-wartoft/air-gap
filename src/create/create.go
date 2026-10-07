@@ -133,6 +133,8 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 
 	var cancel context.CancelFunc
 	var ctx context.Context
+	signalHandlerDone := make(chan struct{})
+	signalHandlerStopped := make(chan struct{})
 
 	// Set time_start at app start
 	timeStart = time.Now().Unix()
@@ -157,10 +159,6 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 		// Set the log file name
 		if config.logFileName != "" {
 			Logger.Print("Configuring log to: " + config.logFileName)
-			err := Logger.SetLogFile(config.logFileName)
-			if err != nil {
-				Logger.Fatal(err)
-			}
 			Logger.Printf("CreateResourceBundle version: %s", version.GitVersion)
 			Logger.Print("Log to file started up")
 		}
@@ -175,6 +173,15 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 			time.Sleep(200 * time.Millisecond)
 		}
 		ctx, cancel = context.WithCancel(context.Background())
+		go func() {
+			defer close(signalHandlerStopped)
+			select {
+			case <-sigterm:
+				Logger.Print("Received termination signal, stopping create")
+				cancel()
+			case <-signalHandlerDone:
+			}
+		}()
 
 		// Map to store last entry for each "topic-partition-windowMin".
 		lastEntries := make(map[string]parsedWindow)
@@ -208,7 +215,7 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 		group := config.groupID
 		// Read all available messages, then exit
 		err = kafkaReader.ReadToEnd(ctx, config.bootstrapServers, config.topic, group, kafkaHandler)
-		if err != nil {
+		if err != nil && ctx.Err() == nil {
 			Logger.Fatalf("Error reading to end of topic: %v", err)
 		}
 
@@ -217,8 +224,12 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 	}
 
 	reload() // initial start
+	close(signalHandlerDone)
+	<-signalHandlerStopped
+	cancel()
 	// Exit after reload finishes (batch mode)
 	Logger.Print("CreateResourceBundle finished, exiting.")
+	config.WarnProductionConfiguration("shutdown")
 	os.Exit(0)
 }
 

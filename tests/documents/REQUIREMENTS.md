@@ -453,3 +453,37 @@ If a cell is blank it means the spreadsheet left that cell blank.
 * Notes: `SO_RXQ_OVFL` has some overhead; it is configurable and should not
   be enabled in production when the system is near its throughput ceiling.
   See `doc/FAQ.md` and `doc/Monitoring.md`.
+
+## REQ-50 — Production configuration warnings
+
+> Upstream, downstream, create, resend, and the Java deduplicator must warn
+> at startup and again as their final application log events on orderly
+> shutdown when effective configuration values indicate test settings or
+> production risks.
+
+* Status: **Implemented**, with unit and subprocess lifecycle acceptance tests.
+* Covered by: TC-26
+* Scope: The four named Go applications and Java dedup; `gaps` is excluded.
+* Notes:
+  * Evaluate the effective configuration after defaults, file settings,
+    environment variables, and command-line overrides have been applied.
+  * A dedicated, reusable `WarnProductionConfiguration(phase)` method in each
+    Go configuration type, and an equivalent Java method, must be called as
+    the last step of successful configuration validation and after shutdown
+    cleanup. Use the same warning rules at both points.
+  * Emit one WARN per affected setting, including its name, effective value,
+    risk, and lifecycle phase. Multiple risks must not hide each other.
+    Warnings must remain visible at ERROR/FATAL log levels, without changing
+    the configured log level or exposing keys, passwords, or message payloads.
+  * Warnings are advisory: do not reject valid configuration, change settings,
+    interrupt startup, alter delivery, or change exit codes.
+  * Shutdown includes SIGINT/SIGTERM and normal batch completion for
+    create/resend, and normal/error-driven termination of Java dedup.
+    Emit the final warning block once per process, after workers, clients,
+    statistics, and application shutdown logs have finished. SIGKILL, power
+    loss, and invalid configuration rejected before startup are excluded.
+  * Thresholds in TC-26 are provisional heuristics, not production guarantees.
+    Operators must size dedup history for per-partition throughput multiplied
+    by maximum resend/out-of-order delay, with headroom and memory monitoring.
+    A below-range offset can be delivered without deduplication; this does
+    not imply that every packet bypasses deduplication.

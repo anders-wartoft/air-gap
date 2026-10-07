@@ -168,6 +168,11 @@ LogGenerator producer is done — see "LogGenerator automation" below):
 See [TESTCASES.md](../documents/TESTCASES.md) for the full catalogue and
 [REQUIREMENTS.md](../documents/REQUIREMENTS.md) for the requirements each case covers.
 
+TC-26 ([production configuration warnings](../documents/TESTCASES.md#tc-26--production-configuration-warning-acceptance-tests))
+uses unit and subprocess lifecycle tests for REQ-50, not a Compose
+testcase. Run its documented Go/Maven commands separately; do not include
+it in the automated chain. No Kafka brokers or LogGenerator are required.
+
 ## Updating the OS independently
 
 The OS image is a build arg on the Dockerfile. The air-gap binary is **not**
