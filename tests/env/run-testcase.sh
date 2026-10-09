@@ -4,7 +4,7 @@
 # Usage:
 #   ./run-testcase.sh <id> [role] [extra-profile ...] [-pause] [-- compose-args...]
 #
-#   id             testcase number from TESTCASES.md (1..25)
+#   id             testcase number from TESTCASES.md (available manifests)
 #   role           all        - full stack on this machine (default)
 #                  up-only    - only the upstream half (kafka-upstream + mates
 #                               and the air-gap upstream processes,
@@ -152,6 +152,24 @@ set -o allexport
 # shellcheck disable=SC1090
 source "$MANIFEST"
 set +o allexport
+
+# Standalone cases own their isolated stack and verdict, without Kafka/LG.
+if [[ -n "${TC_RUNNER-}" ]]; then
+    if [[ "$ROLE" != all ]] || ((${#EXTRA_PROFILES[@]})); then
+        echo "TC-${TC_ID} requires role=all and no extra profiles" >&2
+        exit 2
+    fi
+    if ((${#PASSTHROUGH[@]})); then
+        for arg in "${PASSTHROUGH[@]}"; do
+            if [[ "$arg" != --build ]]; then
+                echo "TC-${TC_ID} only accepts --build after -- (images are built by default)" >&2
+                exit 2
+            fi
+        done
+    fi
+    export TC_PAUSE="$PAUSE"
+    exec bash "$HERE/$TC_RUNNER"
+fi
 
 # Collect the full profile set (manifest + extras).
 PROFILES=()

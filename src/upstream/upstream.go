@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"sitia.nu/airgap/src/internal/pinnedtls"
 	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/mtu"
 	"sitia.nu/airgap/src/protocol"
@@ -530,6 +531,12 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 }
 
 func Main(build string) {
+	if handled, err := pinnedtls.GenerateCommand(os.Args[1:], "client", os.Stdout); handled {
+		if err != nil {
+			Logger.Fatal(err)
+		}
+		return
+	}
 	BuildNumber = build
 	Logger.Printf("Upstream version: %s starting up...", version.GitVersion)
 	Logger.Printf("Build number: %s", BuildNumber)
@@ -566,6 +573,12 @@ func Main(build string) {
 	}
 	conf = overrideConfiguration(conf)
 	conf = parseCommandLineOverrides(overrideArgs, conf)
+	resolved := conf
+	if conf.tcpTLSAuthMode == "pinned" {
+		if err := pinnedtls.ValidateReloadFile(fileName); err != nil {
+			Logger.Fatal(err)
+		}
+	}
 	conf = checkConfiguration(conf)
 	config = conf
 
@@ -590,24 +603,47 @@ func Main(build string) {
 		if config.tcpTLSEnabled {
 			Logger.Printf("Building TLS configuration for TCP transport")
 			var err error
-			tcpTLSConfig, err = buildUpstreamTLSConfig(
-				config.tcpTLSCAFile,
-				config.tcpTLSCertFile,
-				config.tcpTLSKeyFile,
-				config.tcpTLSKeyPasswordFile,
-				config.tcpTLSCipherSuites,
-				config.tcpTLSServerCNRegex,
-			)
+			tcpTLSConfig, err = config.BuildTLSConfig()
 			if err != nil {
 				Logger.Fatalf("Error building TCP TLS configuration: %v", err)
 			}
 			Logger.Printf("TCP TLS configured (mTLS=%t, cipherSuites=%q)", config.tcpTLSCertFile != "", config.tcpTLSCipherSuites)
 		}
-		adapter, errTCP := NewTCPAdapter(address, tcpTLSConfig)
+		var manager *pinnedtls.Manager
+		if config.tcpTLSAuthMode == "pinned" {
+			snapshot, err := pinnedtls.Prepare(config.tcpTLSCertFile, config.tcpTLSKeyFile, config.tcpTLSTrustedKeysDir, false)
+			if err != nil {
+				Logger.Fatal(err)
+			}
+			var pending bool
+			snapshot, pending, err = pinnedtls.RestorePendingClient(config.tcpTLSTrustedKeysDir, snapshot)
+			if err != nil {
+				Logger.Fatal(err)
+			}
+			if pending {
+				if !config.tcpTLSRotationEnabled {
+					Logger.Fatal("Pending client rotation requires tcpTLSRotationEnabled=true; reconcile recovery state before disabling exchange")
+				}
+				Logger.Warn("Pinned rotation recovery: retained old identity; SIGHUP retries configured replacement")
+			}
+			manager, err = pinnedtls.NewManager(snapshot)
+			if err != nil {
+				Logger.Fatal(err)
+			}
+			tcpTLSConfig = manager.Config()
+			manager.StartAging(config.tcpTLSPinIdleSeconds, func(fingerprints []string) {
+				Logger.Infof("Pinned TLS idle aging: role=server purged=%v; disk unchanged, SIGHUP restores pins", fingerprints)
+			})
+		}
+		adapter, errTCP := newTCPAdapter(address, tcpTLSConfig, manager)
 		if errTCP != nil {
+			if manager != nil {
+				manager.StopAging()
+			}
 			Logger.Fatalf("Error creating TCP adapter: %v", errTCP)
 		}
 		if config.tcpTLSEnabled {
+			adapter.pinned = config.tcpTLSAuthMode == "pinned"
 			adapter.SetTLSReloadParams(
 				config.tcpTLSCAFile,
 				config.tcpTLSCertFile,
@@ -644,6 +680,7 @@ func Main(build string) {
 	runContext, cancelRun := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	var reloadWorkers sync.WaitGroup
+	var reloadMu sync.Mutex
 	go func() {
 		runUpstream(runContext, kafkaAdapter, transportAdapter, true)
 		close(done)
@@ -670,6 +707,8 @@ func Main(build string) {
 			reloadWorkers.Add(1)
 			go func() {
 				defer reloadWorkers.Done()
+				reloadMu.Lock()
+				defer reloadMu.Unlock()
 				Logger.Printf("SIGHUP received: reopening logs with name %s and reloading TLS certificates", config.logFileName)
 				if config.logFileName != "" {
 					Logger.Printf("Reopening logs for logrotate. New name: %s", config.logFileName)
@@ -678,7 +717,13 @@ func Main(build string) {
 					}
 				}
 				if tcpAdapter, ok := transportAdapter.(*TCPAdapter); ok {
-					if err := tcpAdapter.ReloadTLSConfig(); err != nil {
+					var err error
+					if tcpAdapter.pinned {
+						err = reloadPinnedConfiguration(fileName, overrideArgs, &resolved, tcpAdapter)
+					} else {
+						err = tcpAdapter.ReloadTLSConfig()
+					}
+					if err != nil {
 						Logger.Errorf("TLS certificate reload failed: %v", err)
 					}
 				}

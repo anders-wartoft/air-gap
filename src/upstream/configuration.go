@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rsa"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"sitia.nu/airgap/src/filter"
 	"sitia.nu/airgap/src/inputfilter"
+	"sitia.nu/airgap/src/internal/pinnedtls"
 )
 
 type TransferConfiguration struct {
@@ -62,6 +64,10 @@ type TransferConfiguration struct {
 	tcpTLSCAFile                 string                   // CA certificate file to verify downstream server cert
 	tcpTLSServerCNRegex          string                   // regex matched against server certificate CN; allows IP-based connections and load-balanced setups
 	tcpTLSCipherSuites           string                   // TLS protocol policy: empty or "TLS1.3" = TLS 1.3 only; comma-separated TLS 1.2 cipher names = TLS 1.2 with those suites
+	tcpTLSAuthMode               string
+	tcpTLSTrustedKeysDir         string
+	tcpTLSRotationEnabled        bool
+	tcpTLSPinIdleSeconds         int
 }
 
 func DefaultConfiguration() TransferConfiguration {
@@ -86,6 +92,7 @@ func DefaultConfiguration() TransferConfiguration {
 	config.tcpRetryErrorLevel = "WARN" // default: warn level for retry errors
 	config.tcpTLSEnabled = false       // default: plain TCP
 	config.tcpTLSCipherSuites = ""     // default: TLS 1.3 enforced
+	config.tcpTLSAuthMode = "ca"
 	return config
 }
 
@@ -98,9 +105,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 	Logger.Print("Reading configuration from file " + fileName)
 	file, err := os.Open(fileName)
 	if err != nil {
-		// No file, but that's ok. Maybe the user only uses environment variables
-		Logger.Fatalf("File: %s not found.", fileName)
-		return result, nil
+		return result, fmt.Errorf("read configuration %s: %w", fileName, err)
 	}
 	defer file.Close()
 
@@ -123,7 +128,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "eps":
 			tmp, err := strconv.ParseFloat(value, 64)
 			if err != nil {
-				Logger.Fatalf("Error in config eps. Illegal value: %s. Legal values are float >= -1", value)
+				return result, fmt.Errorf("Error in config eps. Illegal value: %s. Legal values are float >= -1", value)
 			} else {
 				result.eps = tmp
 				Logger.Printf("eps: %f", tmp)
@@ -137,9 +142,9 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 			} else {
 				tmp, err := strconv.Atoi(value)
 				if err != nil {
-					Logger.Fatalf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or a two byte integer", value)
+					return result, fmt.Errorf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or a two byte integer", value)
 				} else if tmp < 0 || tmp > 65535 {
-					Logger.Fatalf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or 0-65535", value)
+					return result, fmt.Errorf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or 0-65535", value)
 				} else {
 					result.payloadSize = uint16(tmp)
 				}
@@ -160,10 +165,10 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "targetPort":
 			tmp, err := strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error in config targetPort. Illegal value: %s. Legal values are 0-65535", value)
+				return result, fmt.Errorf("Error in config targetPort. Illegal value: %s. Legal values are 0-65535", value)
 			} else {
 				if tmp < 0 || tmp > 65535 {
-					Logger.Fatalf("Error in config targetPort. Illegal value: %s. Legal values are 0-65535", value)
+					return result, fmt.Errorf("Error in config targetPort. Illegal value: %s. Legal values are 0-65535", value)
 				} else {
 					result.targetPort = tmp
 				}
@@ -172,7 +177,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "transport":
 			transport := strings.ToLower(value)
 			if transport != "udp" && transport != "tcp" {
-				Logger.Fatalf("Error in config transport. Illegal value: %s. Legal values are 'udp' or 'tcp'", value)
+				return result, fmt.Errorf("Error in config transport. Illegal value: %s. Legal values are 'udp' or 'tcp'", value)
 			}
 			result.transport = transport
 			Logger.Printf("transport: %s", result.transport)
@@ -194,7 +199,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 			if value == "kafka" || value == "random" {
 				result.source = value
 			} else {
-				Logger.Fatalf("Unknown source %s. Legal values are 'kafka' or 'random'.", value)
+				return result, fmt.Errorf("Unknown source %s. Legal values are 'kafka' or 'random'.", value)
 			}
 			Logger.Printf("source: %s", value)
 		case "logLevel":
@@ -203,7 +208,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "encryption":
 			tmp, err := strconv.ParseBool(value)
 			if err != nil {
-				Logger.Fatalf("Error in config encryption. Illegal value: %s. Legal values are true or false", value)
+				return result, fmt.Errorf("Error in config encryption. Illegal value: %s. Legal values are true or false", value)
 			} else {
 				result.encryption = tmp
 			}
@@ -217,10 +222,10 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "generateNewSymmetricKeyEvery": // second
 			tmp, err := strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error in config generateNewSymmetricKeyEvery. Illegal value: %s. Legal values are a four byte integer", value)
+				return result, fmt.Errorf("Error in config generateNewSymmetricKeyEvery. Illegal value: %s. Legal values are a four byte integer", value)
 			} else {
 				if tmp < 2 {
-					Logger.Fatalf("Error in config generateNewSymmetricKeyEvery. Illegal value: %s. Legal values are integer >= 2", value)
+					return result, fmt.Errorf("Error in config generateNewSymmetricKeyEvery. Illegal value: %s. Legal values are integer >= 2", value)
 				} else {
 					result.generateNewSymmetricKeyEvery = tmp
 					Logger.Printf("generateNewSymmetricKeyEvery: %d", tmp)
@@ -231,7 +236,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 			result.sendingThreads = nil
 			// Read the new ones
 			if err := json.Unmarshal([]byte(value), &result.sendingThreads); err != nil {
-				Logger.Fatalf("Error in config sendingThreads. Illegal value: %s. Legal values are an array of objects", value)
+				return result, fmt.Errorf("Error in config sendingThreads. Illegal value: %s. Legal values are an array of objects", value)
 			}
 			Logger.Printf("sendingThreads: %v", result.sendingThreads)
 
@@ -252,12 +257,12 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "logStatistics":
 			tmp, err := strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error in config logStatistics. Illegal value: %s. Legal values are a non-negative integer", value)
+				return result, fmt.Errorf("Error in config logStatistics. Illegal value: %s. Legal values are a non-negative integer", value)
 			} else {
 				if tmp < 0 {
-					Logger.Fatalf("Error in config logStatistics. Illegal value: %s. Legal values are a non-negative integer", value)
+					return result, fmt.Errorf("Error in config logStatistics. Illegal value: %s. Legal values are a non-negative integer", value)
 				} else if tmp > math.MaxInt32 {
-					Logger.Fatalf("Error in config logStatistics. Illegal value: %s. Legal values are a non-negative integer below %d", value, math.MaxInt32)
+					return result, fmt.Errorf("Error in config logStatistics. Illegal value: %s. Legal values are a non-negative integer below %d", value, math.MaxInt32)
 				} else {
 					// Safe: tmp is checked to fit in int32 above, and Logger.Fatalf terminates execution if not.
 					// codeql[incorrect-integer-conversion]: value is checked and fatal error terminates on overflow
@@ -268,10 +273,10 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "compressWhenLengthExceeds":
 			tmp, err := strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error in config compressWhenLengthExceeds. Illegal value: %s. Legal values are a non-negative integer", value)
+				return result, fmt.Errorf("Error in config compressWhenLengthExceeds. Illegal value: %s. Legal values are a non-negative integer", value)
 			} else {
 				if tmp < 0 {
-					Logger.Fatalf("Error in config compressWhenLengthExceeds. Illegal value: %s. Legal values are a non-negative integer", value)
+					return result, fmt.Errorf("Error in config compressWhenLengthExceeds. Illegal value: %s. Legal values are a non-negative integer", value)
 				} else {
 					result.compressWhenLengthExceeds = tmp
 					Logger.Printf("compressWhenLengthExceeds: %d", result.compressWhenLengthExceeds)
@@ -286,10 +291,10 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "inputFilterTimeout":
 			tmp, err := strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error in config inputFilterTimeout. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
+				return result, fmt.Errorf("Error in config inputFilterTimeout. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
 			} else {
 				if tmp <= 0 {
-					Logger.Fatalf("Error in config inputFilterTimeout. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
+					return result, fmt.Errorf("Error in config inputFilterTimeout. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
 				} else {
 					result.inputFilterTimeout = tmp
 					Logger.Printf("inputFilterTimeout: %d", result.inputFilterTimeout)
@@ -298,10 +303,10 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "partitionStartValue":
 			tmp, err := strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
+				return result, fmt.Errorf("Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
 			} else {
 				if tmp < 0 {
-					Logger.Fatalf("Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
+					return result, fmt.Errorf("Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
 				} else {
 					result.partitionStartValue = tmp
 					Logger.Printf("partitionStartValue: %d", result.partitionStartValue)
@@ -310,7 +315,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "tcpRetryInterval":
 			tmp, err := strconv.Atoi(value)
 			if err != nil || tmp <= 0 {
-				Logger.Fatalf("Error in config tcpRetryInterval. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
+				return result, fmt.Errorf("Error in config tcpRetryInterval. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
 			} else {
 				result.tcpRetryInterval = tmp
 				Logger.Printf("tcpRetryInterval: %d", tmp)
@@ -318,7 +323,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "tcpRetryTimes":
 			tmp, err := strconv.Atoi(value)
 			if err != nil || tmp < 0 {
-				Logger.Fatalf("Error in config tcpRetryTimes. Illegal value: %s. Legal values are a non-negative integer (0 = infinite)", value)
+				return result, fmt.Errorf("Error in config tcpRetryTimes. Illegal value: %s. Legal values are a non-negative integer (0 = infinite)", value)
 			} else {
 				result.tcpRetryTimes = tmp
 				Logger.Printf("tcpRetryTimes: %d", tmp)
@@ -330,12 +335,12 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 				result.tcpRetryErrorLevel = level
 				Logger.Printf("tcpRetryErrorLevel: %s", level)
 			default:
-				Logger.Fatalf("Error in config tcpRetryErrorLevel. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR", value)
+				return result, fmt.Errorf("Error in config tcpRetryErrorLevel. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR", value)
 			}
 		case "tcpTLSEnabled":
 			tmp, err := strconv.ParseBool(value)
 			if err != nil {
-				Logger.Fatalf("Error in config tcpTLSEnabled. Illegal value: %s. Legal values are true or false", value)
+				return result, fmt.Errorf("Error in config tcpTLSEnabled. Illegal value: %s. Legal values are true or false", value)
 			} else {
 				result.tcpTLSEnabled = tmp
 				Logger.Printf("tcpTLSEnabled: %t", tmp)
@@ -361,8 +366,23 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "tcpTLSCipherSuites":
 			result.tcpTLSCipherSuites = value
 			Logger.Printf("tcpTLSCipherSuites: %s", value)
+		case "tcpTLSAuthMode":
+			result.tcpTLSAuthMode = value
+		case "tcpTLSTrustedKeysDir":
+			result.tcpTLSTrustedKeysDir = value
+		case "tcpTLSRotationEnabled":
+			if value != "true" && value != "false" {
+				return result, fmt.Errorf("invalid tcpTLSRotationEnabled; expected true or false")
+			}
+			result.tcpTLSRotationEnabled = value == "true"
+		case "tcpTLSPinIdleSeconds":
+			seconds, err := pinnedtls.ParsePinIdleSeconds(value)
+			if err != nil {
+				return result, err
+			}
+			result.tcpTLSPinIdleSeconds = seconds
 		default:
-			Logger.Fatalf("Unknown configuration key: %s", key)
+			return result, fmt.Errorf("Unknown configuration key: %s", key)
 		}
 	}
 
@@ -608,6 +628,25 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		Logger.Print("Overriding tcpTLSCipherSuites with environment variable: " + prefix + "TCP_TLS_CIPHER_SUITES with value: " + v)
 		config.tcpTLSCipherSuites = v
 	}
+	if v, present := os.LookupEnv(prefix + "TCP_TLS_AUTH_MODE"); present {
+		config.tcpTLSAuthMode = v
+	}
+	if v, present := os.LookupEnv(prefix + "TCP_TLS_PIN_IDLE_SECONDS"); present {
+		seconds, err := pinnedtls.ParsePinIdleSeconds(v)
+		if err != nil {
+			Logger.Fatal(err)
+		}
+		config.tcpTLSPinIdleSeconds = seconds
+	}
+	if v, present := os.LookupEnv(prefix + "TCP_TLS_ROTATION_ENABLED"); present {
+		if v != "true" && v != "false" {
+			Logger.Fatal("invalid TCP_TLS_ROTATION_ENABLED; expected true or false")
+		}
+		config.tcpTLSRotationEnabled = v == "true"
+	}
+	if v, present := os.LookupEnv(prefix + "TCP_TLS_TRUSTED_KEYS_DIR"); present {
+		config.tcpTLSTrustedKeysDir = v
+	}
 
 	return config
 }
@@ -769,6 +808,21 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			config.tcpTLSServerCNRegex = value
 		case "tcpTLSCipherSuites":
 			config.tcpTLSCipherSuites = value
+		case "tcpTLSAuthMode":
+			config.tcpTLSAuthMode = value
+		case "tcpTLSTrustedKeysDir":
+			config.tcpTLSTrustedKeysDir = value
+		case "tcpTLSRotationEnabled":
+			if value != "true" && value != "false" {
+				Logger.Fatal("invalid --tcpTLSRotationEnabled; expected true or false")
+			}
+			config.tcpTLSRotationEnabled = value == "true"
+		case "tcpTLSPinIdleSeconds":
+			seconds, err := pinnedtls.ParsePinIdleSeconds(value)
+			if err != nil {
+				Logger.Fatal(err)
+			}
+			config.tcpTLSPinIdleSeconds = seconds
 		default:
 			Logger.Warnf("Unknown command line override: --%s", key)
 		}
@@ -903,11 +957,19 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		Logger.Fatalf("Error in config tcpRetryErrorLevel. Illegal value: %s. Legal values are DEBUG, INFO, WARN, ERROR", result.tcpRetryErrorLevel)
 	}
 	// Validate TCP TLS configuration
+	if err := result.validateTLSMode(); err != nil {
+		Logger.Fatal(err)
+	}
+	if result.tcpTLSAuthMode == "pinned" {
+		if _, err := result.BuildTLSConfig(); err != nil {
+			Logger.Fatal(err)
+		}
+	}
 	if result.tcpTLSEnabled {
 		if result.transport != "tcp" {
 			Logger.Fatal("Error: tcpTLSEnabled=true requires transport=tcp")
 		}
-		if result.tcpTLSCAFile == "" {
+		if result.tcpTLSAuthMode != "pinned" && result.tcpTLSCAFile == "" {
 			Logger.Fatal("Missing required configuration: tcpTLSCAFile (required when tcpTLSEnabled=true)")
 		}
 	}
@@ -1013,6 +1075,10 @@ func logConfiguration(config TransferConfiguration) {
 		Logger.Printf("  tcpRetryTimes: %s", tcpRetryTimesStr)
 		Logger.Printf("  tcpRetryErrorLevel: %s", config.tcpRetryErrorLevel)
 		Logger.Printf("  tcpTLSEnabled: %t", config.tcpTLSEnabled)
+		Logger.Printf("  tcpTLSAuthMode: %s", config.tcpTLSAuthMode)
+		Logger.Printf("  tcpTLSRotationEnabled: %t", config.tcpTLSRotationEnabled)
+		Logger.Printf("  tcpTLSPinIdleSeconds: %d", config.tcpTLSPinIdleSeconds)
+		Logger.Printf("  tcpTLSTrustedKeysDir: %s", config.tcpTLSTrustedKeysDir)
 		if config.tcpTLSEnabled {
 			Logger.Printf("  tcpTLSCertFile: %s", config.tcpTLSCertFile)
 			Logger.Printf("  tcpTLSKeyFile: %s", config.tcpTLSKeyFile)

@@ -116,10 +116,10 @@ printed on its own line at the very end (`total runtime: Xm YYs (Zs)`).
 * `❌ testcase N FAIL` — fail; verdict block always shown so you see why
   without re-running.
 * `🤔 testcase N SKIP` — the manifest `testcases/NN.env` doesn't declare
-  `LG_PRODUCER_CONFIG` or `AUTO_EXIT_SERVICE`, so there's no auto-exit
+  `TC_RUNNER`, `LG_PRODUCER_CONFIG`, or `AUTO_EXIT_SERVICE`, so there's no auto-exit
   path and running it would hang the chain. Chain-safe testcases listed
   as "**Chain run**" below are: **TC-1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-  11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25**. The others still work with `./run-testcase.sh N` directly
+  11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27**. The others still work with `./run-testcase.sh N` directly
   for the manual procedure. Note: TC-16 SKIPs by deliberate design, not
   because it's unimplemented — see its section below for why a
   performance benchmark can't have a meaningful automated chain variant.
@@ -129,6 +129,7 @@ understands these manifest knobs:
 
 | Knob | Effect |
 | --- | --- |
+| `TC_RUNNER=path` | Run an isolated standalone Docker test (TC-26/27) which owns its stack, assertions, exit status, and cleanup. Supports `all` and `-pause`; avoids starting the Kafka/LG stack. |
 | `LG_PRODUCER_CONFIG` | Activate the `lg-producer` compose profile, use it as the auto-exit container. |
 | `LG_SINK_CONFIG` | Activate the `lg-sink` compose profile; its summary is the verdict source. |
 | `AUTO_EXIT_PROFILE` + `AUTO_EXIT_SERVICE` | Override the LG defaults with a bespoke test service (e.g. TC-7's `tc7-binary-test` Go-based tester). |
@@ -1761,10 +1762,11 @@ The chain variant uses the filter split:
   `eps=100` (same scale as TC-9/TC-10 chain runs).
 
 Expected flow: each chain reads all 100 Kafka records but forwards
-only half (disjoint by `deliverFilter`) → 50 UDP packets from chain-a
-+ 50 UDP packets from chain-b → 100 records on `transfer-12a` →
-dedup emits 100 unique records to the `dedup` topic (zero duplicates
-because the two halves don't overlap) → lg-sink reads 100 unique.
+only half (disjoint by `deliverFilter`) → 50 UDP packets from
+chain-a + 50 UDP packets from chain-b → 100 records on
+`transfer-12a` → dedup emits 100 unique records to the `dedup`
+topic (zero duplicates because the two halves don't overlap) →
+lg-sink reads 100 unique.
 
 Manifest knobs in [testcases/12.env](../env/testcases/12.env):
 
@@ -2829,6 +2831,7 @@ tc18: ─── PASS ───
 ```
 
 **Procedure (bare-metal / interactive).**
+
 1. Topic `transfer` exists on both clusters (5 partitions each). List with
    SSL to confirm.
 1. Start a Kafka console consumer on the downstream `transfer`, using
@@ -3922,8 +3925,9 @@ with no arguments runs the full suite.
 
 * Covers: REQ-50
 * Status: **Implemented**.
-* Runner: Unit and subprocess lifecycle tests, not the Docker chain runner. No Kafka, Docker,
-  LogGenerator, or real certificate files are required.
+* Runners: Unit/subprocess lifecycle tests plus `tests/env/run-testcases.sh 26`
+  for the Docker upstream/downstream red-thread smoke. The unit tests need no
+  Docker; the Docker smoke needs no Kafka, LogGenerator, Java, or certificates.
 * Scope: Upstream, downstream, create, resend, and Java dedup only.
 
 The rollout scenario is a previously verified test environment copied into
@@ -4019,8 +4023,62 @@ go test ./src/upstream ./src/downstream ./src/create ./src/resend -run Productio
 mvn -f java-streams/pom.xml -Dtest=ProductionConfigurationWarningsTest test
 ```
 
-Both commands include subprocess lifecycle checks. They must not be
-added to the Docker chain.
+Both commands include subprocess lifecycle checks. The Docker smoke below
+participates in the chain separately; it does not replace these complete
+catalog and multi-application checks.
+
+### Docker red-thread smoke
+
+From `tests/env`, build current Linux binaries for the Docker architecture
+and run:
+
+```bash
+make -C ../.. build-go              # Linux AMD64
+# On ARM64 Docker hosts instead: make -C ../.. build-go-linux-arm64
+# Set AIRGAP_BIN_DIR=../../target/linux-arm64 in .env for ARM64.
+./run-testcases.sh 26
+./run-testcase.sh 26 -pause
+```
+
+[26.env](../env/testcases/26.env) selects
+[tc26-production-warnings-test.sh](../env/tc26-production-warnings-test.sh),
+which runs [docker-compose.tc26.yml](../env/docker-compose.tc26.yml) in an
+isolated unique project without host ports or shared-stack teardown.
+See the shared [environment prerequisites](../env/README.md#prerequisites)
+for build/architecture selection. This case requires only current Linux
+upstream/downstream binaries and Docker Compose: no Kafka, certificates,
+LogGenerator, or Java build. Its deliberately non-production settings are
+warning fixtures, not a production deployment example.
+
+| Phase | Required evidence |
+| --- | --- |
+| DEBUG startup | Upstream warns exactly once for DEBUG, disabled statistics, synthetic source, and plaintext TCP; downstream warns exactly once for DEBUG, disabled statistics, console target, and plaintext listener. Every warning has WARN severity and a nonempty risk. |
+| DEBUG delivery | At least five distinct real application messages reach downstream despite the warning settings. |
+| SIGTERM shutdown | Each application exits zero within 30 seconds; startup/shutdown warning sets match exactly, and the shutdown warning block is final output. |
+| ERROR environment override | Fresh containers override file DEBUG settings with ERROR; no stale DEBUG warning, but all remaining production warnings still appear at WARN. At least five distinct messages are delivered. |
+| SIGINT shutdown | Both applications exit zero within 30 seconds and repeat the exact effective warning sets as final output. |
+
+Safe TCP queue/decompression floors and infinite retry configuration must
+not produce additional warnings. Fresh containers isolate the two runs.
+Any missing, duplicate, extra, malformed, or late warning/output fails the
+test with a nonzero result and service logs. Delivery has a 30-second deadline.
+Normal completion removes the isolated stack and temporary log captures.
+`-pause` retains final **stopped** containers for inspection, since the
+shutdown block cannot be tested while processes remain running.
+The runner prints inspection and teardown commands. Split-machine roles and
+extra profiles are unsupported.
+
+[test-production-warnings.sh](../env/test-production-warnings.sh) checks the
+shared [warning validator](../env/lib/production-warnings.sh) against valid
+fixtures and rejects missing phases, unexpected values, duplicates, wrong
+severity, empty risk, out-of-order phases, and output after shutdown:
+
+```bash
+bash ./test-production-warnings.sh
+```
+
+This red-thread smoke verifies Linux Docker upstream/downstream lifecycle,
+not Java dedup/create/resend or the exhaustive warning catalog.
 
 ### Lifecycle acceptance
 
@@ -4051,3 +4109,458 @@ against an unavailable local broker, preserving the fail-fast failure exit code.
 The JVM hook waits for main lifecycle cleanup and owns logger shutdown so Log4j
 cannot close before the final warning block. These checks do not replace a
 Kafka-backed delivery/rebalance integration run or Linux runtime verification.
+
+---
+
+## TC-27 — Pinned TLS provisioning, reload, rotation, and revocation
+
+* Covers: REQ-51.01 through REQ-51.16.
+* Status: **First, lifecycle, and core rotation batches implemented / partial REQ-51 acceptance**.
+  An isolated Docker red-thread smoke test is available through
+  `tests/env/run-testcase.sh 27` and can participate in the Docker chain.
+* Runners: Go unit tests for parsing/policy/state transitions,
+  local TCP/TLS integration tests, subprocess SIGHUP/restart tests, and the
+  Docker end-to-end pinned-delivery/rejection smoke test below.
+* Scope: Upstream/downstream TCP TLS, not Kafka TLS or UDP/diode transport.
+
+### Docker red-thread smoke
+
+Run from `tests/env`:
+
+```bash
+make -C ../.. build-go              # Linux AMD64
+# On ARM64 Docker hosts instead: make -C ../.. build-go-linux-arm64
+# Set AIRGAP_BIN_DIR=../../target/linux-arm64 in .env for ARM64.
+./run-testcase.sh 27
+./run-testcase.sh 27 -pause
+```
+
+See the shared [environment prerequisites](../env/README.md#prerequisites)
+for Linux architecture/build selection. Only current Linux upstream/downstream
+binaries and Docker Compose are needed; no Kafka, Java, LogGenerator, host
+OpenSSL, or CA certificates are required. The data path is `source=random`
+through mutually pinned TLS 1.3 to `target=cmd`.
+
+[tc27-pinned-tls-test.sh](../env/tc27-pinned-tls-test.sh), selected by
+[27.env](../env/testcases/27.env), uses
+[docker-compose.tc27.yml](../env/docker-compose.tc27.yml) and the
+[upstream](../../config/testcases/upstream-pinned-27-docker.properties) /
+[downstream](../../config/testcases/downstream-pinned-27-docker.properties)
+configurations. Each run generates two client and two server identities
+using the real binary generation commands; only the first public identity
+from each side is provisioned to the opposite side.
+
+| Phase | Required evidence |
+| --- | --- |
+| Trusted A/S | Exact peer/SPKI fingerprint authentication on both sides, TLS 1.3, and at least five distinct application messages received by downstream. |
+| Unknown client U/S | Downstream explicitly rejects U's fingerprint; no received application messages during the rejection window; both services remain running. |
+| Trusted A/unknown server U | Upstream explicitly rejects U's fingerprint; no received application messages during the rejection window; both services remain running. |
+| Restore A/S | Fresh exact-fingerprint authentication and at least five distinct received messages prove recovery, not merely a successful dial/write. |
+
+Recreated containers provide fresh per-phase logs, avoiding old positive
+evidence contaminating negative or recovery checks. Positive/log conditions
+have 30-second deadlines; negative no-delivery windows last three seconds
+after explicit rejection. Failures return nonzero and include service logs.
+A unique Compose project and temporary owner-only fixtures avoid disturbing
+the shared test environment. Fixtures are removed after teardown, unless
+`-pause` retains a successful run for inspection. This smoke test covers
+TC-27.01–03 in part, not the complete reload/rotation/aging/fault matrix.
+Each endpoint mounts only its own private identity directory and the opposite
+peer's public trust directory. With `-pause`, all assertions still run and
+the runner prints the exact project/fixture inspection and teardown commands;
+remove retained private-key fixtures afterward. Split-machine roles and
+extra profiles are unsupported. The test also participates in
+`./run-testcases.sh 27` or a range containing 27.
+
+### Common setup and evidence
+
+Prepare a server identity S, client identities A and B, replacement keys
+A2 and S2, and an untrusted identity U. Keep private keys local to their
+owners. Provision both directions independently. Use separate temporary
+configuration/trust directories, real TLS connections, and deterministic
+test synchronization rather than fixed sleeps. Run reload/revocation tests
+with both full handshakes and TLS session resumption enabled.
+
+Record authentication outcomes, active peer/key counts, fingerprints,
+connection closures, persistence results, process exit codes, and lifecycle
+logs. A TLS success requires completing the handshake and successfully
+exchanging application data; a connect/write alone is insufficient.
+For transfer tests, record source and sink event IDs and explicitly count
+missing and duplicate events. Failures must surface, not become skipped
+tests or success-shaped fallbacks.
+
+The subcase numbers correspond directly to REQ-51 subitems.
+
+| Subcase | Procedure | Expected result |
+| --- | --- | --- |
+| TC-27.01 | Run existing CA-based TLS/mTLS cases. Run mutually pinned A/S with no CA. Try unknown mode, mixed endpoint modes, CA-only keys in pinned mode, conflicting settings, missing required trust, and optional client-auth in pinned mode. | Existing CA behavior remains compatible; pinned A/S authenticates; invalid combinations fail explicitly with no authentication/plaintext fallback. |
+| TC-27.02 | Invoke generation for one set and several sets on each endpoint. Independently parse outputs, compare SPKI fingerprints, prove key-pair correspondence, and inspect permissions. Repeat into occupied paths; inject write failure and unsupported algorithms. | Distinct valid key-sets, canonical matching fingerprints and usable TLS wrappers. Private files are owner-only. No silent overwrite or false success; no private material in output. |
+| TC-27.03 | Copy only public export/fingerprint A to S and S to A. Independently recompute fingerprints. Alter just the fingerprint, then just the key. Verify voice-readable display is identical at both ends. | Valid entries load; mismatched pairs fail. Document that replacing both consistently is not detected by a local hash check and requires independently authenticated provisioning. Private keys never leave owners. |
+| TC-27.04 | Authorize A/A2 under one client identity and B under another; authorize S/S2 on upstream. Exercise each pair. Add identical duplicates, conflicting identity bindings, and wrong-role entries. | Both overlap keys inherit the same identity/permissions; peers remain distinct; wrong-role/conflicting entries are rejected. Duplicate entries do not duplicate authorization. Exactly one configured client identity key is active. |
+| TC-27.05 | Stage a partial entry under an ignored name, copy/rename the complete entry into place, and attempt authentication before and after SIGHUP. Repeat for removal. | Staging files are ignored. Trust changes only after successful explicit reload. Ordinary file-copy/rename operations suffice; no management API is required. |
+| TC-27.06 | Modify each endpoint's file settings and reload; verify environment/CLI precedence. Test unreadable/malformed config, missing directory, mismatched key pair, malformed trust entry, authentication-mode change, and unsupported runtime setting changes. Reload a valid empty peer directory. | One atomic candidate activates or the prior snapshot remains unchanged with an explicit error. Startup rejects invalid input. Empty valid directory denies all peers and revokes prior trust; missing/unreadable directory is a failure, not an empty store. |
+| TC-27.07 | Connect U, a CA-signed but unpinned key, a same-CN different key, and a copied certificate without its private key. Replace an authorized certificate wrapper while keeping its SPKI; vary wrapper names/issuer/dates. Test weak/unsupported algorithms and expired explicit trust authorization. | Only authorized keys with proof of private-key possession authenticate. Wrapper changes do not alter pin identity; names/issuer/dates do not replace trust. Crypto policy and configured trust-entry expiry remain enforced. |
+| TC-27.08 | Manually add A2 and reload S, then select A2 in A's config and SIGHUP A. Verify fresh A2 authentication, then remove A. Repeat server rotation S to S2 with upstream overlap pins. Transfer numbered events throughout. | Rotation completes without process restart; both keys work during overlap. Removed keys fail after reload. Queued work is not intentionally discarded; source/sink missing/duplicate counts are reported, not inferred from TLS success. |
+| TC-27.09 | Change upstream active key to preauthorized A2; capture the structured exchange over the old authenticated connection. Reject fingerprint mismatch, invalid new-key possession proof, wrong identity, missing old key, and an unauthenticated announcement. Inject matching audit-log text without a packet. | Valid preauthorized replacement is acknowledged and used on a new connection. Invalid requests and log text cannot change trust; failed reload/rotation retains the old active identity and reports failure. No private key is transmitted. |
+| TC-27.10 | Request unprovisioned A2 with automatic rotation omitted/disabled, then enabled. Attempt cross-client, permission-escalating, and untrusted initial-pairing requests. | Default/disabled policy rejects without changing disk or memory. Enabled policy accepts only the authenticated client's replacement under existing permissions. Initial pairing cannot bootstrap itself. |
+| TC-27.11 | Interrupt each rotation step: upstream key persistence, downstream entry write/rename/durability, snapshot activation, acknowledgment, client switch. Simulate disk-full/read-only failure and dropped acknowledgment; restart both sides and retry. Replay old requests and race two distinct replacements. | No success before durable installation/activation; no premature client switch. Old keys remain available for recovery. Retries are idempotent; no duplicate authorization, identity changes, revoked-key resurrection, or silent competing-rotation overwrite. Disk and active trust converge after recovery. |
+| TC-27.12 | Remove A while its connection is active and while a handshake is paused at the authorization boundary; SIGHUP S. Attempt full and resumed A connections and A-authorized rotation. Keep A2/B authorized. Repeat removal of S on upstream. Remove an automatically installed pin and restart. | Revoked-key connections close; in-progress, full, and resumed authentication cannot preserve removed trust. Retained keys remain authorized. Revoked keys cannot rotate or resurrect themselves; disk removal remains effective after restart. |
+| TC-27.13 | Test insecure permissions, public entry containing private material, symlink/path escape, malformed/oversized files and packets, unsupported keys, and incomplete staged files. Exercise each documented bound at limit-1, limit, and limit+1. | Valid bounded input works; invalid/excess input is rejected explicitly without partial activation, secret disclosure, or unbounded resource use. No outside-directory trust is loaded. |
+| TC-27.14 | Capture generation/startup/reload/authentication/rotation/revocation output under configured logging thresholds. Search using distinctive private-key/passphrase/session-secret/payload sentinels. | Documented public identity/fingerprint/count/result events are observable; errors actionable. No secrets/payloads leak. Unknown fingerprints are logged as untrusted, not as authenticated peer identities. |
+| TC-27.15 | Load 1,000 clients with two pins each; authenticate first/middle/last entries and unknown keys. Reload while handshakes, data transfer, and rotations run concurrently. Measure lookup/reload latency and memory against the approved budget; run race detection. | All 2,000 pins work with isolated identities; lookup is indexed; snapshots remain consistent; no races or unbounded growth. Published capacity is limited to measured conditions. |
+| TC-27.16 | Review the approved configuration/file/wire/crypto/replay/limit specification, then run existing CA-based TCP and unaffected UDP/Kafka tests. Verify no UDP or server automatic-rotation support is advertised by TC-27. | Design decisions are explicit before code/tests are implemented. Existing interfaces remain compatible; scope and assurance claims match actual implementation and validation. |
+
+### Protocol-extension acceptance specifications (partially executable)
+
+These cases refine TC-27.09–16 for the approved direction: reuse existing
+application framing and `TYPE_KEY_EXCHANGE`, preserve legacy `KEY_UPDATE#`,
+and add a distinctly identified, versioned pinned-rotation payload subtype.
+The detailed matrix is not wholly executable or claimed passing. The approved
+core contract and implemented subset are documented in
+[PinnedRotation.md](../../doc/PinnedRotation.md) and the third batch below.
+Remaining fault hooks, request-rate/performance budgets, and optional expiry
+need further decisions. Cases referencing such a limit use its approved
+value once specified, not an invented threshold.
+
+#### Setup and assertions
+
+Use independently provisioned server S, clients A/B, replacement A2/A3,
+and unknown U. Bind A/A2 to peer-a and B to peer-b; test automatic policy
+omitted, explicitly disabled, and enabled independently. Run both real
+applications with temporary administrator-visible trust directories and
+persistent replay state. Record exact request/response bytes at the test
+endpoint, independently verify new-key signatures, and inspect disk and
+active authorization separately. Do not infer packet contents from logs.
+
+For success, prove the acceptance belongs to the exact request and arrives
+on the authenticated old-key connection only after durable installation
+and activation. Then prove a fresh A2 handshake and application delivery.
+For rejection, require an explicit bounded rejection for authenticated,
+well-framed requests, unchanged trust/replay authorization, and continued
+old-key service. Malformed/untrusted transport may be closed explicitly
+instead of receiving an acknowledgment. Never equate timeout with rejection.
+Restart tests must use the original persistent files, not rebuilt fixtures.
+
+#### Framing, routing, and compatibility
+
+| Case | Procedure | Expected result |
+| --- | --- | --- |
+| TC-27.09-P01 | Encode a pinned request, acceptance, and rejection with the existing formatter; independently decode header, ID, lengths, checksum, and versioned subtype. Deliver TCP bytes in arbitrary read boundaries and several coalesced frames. | Existing outer framing is preserved; each complete message is decoded exactly once. TCP read boundaries do not define messages. Responses use the same framing on the same TLS connection. |
+| TC-27.09-P02 | Exercise supported single/multipart exchanges, or explicit rejection of multipart exchanges if the approved profile forbids them. Mix transfer frames with rotation frames. Try missing, duplicated, reordered, and cross-connection fragments from A/B, including identical claimed message IDs. | Only complete, valid, connection/identity-isolated exchanges reach authorization. No A/B fragment mixing, partial activation, or unbounded assembly. Transfer traffic remains independently routable. |
+| TC-27.09-P03 | Send unknown versions/subtypes, truncated fields, inconsistent lengths, invalid encodings, duplicate/ambiguous fields, wrong message IDs, bad checksums, and trailing data. Recompute the frame checksum after tampering with signed fields. | Parsing fails explicitly and within bounds; checksum correctness cannot bypass signature verification. No legacy-handler fallback or trust mutation. |
+| TC-27.16-P01 | Run the existing UDP RSA-OAEP `KEY_UPDATE#` exchange and encrypted payload delivery using previously supported messages. Also exercise legacy TCP behavior where supported. Compare baseline framing and decoded symmetric key. | Legacy format, dispatch, and delivery behavior remain unchanged. No pinned policy, peer identity, or acknowledgment requirement is introduced into the legacy path. |
+| TC-27.16-P02 | Send pinned request/acceptance/rejection subtypes over UDP, plaintext TCP, and CA-mode TLS. Send a subtype-like payload under legacy `KEY_UPDATE#` and a legacy payload under the pinned discriminator. | Unsupported transports/subtype mismatches reject explicitly; neither pinned trust nor the symmetric key changes. No downgrade, format guessing, or dispatch to the other exchange handler. Ordinary CA/UDP traffic still works. |
+| TC-27.16-P03 | Ask for initial pairing or automatic server-key rotation using the pinned subtype. Run unaffected Kafka/UDP/CA regression tests. | Requests cannot bootstrap trust or rotate server keys automatically. Unsupported scope is explicit; existing interfaces and documentation remain compatible. |
+
+#### Old-key authorization and new-key possession
+
+| Case | Procedure | Expected result |
+| --- | --- | --- |
+| TC-27.09-A01 | Preprovision A2, retain A, select A2 in upstream configuration, and reload. Capture the exchange before client switch. Independently inspect the request and verify the signature. | Request is sent over A-authenticated TLS and contains version, rotation ID, identity binding, freshness, old/new fingerprints, new public key, and bound new-key proof. No private key is transmitted. Matching acceptance precedes fresh A2 use. |
+| TC-27.09-A02 | Authenticate as A but claim peer-b, B's old fingerprint, a different new-key fingerprint, or another role. Try A2 already bound to peer-b. | Local identity is derived from A's authenticated key; cross-peer/role/conflicting bindings reject without changing either peer's authorization. |
+| TC-27.09-A03 | Supply no signature, malformed signature, a signature by A/U instead of A2, or a valid A2 signature over a different request. Change each bound field individually after signing. | Only proof by the proposed new key over the approved complete request is accepted. Altered version, ID, peer, role, fingerprints, key, or freshness invalidates the proof. |
+| TC-27.09-A04 | Present only A2's public key/certificate without private-key possession. Try unsupported/weak keys and mismatched SPKI/fingerprint pairs. | Public material alone never authorizes rotation; crypto profile and canonical SPKI validation apply before persistence. |
+| TC-27.09-A05 | Remove/revoke A before submitting the request, during a paused authorization boundary, and after proof validation but before commit. Try full and resumed connections. | Commit rechecks current old-key authorization; revoked A cannot authorize A2. No success or resurrection is caused by stale handshake/request state. |
+| TC-27.09-A06 | Delete or make the old local private identity unavailable before selection of A2. Inject matching acceptance/rotation audit-log text without a packet. | Upstream does not silently switch or derive authorization from logs. It reports failure and retains the active state where usable; loss of usable old identity requires independent recovery. |
+| TC-27.10-A01 | Request unprovisioned A2 with automatic policy omitted and explicitly disabled. Repeat with manually preauthorized A2. | Unprovisioned A2 receives rejection with unchanged disk/memory. Preauthorized A2 can be confirmed without enabling automatic authorization. |
+| TC-27.10-A02 | Enable policy and request valid A2 as A. Try permission-escalating claims, untrusted U, and B claiming A's identity. | Only A's own replacement inherits A's existing local identity/permissions. No remote privilege creation or untrusted pairing. Old-key compromise implications remain documented. |
+
+#### Acknowledgments, replay, and durable recovery
+
+| Case | Procedure | Expected result |
+| --- | --- | --- |
+| TC-27.11-D01 | Pause at entry write, file sync, atomic rename, directory sync, replay-state durability, and snapshot activation. At each boundary inspect wire output and attempt A2 authentication. | No acceptance before required persistence and activation complete. Upstream does not switch prematurely. Final acceptance identifies the exact request/new key; disk and active authorization agree. |
+| TC-27.11-D02 | Send acceptance with wrong rotation ID/key/identity/version, malformed rejection, an unsolicited response, or a response on another connection. Interrupt the old connection before response; send a duplicate response after completion. | Only a matching response on the authorized exchange changes client state. Invalid responses report failure; duplicates are harmless, and disconnect/lost response leaves a recoverable old identity. |
+| TC-27.11-D03 | Inject short writes, file/directory sync errors, rename failures, read-only storage, and disk-full at each persistent write. Fail upstream replacement identity persistence before sending. | No success-shaped fallback, acceptance, or premature client switch. Original files remain recoverable; partial state is reported and reconciled according to the approved recovery protocol. No request precedes durable local replacement identity. |
+| TC-27.11-D04 | Terminate/restart at every boundary in D01, then after acceptance emission, acknowledgment receipt, and client activation. Drop the acceptance after downstream commit and retry the exact request on restart. | Recovery converges disk and active trust; old identity remains available. Identical retries are idempotent with no duplicate authorization. Lost acceptance does not strand the client or invent a second replacement. |
+| TC-27.11-D05 | Replay a completed request before/after restart; reuse its rotation ID with changed bytes/new key. Race A2 and A3 requests for A. Race identical retries. | Same request is handled idempotently subject to current authorization; changed-content ID reuse and conflicting replacements reject explicitly. No silent overwrite of another pending rotation or permission change. |
+| TC-27.11-D06 | Test approved freshness boundaries immediately inside, at, and outside validity; future requests, stale requests, clock changes, and cross-connection proof reuse. Restart between issuance and retry. | Approved freshness/binding rules are enforced with explicit errors. Durable retry rules are distinguished from arbitrary replay; clock changes cannot silently bypass authorization. |
+| TC-27.12-D01 | Accept A2 automatically, delete its public entry, SIGHUP, and restart. Replay the original request/acceptance from A and A2, including cached sessions. Separately revoke A during pending exchange. | Removed trust is not resurrected by replay state, retries, or stale acknowledgments. Revoked keys cannot rotate. Reauthorization requires explicit administrator provisioning; retained peers remain usable. |
+| TC-27.11-D07 | Transfer numbered source events during accepted, rejected, retried, and interrupted rotation; retain source records and sink results across reconnects/restarts. | Report produced, delivered, missing, and duplicate IDs explicitly. Retryable queued work is not intentionally discarded; TLS success alone is not a delivery verdict or exactly-once guarantee. |
+
+#### Bounds, observability, and concurrency
+
+| Case | Procedure | Expected result |
+| --- | --- | --- |
+| TC-27.13-P01 | Exercise approved frame, assembled exchange, field, signature, ID, per-peer pending-rotation, replay-store, and request-rate bounds at limit-1/limit/limit+1. Flood incomplete exchanges while B transfers normally. | Valid bounded input works; excess input fails explicitly before partial authorization/persistence. Memory/work remain bounded and peer limits do not silently become global permission changes. |
+| TC-27.14-P01 | Capture request/acceptance/rejection/retry/recovery/revocation events at every supported logging threshold. Include distinctive private-key, passphrase, session-secret, and transfer-payload sentinels. | Required public peer/role/fingerprint/rotation-ID/result evidence follows the approved logging policy; no secret/payload sentinel appears in lifecycle output. Unknown claims are not logged as authenticated identities. |
+| TC-27.15-P01 | Provision 1,000 distinct clients with two distinct pins each. Authenticate all keys, plus unknown controls. Run concurrent handshakes, SIGHUP, transfers, identical retries, and competing rotations under race detection. | Every baseline pin authorizes only its own identity; no stale admission, cross-client rotation, races, deadlocks, or unbounded state growth. Capacity claims match measured conditions. |
+| TC-27.15-P02 | Measure indexed authorization, full TLS handshakes, reload, durable rotation, and retained/replay-state memory at the baseline and approved concurrent load. Record platform, filesystem, warm/cold runs, percentiles, and sample counts. | Compare each measure against its separately approved latency/memory budget. Functional capacity or an average latency is not a substitute for performance acceptance; no invented threshold is a pass. |
+
+### Required execution layers when implementation starts
+
+* **Unit:** Canonical SPKI fingerprinting, key-set consistency, identity/role
+  mapping, input bounds, configuration precedence, rotation policy, durable
+  state/replay transitions, and redacted logging.
+* **Local TLS integration:** Real mutual authentication, certificate-wrapper
+  independence, overlapping pins, unknown-key rejection, and session resumption.
+* **Subprocess:** Command generation, OS permissions, SIGHUP file reload,
+  active-identity switch, immediate connection revocation, and crash/restart
+  recovery. Use isolated directories and fault injection for persistence.
+* **End-to-end:** Manual and opt-in automatic client rotation with numbered
+  traffic, server manual rotation, production-equivalent algorithm settings,
+  and retained CA-based regression coverage.
+
+Tests must not silently disable session resumption, skip persistence errors,
+or replace real handshake checks with mock pin lookups. Unit tests alone
+cannot establish that TLS verification and reload hooks are correctly wired.
+
+### Design gate before executable acceptance tests
+
+REQ-51.16 requires approval of configuration names, key-generation command,
+trust-entry layout/identity metadata, local certificate-wrapper management,
+algorithm profile, reloadable settings, exchange packet framing and proofs,
+freshness/replay state, resource bounds, and scale budgets. Until then,
+TC-27 is not a claimed implementation or pass.
+
+### First executable batch and proposed interface contract
+
+The first batch defines the following concrete contract with approval to
+start test-first work. Automatic rotation, replay, persistence, and
+scale budgets still need their remaining design gate. The lifecycle contract
+below is approved and implemented.
+
+* Both configuration types expose
+  `BuildTLSConfig() (*tls.Config, error)` to build the resolved transport TLS
+  configuration without opening a network connection. Tests use an interface
+  assertion so the missing method produces a test failure, not a build error.
+  A subprocess test builds both binaries and proves they use it for actual
+  traffic and rejection of an untrusted client.
+* New settings: `tcpTLSAuthMode=ca|pinned` (default `ca`) and
+  `tcpTLSTrustedKeysDir=<directory>`. Pinned identities use existing
+  `tcpTLSCertFile` / `tcpTLSKeyFile`; upstream enables `tcpTLSEnabled=true`
+  and downstream requires `tcpTLSClientAuth=require`.
+* First pinned crypto profile: ECDSA P-256 identity keys and TLS 1.3 only
+  (`MinVersion` and `MaxVersion` both TLS 1.3). This does not constitute a
+  FIPS claim or finalize key-exchange/record-cipher policy.
+* Key generation command on either binary:
+
+  ```text
+  upstream --generate-tls-keysets=2 --tls-key-output-dir=<directory> --tls-key-name=identity --tls-key-role=client
+  downstream --generate-tls-keysets=2 --tls-key-output-dir=<directory> --tls-key-name=identity --tls-key-role=server
+  ```
+
+  These commands run without service configuration or network startup.
+  They create `identity-1` and `identity-2`, each with `.key` (PKCS#8 PEM,
+  mode 0600), `.crt` (TLS wrapper), `.pub` (SPKI PUBLIC KEY PEM), and
+  `.fingerprint` (canonical SHA-256 fingerprint plus newline). Print public
+  fingerprints, never private keys; existing output files must not change
+  when an occupied destination is rejected.
+* Trust entries are standalone `*.json` files, mode 0600, in an
+  administrator-controlled directory. Public-key PEM is embedded, so one
+  atomic file rename installs a complete entry. Hidden files and `*.tmp`
+  staging files are ignored; trust-entry symlinks are rejected.
+
+  ```json
+  {
+    "version": 1,
+    "peer": "sender-a",
+    "role": "client",
+    "publicKey": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+    "fingerprint": "SHA256:<padded-standard-Base64>"
+  }
+  ```
+
+  Downstream loads `client` entries; upstream loads `server` entries.
+  Multiple entries with the same peer/role allow overlapping pins.
+
+Run from the repository root:
+
+```bash
+go test ./src/upstream ./src/downstream -run '^TestPinnedTLS' -count=1
+go test ./src/internal/pinnedtest -run '^TestTLSFixture|^TestTLSLifecycleFixtureControls$|^TestPinnedTLSApplicationTransport$' -count=1
+```
+
+Both commands must pass for the implemented first batch. The second checks
+the harness with real TLS controls and runs both application binaries,
+verifying numbered traffic, an untrusted-client rejection, and successful
+unchanged pinned reloads without interrupting active traffic.
+
+Partial coverage: TC-27.01 mutual pinned TLS, TC-27.02 generation,
+TC-27.03 fingerprint consistency, TC-27.04 overlapping keys/role separation,
+TC-27.05 ignored staging files, TC-27.06 empty/missing trust directories,
+TC-27.07 exact SPKI/proof of possession/expired-wrapper independence, and
+TC-27.13 malformed/private/symlink trust input. Both application roles are
+tested. Unsupported command errors are not accepted as proof of negative
+feature behavior: successful generation is required first.
+
+Additional coverage checks CA mutual-TLS compatibility and untrusted-CA
+rejection in both roles, conflicting settings, mode restrictions, new
+environment/CLI precedence, duplicate/conflicting identities, permissions,
+generation argument failures, the 16 KiB trust-file size boundary, and
+below/at/above-limit directory counts (including staged files).
+Runtime limits are 2,000 JSON entries, 4,096 total directory entries, and
+16 KiB per file. These are defensive limits, not measured scale guarantees.
+
+This batch does **not** cover all rows above. In particular, complete input
+bounds, trust expiry, packet exchange, durability,
+logging thresholds, and capacity acceptance remain pending. No test is
+skipped or given an unconditional failure to represent those missing cases.
+The lifecycle batch below adds reload, manual rotation, and revocation
+coverage. CA-mode reload behavior is unchanged.
+
+### Second executable batch: lifecycle (approved contract, passing)
+
+The lifecycle batch was first verified red, then implemented.
+`TestPinnedTLSLifecycleDownstream` and `TestPinnedTLSLifecycleUpstream`
+exercise the actual upstream/downstream executables, built with Go's race
+detector. The shared fixture controls independently prove application-frame
+delivery, unknown-client rejection, and genuine TLS session resumption before
+testing reload. There are no skipped tests or unconditional failures.
+
+Approved reload contract:
+
+* Re-read the original configuration file on SIGHUP and reapply the startup
+  environment and CLI overrides using existing precedence.
+* In pinned mode, only `tcpTLSCertFile`, `tcpTLSKeyFile`, and
+  `tcpTLSTrustedKeysDir` are reloadable. Reject authentication-mode changes
+  and changes to any other resolved setting atomically, naming the setting.
+* Validate the complete candidate before activation. Invalid configuration,
+  identity, or trust input must retain both existing sessions and authorization
+  for fresh connections, and report the candidate-specific failure. Generic
+  "reload not implemented" output is not accepted as validation.
+* Successful reload removes absent pins and immediately closes sessions
+  authenticated by those pins. Retained pins remain authorized.
+* Changing upstream's active identity establishes a new connection with that
+  identity. This batch tests manual, preprovisioned overlap only; it does not
+  define or implement replacement-announcement packets.
+* Retain the existing `SIGHUP handling completed` log as the subprocess
+  completion barrier, after activation/revocation or candidate rejection.
+
+Executable coverage:
+
+| Subcase | New checks |
+| --- | --- |
+| TC-27.05 | Ignored staging file; atomic rename; new trust denied before explicit reload and accepted afterward. |
+| TC-27.06 | Both roles reject mismatched identity, mode changes, unsupported settings, invalid values, and malformed configuration without losing active traffic. Downstream rejects missing directories and malformed trust atomically. Upstream rejects a missing original configuration file. Successful empty trust denies all. Both roles' startup environment/CLI overrides survive reread. |
+| TC-27.08 | Downstream rereads server identity and trusted-directory paths; new handshakes use the replacement. Upstream switches to a preauthorized client key on a new connection, including identity files replaced under unchanged paths. Downstream accepts overlap keys before retiring the old one. |
+| TC-27.12 | Removing all downstream trust closes an active connection. Removing one key closes its resumed connection and rejects full/cached-ticket reconnects while retaining other connections. Upstream closes a removed-server session and rejects reconnects. |
+
+Run from the repository root:
+
+```bash
+# Positive controls: must pass.
+go test -race ./src/internal/pinnedtest -run '^TestTLSLifecycleFixtureControls$' -count=1
+# Lifecycle acceptance: must pass.
+go test -race ./src/internal/pinnedtest -run '^TestPinnedTLSLifecycle' -count=1
+# Deterministic post-handshake admission/revocation boundary: must pass.
+go test -race ./src/internal/pinnedtest -run '^TestPinnedTLSAdmissionAtRevocationBoundary$' -count=1
+# All Go tests, including both batches:
+go test -race ./... -count=1
+```
+
+The original red run failed because pinned reload was unsupported and
+candidate-specific validation was absent. Both lifecycle suites now pass,
+including race-enabled application binaries. Authentication rejection cannot be inferred
+from a socket timeout or connection-refused error. A successful downstream
+probe requires the application payload to reach the sink.
+
+The admission-boundary test pauses a real TLS connection after handshake
+and before session admission, activates either retained or removed trust,
+and verifies current authorization governs admission even through the old
+TLS verifier. It also proves later revocation closes the admitted session.
+
+This is still partial lifecycle coverage. Upstream-side resumed sessions,
+complete transfer loss/duplicate accounting,
+expiry, concurrent reload stress, unreadable-file fault injection, and all
+logging-threshold checks remain pending. The active-key test observes numbered
+traffic across reconnection but does not claim a no-loss guarantee.
+TC-27.09–11 now have core executable coverage below; their exhaustive matrix
+is still pending.
+TC-27.15 performance acceptance requires an agreed latency/memory budget.
+The first batch's unsupported-reload regression now checks successful
+unchanged reload and continued traffic.
+
+### Third executable batch: acknowledged client rotation and recovery
+
+The service acceptance was confirmed red before implementation. This batch
+uses the versioned `PIN_TLS_V1` subtype inside existing `TYPE_KEY_EXCHANGE`
+framing. Upstream exchange is opt-in; downstream automatic authorization is
+independently disabled by default. Existing manual rotation remains available.
+Both properties support configuration file, environment, and CLI resolution,
+and policy changes require restart.
+
+| Test | Verified behavior |
+| --- | --- |
+| `TestRotationWireAndProof` | Frame round trip, every signed-field mutation, malformed/unknown/duplicate/trailing JSON, oversized payload, and forbidden multipart controls. |
+| `TestRotationChallengeTimeBoundaries` | Deterministic connection-challenge clock immediately below, at, and above 30 seconds with real TLS request/response. |
+| `TestRotationClientRejectsUnboundAcknowledgments` | Client rejects incorrect ID/key/peer/version, unexpected public fields, and unsolicited acceptance over a real fixture TLS connection. |
+| `TestRotationPolicyDurabilityAndReplay` | Default rejection without disk mutation; durable install; identical retry with policy disabled after authorization; reconstructed manager from original persistent files; no resurrection after file removal. |
+| `TestRotationConcurrentRetriesAndInvalidStorage` | Concurrent identical requests produce one record; unsafe journal permissions reject. |
+| `TestRotationPersistenceFailureRecovery` | Per-manager injected journal persistence failure before intent or commit; no active replacement on failure; reconstruct state from disk and reconcile retry. This does not simulate every file-write/fsync/rename crash boundary. |
+| `TestRotationConflictingReplacementAndRevokedOld` | A used old key cannot authorize a competing replacement; revoked old key cannot retry. |
+| `TestRotationJournalCountBoundary` | 1,999/2,000/2,001 existing records; excess rejection does not publish a public entry. |
+| `TestRotationPayloadBoundary` | Payload sizes 8,191/8,192/8,193 bytes and noncanonical public fingerprint rejection. |
+| `TestPublicEntryPublicationNeverOverwrites` | Complete temporary-file publication cannot overwrite occupied administrator content. |
+| `TestClientRecoveryRetainsOldPrivateIdentity` | Owner-only private recovery state preserves old identity; different pending candidate rejects; completion clears recovery. |
+| `TestRotationLegacyFrameIsolation` | Existing opaque `KEY_UPDATE#` frames remain unchanged and are not pinned controls. This is not a full RSA-OAEP delivery integration test. |
+| `TestPinnedTLSRotationServices` | Actual binaries: default/disabled rejection, enabled durable public installation and fresh replacement authentication, and preauthorized confirmation without enabling automatic authorization. |
+| `TestPinnedTLSRotationLostAcknowledgmentAndRevocation` | Actual downstream restart with original files after acceptance is deliberately not consumed; fresh-challenge retry succeeds; deletion/reload and restart preserve removal. |
+| `TestPinnedTLSRotationProofAndChallengeRejection` | Actual service rejects malformed proof, cross-peer claim, and replay on another connection without authorizing replacement. |
+| `TestPinnedTLSClientRotationRestartRecovery` | Actual upstream restart after rejection retains its persisted old identity; after policy enable/retry it switches, clears pending state, and restarts using the new identity. |
+| `TestPinnedTLSRotationPlaintextAndUDPReject` | Actual plaintext TCP, CA-mode TLS, and UDP receiver reject pinned controls rather than dispatching legacy symmetric exchange. |
+| `TestPinnedTLSFunctionalCapacity2000DistinctPins` | 1,000 distinct client identities with two distinct pins each; all 2,000 complete real TLS/application round trips, unknown control rejects. No performance budget or concurrent-rotation capacity is inferred. |
+
+Run from repository root:
+
+```bash
+go test -race ./src/internal/pinnedtls -run 'TestRotation|TestClientRecovery|TestPublicEntry' -count=1 -v
+go test -race ./src/internal/pinnedtest -run 'TestPinnedTLSRotation|TestPinnedTLSClientRotationRestartRecovery|TestPinnedTLSFunctionalCapacity' -count=1 -v
+go test -race ./... -count=1
+```
+
+An intent with no installed replacement requires explicit administrator
+reconciliation; retry never reconstructs a missing pin. Completed old-key
+bindings cannot silently authorize another distinct replacement. This is
+intentional fail-closed recovery, not universal unattended convergence across
+every interruption. Only one downstream process writes each trusted directory.
+
+Still pending: expiry, full client-switch fault matrix, full write/sync/rename/directory crash injection,
+remaining field bounds, journal corruption variants, all logging
+thresholds/secret sentinels, multipart transfer/control interleaving, full
+legacy RSA-OAEP integration, event loss/duplicate accounting during rotation,
+simultaneous reload/rotation stress at baseline, and measured latency/memory
+budgets. The full protocol matrix above remains the acceptance target.
+
+### In-memory peer-pin aging acceptance
+
+The approved aging policy is optional overlap cleanup, not trust-entry expiry.
+Both endpoints use `tcpTLSPinIdleSeconds`, default zero (disabled). Positive
+values apply only to pinned mode. Connected pins are protected; the last
+successfully used pin per peer is retained even if idle. SIGHUP restores
+disk-backed trust and resets idle periods; failed candidates do neither.
+
+* `TestPinAgingRetainsLastUsedKeyAndHonorsBoundary`: deterministic threshold
+  checks immediately below/at the idle limit; only the older overlapping key
+  is purged, and the last used key remains past further deadlines.
+* `TestPinAgingDisabledAndConnectedPins`: zero disables aging; connected keys
+  survive; final disconnect grants a fresh idle period.
+* `TestPinAgingReloadRestoresPinsAndResetsTimers`: successful snapshot reload
+  restores removed memory authorization and resets timers.
+* `TestPinAgingPreservesEachPeerAndDeterministicUnusedFallback`: each peer
+  retains a key independently; never-used overlap ties use fingerprint order.
+* `TestPinAgingWorkerStopsIdempotently`: shutdown stops and joins aging safely.
+* `TestPinAgingRotationDoesNotRestoreOtherPins`: rotation activates its
+  replacement while leaving unrelated aged pins inactive and unchanged on
+  disk; explicit reload restores them.
+* `TestPinnedTLSAgingConfiguration` in both application packages: file/env/CLI
+  precedence, default/CLI disable, invalid/negative/overflow values, and
+  enabled-aging rejection in CA mode.
+* `TestPinnedTLSIdleAgingDownstream`: real binary retains a connected client
+  while aging an unused overlap key, rejects full/cached-session attempts,
+  preserves exact disk bytes, rejects a live policy change without restoring
+  aged trust, and restores application delivery after valid SIGHUP.
+* `TestPinnedTLSIdleAgingUpstream`: real binary retains the connected server
+  key, rejects an aged server when it becomes the listener, and reconnects
+  successfully after SIGHUP restores that pin.
+
+```bash
+go test -race ./src/internal/pinnedtls -run '^TestPinAging' -count=1
+go test -race ./src/internal/pinnedtest -run '^TestPinnedTLSIdleAging' -count=1
+go test -race ./src/upstream ./src/downstream -run '^TestPinnedTLSAgingConfiguration$' -count=1
+```
+
+Sweep scheduling is one second; deterministic unit tests verify the exact
+policy boundary rather than asserting real-time scheduler precision.
+Permanent removal/revocation and optional explicit expiry remain different
+policies; aging never deletes public entry files or journals.

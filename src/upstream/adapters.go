@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"sitia.nu/airgap/src/internal/pinnedtls"
 	"sitia.nu/airgap/src/kafka"
 	"sitia.nu/airgap/src/udp"
 )
@@ -57,11 +58,15 @@ func (u *UDPAdapter) Close() error {
 
 // TCPAdapter implements TransportClient for TCP connections
 type TCPAdapter struct {
-	conn      net.Conn
-	addr      string
-	mu        sync.Mutex
-	err       error
-	tlsConfig *tls.Config // nil for plain TCP
+	conn       net.Conn
+	addr       string
+	mu         sync.Mutex
+	err        error
+	tlsConfig  *tls.Config // nil for plain TCP
+	pinned     bool
+	pinManager *pinnedtls.Manager
+	generation uint64
+	closed     bool
 	// TLS cert hot-reload: original params stored so ReloadTLSConfig can rebuild on SIGHUP
 	tlsCAFile          string
 	tlsCertFile        string
@@ -238,9 +243,15 @@ func parseCipherSuites(csv string) ([]uint16, error) {
 // It doesn't fail if connection is not immediately available - it will attempt
 // to connect lazily on first message send.
 func NewTCPAdapter(address string, tlsConfig *tls.Config) (*TCPAdapter, error) {
+	return newTCPAdapter(address, tlsConfig, nil)
+}
+
+func newTCPAdapter(address string, tlsConfig *tls.Config, manager *pinnedtls.Manager) (*TCPAdapter, error) {
 	adapter := &TCPAdapter{
-		addr:      address,
-		tlsConfig: tlsConfig,
+		addr:       address,
+		tlsConfig:  tlsConfig,
+		pinManager: manager,
+		pinned:     manager != nil,
 	}
 
 	// Try to connect immediately, but don't fail if it's not available yet
@@ -250,6 +261,10 @@ func NewTCPAdapter(address string, tlsConfig *tls.Config) (*TCPAdapter, error) {
 		adapter.err = err
 		Logger.Warnf("Failed to connect to TCP server at %s on startup, will retry: %v", address, err)
 	} else {
+		if err := adapter.admit(conn); err != nil {
+			conn.Close()
+			return nil, err
+		}
 		adapter.conn = conn
 		Logger.Infof("Connected to TCP server at %s", address)
 	}
@@ -272,6 +287,9 @@ func (t *TCPAdapter) SetTLSReloadParams(caFile, certFile, keyFile, keyPasswordFi
 // the current connection so the retry loop reconnects with the new certificate.
 // Intended to be called from the SIGHUP handler.
 func (t *TCPAdapter) ReloadTLSConfig() error {
+	if t.pinned {
+		return fmt.Errorf("pinned TLS requires complete configuration reload, not certificate-only reload")
+	}
 	if t.tlsConfig == nil {
 		Logger.Debugf("[TLS upstream] ReloadTLSConfig: TLS not enabled, nothing to do")
 		return nil
@@ -312,6 +330,7 @@ func (t *TCPAdapter) ReloadTLSConfig() error {
 
 	t.mu.Lock()
 	t.tlsConfig = newCfg
+	t.generation++
 	hadConn := t.conn != nil
 	if t.conn != nil {
 		t.conn.Close()
@@ -334,9 +353,13 @@ const dialTimeout = 10 * time.Second
 
 // dial opens a new connection to t.addr, using TLS if configured.
 func (t *TCPAdapter) dial() (net.Conn, error) {
-	if t.tlsConfig != nil {
+	return t.dialConfig(t.tlsConfig)
+}
+
+func (t *TCPAdapter) dialConfig(config *tls.Config) (net.Conn, error) {
+	if config != nil {
 		dialer := &net.Dialer{Timeout: dialTimeout}
-		conn, err := tls.DialWithDialer(dialer, "tcp", t.addr, t.tlsConfig)
+		conn, err := tls.DialWithDialer(dialer, "tcp", t.addr, config)
 		if err != nil {
 			errStr := err.Error()
 			switch {
@@ -373,6 +396,7 @@ func (t *TCPAdapter) ensureConnected() bool {
 		t.conn.SetReadDeadline(time.Time{})
 		if err != nil {
 			if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+				t.forget(t.conn)
 				t.conn.Close()
 				t.conn = nil
 			}
@@ -385,9 +409,14 @@ func (t *TCPAdapter) ensureConnected() bool {
 
 	// Release the mutex before the potentially-slow dial so other goroutines
 	// (e.g. the SIGHUP handler calling ReloadTLSConfig) are not blocked.
+	config, generation := t.tlsConfig, t.generation
+	if t.closed {
+		t.mu.Unlock()
+		return false
+	}
 	t.mu.Unlock()
 
-	conn, err := t.dial()
+	conn, err := t.dialConfig(config)
 	if err != nil {
 		t.mu.Lock()
 		t.err = err
@@ -396,12 +425,23 @@ func (t *TCPAdapter) ensureConnected() bool {
 	}
 
 	t.mu.Lock()
+	if t.closed || t.generation != generation {
+		t.mu.Unlock()
+		conn.Close()
+		return false
+	}
 	// A concurrent goroutine (e.g. ReloadTLSConfig) may have replaced t.conn while
 	// we were dialing — discard our new conn and use theirs.
 	if t.conn != nil {
 		t.mu.Unlock()
 		conn.Close()
 		return true
+	}
+	if err := t.admit(conn); err != nil {
+		t.err = err
+		t.mu.Unlock()
+		conn.Close()
+		return false
 	}
 	t.conn = conn
 	t.err = nil
@@ -413,22 +453,26 @@ func (t *TCPAdapter) ensureConnected() bool {
 // reconnect attempts to re-establish a TCP connection
 func (t *TCPAdapter) reconnect() error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	if t.closed {
+		t.mu.Unlock()
+		return fmt.Errorf("TCP adapter closed")
+	}
 
 	// Close existing connection if any
 	if t.conn != nil {
-		t.conn.Close()
+		t.forget(t.conn)
+		if tlsConn, ok := t.conn.(*tls.Conn); ok && t.pinned {
+			tlsConn.NetConn().Close()
+		} else {
+			t.conn.Close()
+		}
+		t.conn = nil
 	}
+	t.mu.Unlock()
 
-	// Attempt to reconnect
-	conn, err := t.dial()
-	if err != nil {
-		t.err = err
-		return fmt.Errorf("failed to reconnect to TCP server at %s: %w", t.addr, err)
+	if !t.ensureConnected() {
+		return fmt.Errorf("failed to reconnect to TCP server at %s", t.addr)
 	}
-
-	t.conn = conn
-	t.err = nil
 	return nil
 }
 
@@ -443,6 +487,9 @@ func (t *TCPAdapter) SendMessage(msg []byte) error {
 	conn := t.conn
 	t.mu.Unlock()
 
+	if conn == nil {
+		return fmt.Errorf("TCP connection changed during reload; retry message")
+	}
 	_, err := conn.Write(msg)
 	if err != nil {
 		// Connection error - try to reconnect and resend
@@ -452,9 +499,12 @@ func (t *TCPAdapter) SendMessage(msg []byte) error {
 
 		// Try to write again with the new connection
 		t.mu.Lock()
-		_, retryErr := t.conn.Write(msg)
+		conn := t.conn
 		t.mu.Unlock()
-
+		if conn == nil {
+			return fmt.Errorf("TCP connection changed during reload; retry message")
+		}
+		_, retryErr := conn.Write(msg)
 		if retryErr != nil {
 			return fmt.Errorf("failed to send message over TCP after reconnect: %w", retryErr)
 		}
@@ -475,8 +525,17 @@ func (t *TCPAdapter) SendMessages(msgs [][]byte) error {
 
 // Close closes the TCP connection
 func (t *TCPAdapter) Close() error {
+	if t.pinManager != nil {
+		t.pinManager.StopAging()
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closed = true
 	if t.conn != nil {
-		return t.conn.Close()
+		t.forget(t.conn)
+		err := t.conn.Close()
+		t.conn = nil
+		return err
 	}
 	return nil
 }

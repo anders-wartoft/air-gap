@@ -1,0 +1,34 @@
+services:
+  upstream-a:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-tc27-upstream:local
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - ../../config/testcases:/airgap/config:ro
+      - ${TC27_WORK_DIR:?Run through run-testcase.sh 27}/client:/airgap/identity:ro
+      - ${TC27_WORK_DIR}/servers:/airgap/trusted:ro
+    environment:
+      AIRGAP_CONFIG: /airgap/config/upstream-pinned-27-docker.properties
+      AIRGAP_UPSTREAM_TCP_TLS_CERT_FILE: /airgap/identity/client-${TC27_CLIENT_KEY:-1}.crt
+      AIRGAP_UPSTREAM_TCP_TLS_KEY_FILE: /airgap/identity/client-${TC27_CLIENT_KEY:-1}.key
+    command: ["upstream"]
+
+  downstream:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-tc27-downstream:local
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - ../../config/testcases:/airgap/config:ro
+      - ${TC27_WORK_DIR}/server:/airgap/identity:ro
+      - ${TC27_WORK_DIR}/clients:/airgap/trusted:ro
+    environment:
+      AIRGAP_CONFIG: /airgap/config/downstream-pinned-27-docker.properties
+      AIRGAP_DOWNSTREAM_TCP_TLS_CERT_FILE: /airgap/identity/server-${TC27_SERVER_KEY:-1}.crt
+      AIRGAP_DOWNSTREAM_TCP_TLS_KEY_FILE: /airgap/identity/server-${TC27_SERVER_KEY:-1}.key
+    command: ["downstream"]

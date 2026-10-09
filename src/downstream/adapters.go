@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"sitia.nu/airgap/src/internal/pinnedtls"
 	"sitia.nu/airgap/src/kafka"
 	"sitia.nu/airgap/src/udp"
 )
@@ -93,10 +94,15 @@ type TCPAdapter struct {
 	tlsConfig      *tls.Config    // nil for plain TCP
 	clientCNRegex  *regexp.Regexp // nil if no CN validation required
 	// TLS cert hot-reload: file paths stored so ReloadTLSCert can re-read them on SIGHUP
-	certFile        string
-	keyFile         string
-	keyPasswordFile string
-	certPtr         atomic.Pointer[tls.Certificate] // serves every new TLS handshake
+	certFile          string
+	keyFile           string
+	keyPasswordFile   string
+	certPtr           atomic.Pointer[tls.Certificate] // serves every new TLS handshake
+	pinned            bool
+	pinManager        *pinnedtls.Manager
+	rotationMu        sync.Mutex
+	trustedDir        string
+	automaticRotation bool
 }
 
 // buildDownstreamTLSConfig constructs a *tls.Config for the downstream TCP server.
@@ -188,18 +194,32 @@ func parseDownstreamCipherSuites(csv string) ([]uint16, error) {
 // NewTCPAdapter creates a new TCP receiver adapter
 func NewTCPAdapter(config TransferConfiguration) *TCPAdapter {
 	adapter := &TCPAdapter{
-		maxConnections: config.maxTCPConnections,
+		maxConnections:    config.maxTCPConnections,
+		pinned:            config.tcpTLSAuthMode == "pinned",
+		trustedDir:        config.tcpTLSTrustedKeysDir,
+		automaticRotation: config.tcpTLSAutomaticRotation,
 	}
 
 	if config.tcpTLSCertFile != "" {
-		tlsCfg, err := buildDownstreamTLSConfig(
-			config.tcpTLSCertFile,
-			config.tcpTLSKeyFile,
-			config.tcpTLSKeyPasswordFile,
-			config.tcpTLSCAFile,
-			config.tcpTLSClientAuth,
-			config.tcpTLSCipherSuites,
-		)
+		if adapter.pinned {
+			if err := pinnedtls.ValidateRotationStore(config.tcpTLSTrustedKeysDir); err != nil {
+				Logger.Fatal(err)
+			}
+			snapshot, err := pinnedtls.Prepare(config.tcpTLSCertFile, config.tcpTLSKeyFile, config.tcpTLSTrustedKeysDir, true)
+			if err != nil {
+				Logger.Fatal(err)
+			}
+			adapter.pinManager, err = pinnedtls.NewManager(snapshot)
+			if err != nil {
+				Logger.Fatal(err)
+			}
+			adapter.tlsConfig = adapter.pinManager.ServerConfig()
+			adapter.pinManager.StartAging(config.tcpTLSPinIdleSeconds, func(fingerprints []string) {
+				Logger.Infof("Pinned TLS idle aging: role=client purged=%v; disk unchanged, SIGHUP restores pins", fingerprints)
+			})
+			return adapter
+		}
+		tlsCfg, err := config.BuildTLSConfig()
 		if err != nil {
 			Logger.Fatalf("Error building TCP TLS configuration: %v", err)
 		}
@@ -358,6 +378,9 @@ func tlsVersionName(v uint16) string {
 // cert is used for every handshake that starts after this call returns.
 // Intended to be called from the SIGHUP handler.
 func (t *TCPAdapter) ReloadTLSCert() error {
+	if t.pinned {
+		return fmt.Errorf("pinned TLS requires complete configuration reload, not certificate-only reload")
+	}
 	if t.tlsConfig == nil {
 		return nil // TLS not enabled
 	}
@@ -413,6 +436,9 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 	}()
 	defer t.activeConns.Add(-1)
 	defer conn.Close()
+	if tlsConn, ok := conn.(*tls.Conn); ok && t.pinManager != nil {
+		defer t.pinManager.Forget(tlsConn)
+	}
 
 	remoteAddr := conn.RemoteAddr().String()
 
@@ -451,13 +477,25 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 				logTLSHandshakeError(remoteAddr, err)
 				return
 			}
+			if t.pinManager != nil {
+				peer, err := t.pinManager.Admit(tlsConn)
+				if err != nil {
+					logTLSHandshakeError(remoteAddr, err)
+					return
+				}
+				state := tlsConn.ConnectionState()
+				Logger.Infof("Pinned TLS authenticated client peer=%s fingerprint=%s", peer.Peer,
+					pinnedtls.Fingerprint(state.PeerCertificates[0].RawSubjectPublicKeyInfo))
+			}
 			state := tlsConn.ConnectionState()
 			Logger.Debugf("[TLS downstream] Handshake complete with %s, peer certs: %d, %s / %s", remoteAddr, len(state.PeerCertificates), tlsVersionName(state.Version), tls.CipherSuiteName(state.CipherSuite))
 			if len(state.PeerCertificates) > 0 {
 				leaf := state.PeerCertificates[0]
 				Logger.Debugf("[TLS downstream] Client cert CN: %s", leaf.Subject.CommonName)
 				logClientKeyInfo(leaf)
-				Logger.Infof("[TLS downstream] Authenticated client CN %q from %s (CA-chain only)", leaf.Subject.CommonName, remoteAddr)
+				if t.pinManager == nil {
+					Logger.Infof("[TLS downstream] Authenticated client CN %q from %s (CA-chain only)", leaf.Subject.CommonName, remoteAddr)
+				}
 			} else {
 				Logger.Infof("[TLS downstream] TLS connection established with %s (one-way TLS, no client cert)", remoteAddr)
 			}
@@ -465,6 +503,7 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 	}
 
 	reader := bufio.NewReader(conn)
+	var rotation pinnedtls.RotationSession
 	Logger.Infof("New TCP connection from %s", remoteAddr)
 
 	for {
@@ -489,6 +528,31 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 		}
 
 		if len(msg) > 0 {
+			if pinnedtls.IsRotationFrame(msg) {
+				if t.pinManager == nil {
+					Logger.Errorf("Pinned rotation rejected: requires pinned TLS TCP")
+					return
+				}
+				message, err := pinnedtls.DecodeRotationFrame(msg)
+				if err != nil {
+					Logger.Errorf("Pinned rotation malformed frame: %v", err)
+					return
+				}
+				t.rotationMu.Lock()
+				response := t.pinManager.HandleRotation(&rotation, conn.(*tls.Conn), message, t.trustedDir, t.automaticRotation)
+				t.rotationMu.Unlock()
+				if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					Logger.Errorf("Pinned rotation response deadline: %v", err)
+					return
+				}
+				if err := pinnedtls.WriteRotation(conn, response); err != nil {
+					Logger.Errorf("Pinned rotation response write: %v", err)
+					return
+				}
+				Logger.Infof("Pinned rotation result=%s role=client peer=%s id=%s old=%s new=%s reason=%s",
+					response.Kind, response.Peer, response.ID, response.Old, response.New, response.Reason)
+				continue
+			}
 			callback(msg)
 		}
 	}
@@ -540,6 +604,9 @@ func (t *TCPAdapter) readMessage(reader *bufio.Reader) ([]byte, error) {
 	}
 
 	payloadLen := int(payloadLenBytes[0])<<8 | int(payloadLenBytes[1])
+	if strings.HasPrefix(string(idAndChecksum[:idLen]), "PIN_TLS") && payloadLen > pinnedtls.MaxRotationPayload {
+		return nil, fmt.Errorf("pinned rotation payload exceeds %d bytes", pinnedtls.MaxRotationPayload)
+	}
 
 	if payloadLen < 0 || payloadLen > 65535 {
 		return nil, fmt.Errorf("invalid payload length: %d", payloadLen)
@@ -564,6 +631,9 @@ func (t *TCPAdapter) readMessage(reader *bufio.Reader) ([]byte, error) {
 
 // Close gracefully shuts down the TCP listener and active connections
 func (t *TCPAdapter) Close() error {
+	if t.pinManager != nil {
+		t.pinManager.StopAging()
+	}
 	t.closeMutex.Lock()
 
 	if t.closed {

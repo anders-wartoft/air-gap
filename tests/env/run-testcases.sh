@@ -227,8 +227,9 @@ format_duration() {
 
 CHAIN_START_EPOCH="$(date +%s)"
 
-# A testcase is chain-safe only if its manifest declares LG_PRODUCER_CONFIG
-# OR AUTO_EXIT_SERVICE — either tells run-testcase.sh to orchestrate on a
+# A testcase is chain-safe if its manifest declares TC_RUNNER,
+# LG_PRODUCER_CONFIG, or AUTO_EXIT_SERVICE. A standalone runner owns its
+# verdict/cleanup; the other options tell run-testcase.sh to orchestrate on a
 # specific container and tear down when that container exits. Without one
 # of them the runner falls through to `exec docker compose up` (foreground,
 # no termination), which would hang the chain. Returns 0 (true) if TC-$id
@@ -243,7 +244,16 @@ tc_has_auto_exit() {
         set +u
         # shellcheck disable=SC1090
         . "$manifest"
-        [[ -n "${LG_PRODUCER_CONFIG-}" ]] || [[ -n "${AUTO_EXIT_SERVICE-}" ]]
+        [[ -n "${TC_RUNNER-}" ]] || [[ -n "${LG_PRODUCER_CONFIG-}" ]] || [[ -n "${AUTO_EXIT_SERVICE-}" ]]
+    )
+}
+
+tc_is_standalone() {
+    local manifest="testcases/$(printf '%02d' "$1").env"
+    (
+        # shellcheck disable=SC1090
+        . "$manifest"
+        [[ -n "${TC_RUNNER-}" ]]
     )
 }
 
@@ -253,7 +263,7 @@ for id in "${IDS[@]}"; do
     echo "  running testcase $id"
     echo "========================================================"
     if ! tc_has_auto_exit "$id"; then
-        echo "runner: testcase $id has no LG_PRODUCER_CONFIG and no AUTO_EXIT_SERVICE — would hang the chain." >&2
+        echo "runner: testcase $id has no TC_RUNNER, LG_PRODUCER_CONFIG, or AUTO_EXIT_SERVICE — would hang the chain." >&2
         echo "runner: skipping. Run it interactively with ./run-testcase.sh $id." >&2
         SKIP+=("$id")
         declare_status "$id" SKIP
@@ -284,7 +294,7 @@ for id in "${IDS[@]}"; do
     # Belt-and-braces teardown: run-testcase.sh already tears down on exit
     # unless -pause was requested, but if the user forwarded -pause we skip
     # this so the stack remains for inspection.
-    if (( pause_forwarded == 0 )); then
+    if (( pause_forwarded == 0 )) && ! tc_is_standalone "$id"; then
         docker compose "${PROFILE_FLAGS[@]}" down -v --remove-orphans \
             >/dev/null 2>&1 || true
     fi

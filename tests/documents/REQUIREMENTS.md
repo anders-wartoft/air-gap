@@ -487,3 +487,286 @@ If a cell is blank it means the spreadsheet left that cell blank.
     by maximum resend/out-of-order delay, with headroom and memory monitoring.
     A below-range offset can be delivered without deduplication; this does
     not imply that every packet bypasses deduplication.
+
+## REQ-51 — Pinned public-key TLS and key lifecycle
+
+> Upstream and downstream must support explicit CA/certificate-based or
+> pinned-public-key authentication for TCP TLS. Pinned mode must support
+> manual provisioning, multiple authorized keys per peer, restart-free
+> rotation, and optional authenticated automatic client-key rotation,
+> without weakening peer authentication.
+
+* Status: **Partially implemented / first acceptance batch passing**.
+  Generation, startup trust loading, mutual pinned TLS, and explicit mode
+  validation, atomic pinned SIGHUP identity/trust reload, manual rotation,
+  and immediate revocation are implemented. The first and second executable
+  batches pass. An opt-in acknowledged client-rotation protocol, durable
+  replay records, restart recovery, and functional 2,000-pin baseline are
+  implemented; exhaustive fault/concurrency/logging acceptance, optional
+  expiry, and performance budgets remain pending.
+* Covered by: TC-27, subcases TC-27.01 through TC-27.16.
+* Scope: Upstream and downstream TCP transport. Kafka TLS, UDP encryption,
+  create/resend, Noise, and diode key exchange are outside this requirement.
+* Terminology:
+  * A **key-set** contains a private key, an exported public key, and a
+    fingerprint. A local X.509 certificate wraps the key for Go TLS; it is
+    not a CA-issued authorization in pinned mode.
+  * A **pin** authorizes the exact public key, not the whole certificate.
+    Its fingerprint is SHA-256 of DER-encoded SubjectPublicKeyInfo (SPKI),
+    displayed as `SHA256:` followed by padded standard Base64.
+  * A **peer identity** is a locally authorized identity with one or more
+    pins. The certificate CN, filename, and remotely claimed identity do
+    not independently grant authorization.
+  * **Client** means upstream; **server** means downstream. Client and server
+    trust stores have separate roles.
+
+### REQ-51.01 — Explicit authentication mode and compatibility
+
+Upstream and downstream must explicitly select CA-based or pinned mode.
+Existing CA-based configuration remains compatible and its default is
+unchanged. Pinned mode uses TLS 1.3 with mutual public-key authentication:
+downstream authorizes upstream's key and upstream authorizes downstream's
+key. It requires no CA or CN regex. An unknown mode, conflicting trust
+settings, missing required trust store, or incompatible endpoint mode must
+fail explicitly; no fallback to plaintext, unauthenticated TLS, or the
+other trust mode is allowed. Pinned mode must not permit optional client
+authentication.
+
+### REQ-51.02 — Key-set generation command
+
+A documented command must generate one or several independent key-sets for
+upstream or downstream without starting the transfer service or contacting
+a CA. Each set has a distinct key generated with cryptographically secure
+randomness, its public export, fingerprint, and TLS certificate wrapper.
+The command must verify consistency before reporting success, never
+overwrite existing files silently, and exit nonzero on failure. Private
+files must be owner-only on supported Unix platforms; private keys and
+passwords must never appear in command output or logs. Supported algorithms
+must follow the approved crypto profile; a FIPS-compliance claim requires
+verification of the deployed module and mode, not just an algorithm name.
+
+### REQ-51.03 — Manual provisioning and independent verification
+
+Administrators must be able to copy the upstream public key and fingerprint
+to downstream, and downstream's public key and fingerprint to upstream,
+using ordinary OS file operations. Private keys stay on their owning
+endpoint. Each endpoint must recompute the fingerprint and reject any
+supplied fingerprint mismatch before accepting an entry. Both endpoints
+must expose the same canonical fingerprint for optional verification over
+an independent authenticated voice channel. Local fingerprint consistency
+does not authenticate the initial copy: replacing both public key and
+fingerprint must still be addressed by trusted provisioning or independent
+verification. Trust-on-first-use is not part of this requirement.
+
+### REQ-51.04 — Multiple peers, keys, and roles
+
+Downstream must authorize multiple upstream identities, each with multiple
+public-key/fingerprint pairs. Upstream must likewise support multiple
+authorized downstream keys, including old/new keys for server rotation,
+and multiple locally configured client key-sets with one explicitly active
+identity key. Keys for the same peer inherit the same authorization.
+Entries must not authorize the opposite role or unrelated identities.
+Duplicate identical entries must not create duplicate authorization;
+conflicting identity/role assignments for a key must be rejected.
+
+### REQ-51.05 — OS file operations and explicit activation
+
+Adding, replacing, or removing trust entries must be possible without a
+management API. Administrators stage complete files under ignored temporary
+names and atomically rename them into the trusted directory. File changes
+alone do not activate new trust; startup or successful SIGHUP does.
+Document the recognized files, staging convention, fingerprint format,
+identity binding, permissions, and local private-key configuration.
+
+### REQ-51.06 — Atomic configuration reload on SIGHUP
+
+Both applications must re-read their configuration file on SIGHUP, then
+reapply the existing environment/CLI precedence. A reload must prepare and
+validate the complete TLS identity and trust-store snapshot before
+atomically activating it. Concurrent handshakes must not see partial
+updates. On invalid or unreadable configuration, keys, or trust entries,
+retain the last valid snapshot and emit an explicit reload failure.
+At startup, the same failures prevent startup. An intentionally empty
+peer trust directory is valid and denies all peers; it differs from a
+missing, unreadable, or malformed directory.
+
+Authentication-mode changes require a restart and must be rejected on
+SIGHUP without changing active state. Other settings outside the supported
+reload set must likewise be reported rather than silently ignored or
+partially applied. The implementation specification must enumerate that set.
+
+The approved lifecycle test contract permits pinned-mode reload of only
+`tcpTLSCertFile`, `tcpTLSKeyFile`, and `tcpTLSTrustedKeysDir`. Any other
+resolved-setting change requires restart and must be rejected atomically.
+Startup environment/CLI overrides are reapplied after reading the original
+file. Manual preprovisioned rotation is tested in this batch; replacement
+announcements remain a separate protocol batch.
+
+### REQ-51.07 — TLS proof of possession and exact pin matching
+
+Authentication must require TLS proof of possession of the private key
+corresponding to an authorized public key. A public key or fingerprint
+alone cannot authenticate a connection. Pin matching uses the leaf
+certificate's SPKI, not its CN, issuer, filename, or whole-certificate hash.
+In pinned mode, certificate chain, hostname, and certificate validity dates
+do not establish authorization; replacing a certificate wrapper with one
+containing the same authorized key must preserve trust. TLS protocol and
+key-strength checks still apply. Optional trust-entry expiry, if configured,
+must be enforced independently of the wrapper certificate.
+
+Optional in-memory aging is separate from expiry: `tcpTLSPinIdleSeconds=0`
+disables it; positive values remove idle overlapping peer pins after that
+many seconds. Active sessions protect their pins; after the last session
+closes, a new idle period starts. Always retain each peer's last successfully
+used key (deterministic fingerprint ordering if no use/tie). Startup and
+successful SIGHUP restore disk-backed pins and reset idle periods. Purging
+must not alter disk, local private identities, or replay/recovery records;
+automatic rotation must not implicitly restore other aged pins. Aged keys
+fail full/resumed authorization until explicit restoration. Policy changes
+require restart. This does not provide permanent revocation or time-based
+trust-entry expiry.
+
+### REQ-51.08 — Manual overlapping rotation without restart
+
+An administrator must be able to add a replacement peer key, reload the
+verifier, switch the owner's active key through configuration and SIGHUP,
+confirm successful authentication with the new key, and finally remove the
+old key and reload. Both authorized keys must work during overlap. Switching
+an active identity must establish a connection with the replacement key;
+existing sessions alone are not evidence of successful rotation.
+
+This requirement does not introduce an exactly-once delivery guarantee:
+TCP writes are not application delivery acknowledgments. Rotation must not
+intentionally discard queued work, and delivery tests must measure loss
+and duplicates rather than assume them from a successful handshake.
+
+### REQ-51.09 — Client replacement announcement and authorization
+
+When configuration reload selects a new upstream key, upstream must retain
+access to the current identity long enough to send a structured key-exchange
+request over TLS authenticated with the currently trusted old identity.
+The request includes the new public key and fingerprint, protocol version,
+rotation identifier, identity binding, freshness information, and proof of
+possession of the new private key bound to the rotation request.
+It must not contain a private key. Logs are audit output, never a source
+of automatic authorization.
+
+The approved protocol direction reuses the existing application message
+framing and `TYPE_KEY_EXCHANGE`. Legacy `KEY_UPDATE#` symmetric-key exchange
+remains unchanged. Pinned rotation uses a distinctly identified, versioned
+payload subtype, with request, acceptance, and rejection messages on the
+same mutually authenticated pinned-TLS TCP connection. Requests identify
+old and new fingerprints; the new-key signature binds the complete request.
+The authenticated old key determines the local peer identity, not a
+remotely claimed identity field. The existing short frame checksum is not
+an authentication mechanism.
+
+Pinned-rotation messages must be rejected on UDP, plaintext TCP, and CA-mode
+connections, without entering the legacy symmetric-key handler or changing
+trust. Server-key automatic rotation is not supported. The concrete approved implementation contract is documented in
+[PinnedRotation.md](../../doc/PinnedRotation.md): versioned bounded JSON,
+connection-bound challenges, deterministic signed requests, durable records,
+and fail-closed reconciliation of ambiguous incomplete intents. Upstream
+exchange is opt-in (`tcpTLSRotationEnabled`, default false) to preserve the
+existing manual workflow; downstream automatic authorization is separately
+opt-in (`tcpTLSAutomaticRotation`, default false). Changing either policy
+requires restart. Exhaustive acceptance is not implied by this implementation.
+
+If the new key was manually preauthorized, downstream must confirm it.
+Otherwise automatic authorization is permitted only under REQ-51.10.
+If the old identity is unavailable/untrusted, or the request is rejected,
+do not silently switch to the untrusted key: report the failure and retain
+the active configuration. Initial pairing and recovery from compromise
+require independent provisioning. Server-key rotation remains manual in
+this requirement.
+
+### REQ-51.10 — Optional automatic rotation policy
+
+Automatic client-key authorization must be disabled by default and explicitly
+enabled by downstream policy. It may authorize replacement keys only for
+the already authenticated client's identity and existing permissions.
+An untrusted peer, arbitrary identity claim, audit log, or new key alone
+must never bootstrap trust. With the policy disabled, an unprovisioned
+replacement must receive an explicit rejection and must not change trust.
+The documentation must explain that compromise of an authorized old key
+can also authorize a replacement under this policy; it is not independent
+compromise recovery.
+
+### REQ-51.11 — Durable exchange acknowledgment and crash recovery
+
+Before reporting acceptance, downstream must durably and atomically install
+the new public trust entry in the administrator-visible trusted directory,
+then activate the validated snapshot. The directory remains the source of
+truth; there must be no hidden permanent authorization bypassing it.
+Upstream must persist its replacement private identity before requesting
+rotation and switch only after an authenticated acceptance acknowledgment.
+Both sides must retain the old key during overlap. Persistence failure
+must not result in a success response or premature switch.
+
+After interruption or restart, retrying the same request must be idempotent
+and produce no duplicate entries or permissions. A lost acknowledgment must
+not strand the client. Replays or concurrent requests must not restore
+revoked keys, overwrite a different pending rotation, or change identities.
+Replay/rotation state needed to enforce this must survive restart.
+Automatic retirement of old keys is not required; administrator removal
+and SIGHUP provide retirement.
+
+### REQ-51.12 — Purge, immediate revocation, and TLS resumption
+
+On successful downstream SIGHUP, pins absent from the trusted directory must
+be removed from active authorization, including automatically installed
+entries removed by an administrator. Immediately close connections
+authenticated with removed keys. New, in-progress, and resumed handshakes
+must not retain removed authorization. Apply equivalent server-pin removal
+behavior on upstream. A connection authenticated with a retained overlapping
+key must remain authorized.
+
+A revoked old key must not authorize another rotation or reintroduce
+itself. Legitimate reauthorization requires explicit administrator
+provisioning. Reload must report revocation-related disconnects clearly.
+
+### REQ-51.13 — Local trust protection and bounded input
+
+Trusted directories, configuration, and private identities must not be
+writable by unauthorized users. Reject insecure permissions on supported
+Unix platforms, private-key material in public trust entries, unsupported
+key algorithms, malformed entries, and path/symlink escapes outside the
+configured trust directory. File discovery and network key-exchange parsing
+must enforce documented size, entry-count, and per-peer rotation limits.
+At every limit, reject excess input explicitly without partial activation.
+Temporary files are ignored, not interpreted as trust entries.
+
+### REQ-51.14 — Observability without disclosure
+
+Generation, startup, reload, authentication rejection, rotation acceptance/
+rejection, and revocation must provide actionable logs or command output.
+Include peer identity where known, role, public fingerprints, rotation
+identifier where applicable, and the reason/result. Successful reloads
+report active peer/key counts and added/removed fingerprints. Never log
+private keys, passphrases, session secrets, or transfer payloads as part
+of key lifecycle events. Unknown presented fingerprints must not be
+misrepresented as authenticated identities.
+
+### REQ-51.15 — Scale and concurrency acceptance
+
+Use a provisional acceptance baseline of 1,000 client identities with two
+authorized keys each (2,000 pins). Pin lookup must use indexed key identity,
+not reparsing/scanning every trust file per handshake. Reload and rotation
+must remain safe during concurrent authentication, key exchange, and
+transfer. Test the complete baseline and configured bounds without treating
+it as a universal production capacity guarantee. A latency/memory budget
+must be agreed before implementation performance acceptance.
+
+### REQ-51.16 — Scope, compatibility, and design gate
+
+Existing CA-based TCP tests and UDP/Kafka behavior must remain unchanged.
+Certificate wrappers keep REQ-45 applicable; trust does not require an
+issuer in pinned mode. REQ-46's TCP/UDP certificate reuse is not extended
+to raw pinned-key or automatic-rotation support by this requirement.
+
+Before executable tests or implementation, approve exact configuration
+names, command/file formats, supported algorithm profile, reloadable
+settings, network message framing/versioning, freshness/replay rules,
+resource limits, and scale budgets. These are design decisions, not
+already implemented interfaces. No production FIPS or post-quantum claim
+may be inferred solely from choosing TLS or a Go default.

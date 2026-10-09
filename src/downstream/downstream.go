@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"sitia.nu/airgap/src/internal/pinnedtls"
 	"sitia.nu/airgap/src/kafka"
 	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/mtu"
@@ -145,6 +146,10 @@ func RunDownstream(transportReceiver TransportReceiver, stopChan <-chan struct{}
 	time.Sleep(2 * time.Second)
 }
 func handleUdpMessage(msg []byte) {
+	if pinnedtls.IsRotationFrame(msg) {
+		Logger.Errorf("Pinned rotation rejected on non-control transport")
+		return
+	}
 	messageType, messageID, payload, err := protocol.ParseMessage(msg, cache)
 	if err != nil {
 		Logger.Errorf("Failed to parse message: %v", err)
@@ -319,6 +324,12 @@ func logStatistics(stopChan <-chan struct{}) {
 
 // Main launches the downstream application
 func Main(build string) {
+	if handled, err := pinnedtls.GenerateCommand(os.Args[1:], "server", os.Stdout); handled {
+		if err != nil {
+			Logger.Fatal(err)
+		}
+		return
+	}
 	BuildNumber = build
 	Logger.Printf("Downstream version: %s starting up...", version.GitVersion)
 	Logger.Printf("Build number: %s", BuildNumber)
@@ -343,6 +354,12 @@ func Main(build string) {
 	}
 	configuration = overrideConfiguration(configuration)
 	configuration = parseCommandLineOverrides(overrideArgs, configuration)
+	resolved := configuration
+	if configuration.tcpTLSAuthMode == "pinned" {
+		if err := pinnedtls.ValidateReloadFile(fileName); err != nil {
+			Logger.Fatal(err)
+		}
+	}
 	configuration = checkConfiguration(configuration)
 	config = configuration
 
@@ -431,7 +448,13 @@ func Main(build string) {
 				}
 			}
 			if tcpAdapter, ok := receiver.(*TCPAdapter); ok {
-				if err := tcpAdapter.ReloadTLSCert(); err != nil {
+				var err error
+				if tcpAdapter.pinned {
+					err = reloadPinnedConfiguration(fileName, overrideArgs, &resolved, tcpAdapter)
+				} else {
+					err = tcpAdapter.ReloadTLSCert()
+				}
+				if err != nil {
 					Logger.Errorf("TLS certificate reload failed: %v", err)
 				}
 			}
