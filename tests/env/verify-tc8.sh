@@ -120,4 +120,5 @@ if (( FAIL > 0 )); then
     exit 1
 fi
 report_summary "verify-tc8 (${PASS} ok, ${FAIL} failed)" 0
+bash "$HERE/verify-tc8-systemd.sh"
 exit 0

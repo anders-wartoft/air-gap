@@ -1,0 +1,15 @@
+FROM rockylinux:9
+
+RUN dnf -y install systemd procps-ng && dnf clean all && \
+    groupadd airgap && useradd -r -g airgap airgap && \
+    mkdir -p /etc/airgap /var/lib/airgap/upstream /var/lib/airgap/downstream /var/log/airgap && \
+    chown -R airgap:airgap /var/lib/airgap /var/log/airgap && \
+    ln -s /airgap/bin/upstream /usr/local/bin/airgap-upstream && \
+    ln -s /airgap/bin/downstream /usr/local/bin/airgap-downstream
+
+COPY packaging/systemd/airgap-upstream@.service packaging/systemd/airgap-downstream@.service /etc/systemd/system/
+COPY config/testcases/upstream-systemd-8.properties /etc/airgap/upstream-tcp.properties
+COPY config/testcases/downstream-systemd-8.properties /etc/airgap/downstream-tcp.properties
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

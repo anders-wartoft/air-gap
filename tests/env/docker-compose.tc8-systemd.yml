@@ -1,0 +1,14 @@
+services:
+  systemd:
+    build:
+      context: ../..
+      dockerfile: tests/env/Dockerfile.tc8-systemd
+    privileged: true
+    cgroup: private
+    tmpfs:
+      - /run
+      - /run/lock
+      - /tmp
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw

@@ -1072,6 +1072,85 @@ The chain-run configs are the dedicated `-docker` variants:
 * [config/testcases/downstream-airgap-8-docker.properties](../../config/testcases/downstream-airgap-8-docker.properties)
   — `logFileName=/tmp/downstream.log` plus `targetIP=0.0.0.0`.
 
+**Systemd reload / logrotate (Linux host).**
+
+The packaged upstream and downstream templates include
+`ExecReload=/bin/kill -HUP $MAINPID`. After installing updated units, refresh
+systemd's unit definitions, then reload the running instances:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl reload airgap-upstream@tcp.service
+sudo systemctl reload airgap-downstream@tcp.service
+sudo systemctl reload airgap-downstream@udp.service
+```
+
+Use the actual instance names deployed on the host. For custom templates
+such as `stream-downstream@.service`, add a template-wide drop-in using
+`sudo systemctl edit stream-downstream@.service`:
+
+```ini
+[Service]
+ExecReload=
+ExecReload=/bin/kill -HUP $MAINPID
+```
+
+Run `sudo systemctl daemon-reload` afterward. Apply the same drop-in to a
+custom upstream template if needed.
+
+A logrotate rule for downstream-owned logs can use:
+
+```text
+sharedscripts
+postrotate
+    /usr/bin/systemctl reload stream-downstream@tcp.service stream-downstream@udp.service
+endscript
+```
+
+Include only instances expected to be running and use their actual unit
+names; use `airgap-downstream@...` for the packaged templates. The command
+does not start inactive services and does not suppress reload failures.
+
+To verify on a systemd host, record each instance's `MainPID`, rotate its
+configured log file, then issue `systemctl reload`. Confirm that the PID
+remains unchanged, the application reopens the original log path, and new
+log records go to that file rather than the rotated file. Check the
+application's reload-completion/error logs as well: systemctl success means
+the signal was sent, not that asynchronous log/TLS reload has completed.
+SIGHUP also invokes TLS reload where configured; it does not reload arbitrary
+application settings.
+
+**Docker systemd reload check.**
+
+After the direct-SIGHUP checks, TC-8 invokes
+[verify-tc8-systemd.sh](../env/verify-tc8-systemd.sh) to test actual
+`systemctl reload` in a separate Rocky Linux 9 container running systemd as
+PID 1. It uses the repository's packaged upstream/downstream unit templates,
+an unprivileged `airgap` service account, and local TCP random-to-command
+traffic with one-second statistics.
+
+For each service, the test renames its log, runs `systemctl reload`, and
+requires within 30 seconds a new log containing `SIGHUP handling completed`.
+It checks `SIGHUP received` in the rotated log, an unchanged nonzero
+`MainPID`, and an active service. Over a further three-second window, the
+new log must grow and the rotated log must not grow.
+
+This test requires privileged Docker containers and a writable cgroup mount;
+run only on a trusted test host. It uses a private cgroup namespace and a
+separate Compose project, and removes its container, network, and image on
+completion. It does not invoke the host's systemd or reload host services.
+TLS property-change checks remain in the TLS testcases; this test verifies
+systemd signal delivery and log reopening only.
+
+Run the systemd check alone after building the Linux binaries:
+
+```bash
+bash tests/env/verify-tc8-systemd.sh
+```
+
+As with the main Docker environment, set `AIRGAP_BIN_DIR` to the matching
+Linux binary directory for the container architecture when needed.
+
 **Chain run (Docker — automated SIGHUP log rotation).**
 
 1. Compose starts `upstream-a`, `downstream`, and the one-shot

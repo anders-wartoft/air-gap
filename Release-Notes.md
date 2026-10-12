@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.14-SNAPSHOT
+
+### Systemd Reload Support
+
+- Added `ExecReload=/bin/kill -HUP $MAINPID` to the upstream and downstream service templates. `systemctl reload airgap-upstream@<instance>.service` and `systemctl reload airgap-downstream@<instance>.service` now send SIGHUP to reopen log files and run the existing TLS reload handling without restarting.
+- Run `systemctl daemon-reload` after installing updated units. Custom-named service templates need the same `ExecReload` directive or a drop-in. Reload completion confirms signal delivery, not completion of the application's asynchronous reload; check application logs for its outcome.
+- TC-8 now includes an isolated systemd Docker check that runs `systemctl reload` for both packaged service templates, verifies unchanged process IDs and reload-completion logs, and checks that new logs grow while rotated logs stop growing.
+
 ## 0.1.13-SNAPSHOT
 
 ### Pinned Public-Key TLS

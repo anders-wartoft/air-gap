@@ -15,6 +15,7 @@ WorkingDirectory=/etc/airgap
 
 # Main execution
 ExecStart=/usr/local/bin/airgap-downstream /etc/airgap/downstream-%i.properties
+ExecReload=/bin/kill -HUP $MAINPID
 
 # Environment file (optional overrides)
 EnvironmentFile=-/etc/default/airgap-downstream
