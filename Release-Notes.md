@@ -1,5 +1,42 @@
 # Release Notes
 
+## 0.1.13-SNAPSHOT
+
+### Pinned Public-Key TLS
+
+- **New `tcpTLSAuthMode=pinned`** for upstream/downstream TCP transport: mutual authentication by exact SHA-256 public-key fingerprints, without a certificate authority. Pinned mode requires ECDSA P-256 identities and TLS 1.3; existing CA-based TLS remains the default.
+- **JSON trust directories**: `tcpTLSTrustedKeysDir` loads public-key entries for trusted servers on upstream and trusted clients on downstream. Entries contain a peer name, role, public key, and matching fingerprint. Multiple entries for the same peer support overlapping old/new keys.
+- **Strict trust-store validation**: Rejects malformed entries, unknown JSON fields, incorrect roles, fingerprint mismatches, conflicting peer assignments, symlinks, and unsafe permissions. Hidden and `*.tmp` files are ignored for staging. An empty valid store denies every peer.
+- **Standalone identity generation**: `--generate-tls-key` creates one local `.key`, `.crt`, `.pub`, and `.fingerprint` set and exits without starting the service or interrupting an already-running instance. Repeated commands automatically continue numbering without overwriting existing files.
+- **Generated JSON provisioning**: Optional `--json-file-dir` exports a ready-to-install public trust entry for the opposite endpoint. Exchange only the JSON through trusted provisioning; keep the private key and local certificate on the originating machine. The earlier `--generate-tls-keysets=N` option is replaced by one-keyset-per-invocation generation.
+- **Safe SIGHUP reloads**: Reload local identity and trust-store paths without restarting. Invalid candidates retain the last valid configuration. Removing a pin and successfully reloading revokes it and disconnects sessions using that key.
+- **Optional acknowledged client rotation**: Upstream `tcpTLSRotationEnabled` requests confirmation before switching identities. Downstream `tcpTLSAutomaticRotation` explicitly permits installation of new client pins under an authenticated peer identity. Both default to false; acknowledgments follow durable public-key/replay-state persistence, with old-identity recovery for retryable interruptions.
+- **Optional idle-pin aging**: `tcpTLSPinIdleSeconds` temporarily deactivates unused overlapping pins in memory while preserving connected keys and the last-used key per peer. Disabled by default; it does not delete trust files or replace explicit revocation.
+
+**Operational notes:** Generated JSON entries have distinct peer names; for manual rotation, set the replacement entry's `peer` to the existing identity before provisioning. Trust the new key on the opposite endpoint before switching the local identity, and retire the old pin after verifying the replacement connection. Certificate names, issuers, and validity dates do not authorize pinned keys or expire their trust. Automatic rotation is not independent recovery from an old-key compromise. Expiry, measured performance acceptance, and the exhaustive fault/concurrency matrix remain pending.
+
+See [Encryption](doc/Encryption.md) for setup, JSON exchange, and manual rotation, and [Pinned rotation](doc/PinnedRotation.md) for protocol and recovery details.
+
+### Production Configuration Warnings
+
+- **Startup and shutdown warnings** in upstream, downstream, create, resend, and the Java deduplication application highlight production-risk settings, including verbose logging, unencrypted connections, disabled statistics, synthetic/discard targets, and constrained buffers where applicable.
+- Warnings use the `[PRODUCTION-CONFIG]` marker and remain visible independently of the configured logging threshold. They report risks without changing the selected configuration.
+- Added warning and shutdown-order coverage, including TCP shutdown tests.
+
+### Test Environment and Coverage
+
+- **Freestanding Docker test environment** with configurable base images, mounted application builds, Kafka TLS fixtures, and automated testcase/chain runners.
+- **TC-27 pinned TLS Docker smoke test** generates JSON entries with the real `--json-file-dir` option and installs them unchanged into the opposite endpoint's trust directory. It checks exact peer/fingerprint authentication, TLS 1.3, application delivery, rejection of untrusted client/server identities, and recovery.
+- Added Go unit, TLS integration, and subprocess tests for generation, trust validation, reload/revocation, acknowledged rotation/recovery, idle-pin aging, and functional authentication with 2,000 distinct pins. Functional capacity coverage is not a measured performance guarantee.
+- Expanded [testcase documentation](tests/documents/TESTCASES.md) and [test environment instructions](tests/env/README.md).
+
+### Dependency and Build Updates
+
+- Updated the Go toolchain requirement to `go1.25.12` and refreshed Go dependencies.
+- Updated Java logging dependencies to Log4j `2.25.5`, with aligned Jackson dependencies.
+- Added a tracked fallback Go version file so dependency tooling can resolve the module before running `make`; builds still regenerate the application version.
+- Updated the Java application version to `0.1.13-SNAPSHOT`.
+
 ## 0.1.12-SNAPSHOT
 
 ### Packet Loss Monitoring and VMware Optimization
