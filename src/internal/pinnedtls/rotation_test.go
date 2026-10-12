@@ -18,7 +18,7 @@ import (
 func rotationFixture(t *testing.T) (*Manager, string, RotationMessage, *Snapshot, *Snapshot) {
 	t.Helper()
 	identities := t.TempDir()
-	if err := generate(identities, "identity", "client", 3, io.Discard); err != nil {
+	if err := generate(identities, "identity", "client", 3, "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	trust := t.TempDir()
@@ -267,7 +267,7 @@ func TestRotationConflictingReplacementAndRevokedOld(t *testing.T) {
 	}
 	// Independently generate a competing replacement and sign its bound request.
 	keys := t.TempDir()
-	if err := generate(keys, "third", "client", 1, io.Discard); err != nil {
+	if err := generate(keys, "third", "client", 1, "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	third, err := Prepare(filepath.Join(keys, "third-1.crt"), filepath.Join(keys, "third-1.key"), dir, true)

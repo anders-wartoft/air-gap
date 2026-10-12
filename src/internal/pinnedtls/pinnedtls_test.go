@@ -2,6 +2,7 @@ package pinnedtls
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 func fixtureEntry(t *testing.T) Entry {
 	t.Helper()
 	dir := t.TempDir()
-	if err := generate(dir, "identity", "client", 1, io.Discard); err != nil {
+	if err := generate(dir, "identity", "client", 1, "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	public, err := os.ReadFile(filepath.Join(dir, "identity-1.pub"))
@@ -145,15 +146,84 @@ func TestTrustCountBoundaries(t *testing.T) {
 func TestGenerationInvalidInput(t *testing.T) {
 	for _, args := range [][]string{
 		{"--tls-key-role=client"},
-		{"--generate-tls-keysets=0"},
-		{"--generate-tls-keysets=2001"},
-		{"--generate-tls-keysets=1", "--tls-key-output-dir=" + t.TempDir(),
+		{"--generate-tls-keysets=2"},
+		{"--generate-tls-key", "--tls-key-output-dir=" + t.TempDir(),
 			"--tls-key-name=../escape", "--tls-key-role=client"},
-		{"--generate-tls-keysets=1", "--tls-key-output-dir=" + t.TempDir(),
+		{"--generate-tls-key", "--tls-key-output-dir=" + t.TempDir(),
 			"--tls-key-name=identity", "--tls-key-role=server"},
 	} {
 		if handled, err := GenerateCommand(args, "client", io.Discard); !handled || err == nil {
 			t.Fatalf("invalid generation input accepted: %v", args)
 		}
+	}
+}
+
+func TestGenerationWritesTrustEntries(t *testing.T) {
+	keyDir, jsonDir := filepath.Join(t.TempDir(), "keys"), filepath.Join(t.TempDir(), "trust")
+	args := []string{
+		"--generate-tls-key",
+		"--tls-key-output-dir=" + keyDir,
+		"--tls-key-name=sender",
+		"--tls-key-role=client",
+		"--json-file-dir=" + jsonDir,
+	}
+	for i := 0; i < 2; i++ {
+		handled, err := GenerateCommand(args, "client", io.Discard)
+		if !handled || err != nil {
+			t.Fatalf("generation failed: handled=%v error=%v", handled, err)
+		}
+	}
+
+	pins, err := loadTrust(jsonDir, "client")
+	if err != nil {
+		t.Fatalf("generated trust entries did not load: %v", err)
+	}
+	if len(pins) != 2 {
+		t.Fatalf("got %d generated pins, want 2", len(pins))
+	}
+	for i := 1; i <= 2; i++ {
+		name := fmt.Sprintf("sender-%d", i)
+		data, err := os.ReadFile(filepath.Join(jsonDir, name+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var entry Entry
+		if err := json.Unmarshal(data, &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Peer != name || entry.Role != "client" {
+			t.Errorf("%s has peer=%q role=%q", name, entry.Peer, entry.Role)
+		}
+	}
+}
+
+func TestGenerationContinuesNumbering(t *testing.T) {
+	keyDir, jsonDir := filepath.Join(t.TempDir(), "keys"), filepath.Join(t.TempDir(), "trust")
+	args := []string{
+		"--generate-tls-key",
+		"--tls-key-output-dir=" + keyDir,
+		"--tls-key-name=sender",
+		"--tls-key-role=client",
+		"--json-file-dir=" + jsonDir,
+	}
+	for i := 0; i < 2; i++ {
+		handled, err := GenerateCommand(args, "client", io.Discard)
+		if !handled || err != nil {
+			t.Fatalf("generation failed: handled=%v error=%v", handled, err)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(keyDir, "sender-1.key"),
+		filepath.Join(keyDir, "sender-2.key"),
+		filepath.Join(jsonDir, "sender-1.json"),
+		filepath.Join(jsonDir, "sender-2.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected generated file %s: %v", path, err)
+		}
+	}
+	pins, err := loadTrust(jsonDir, "client")
+	if err != nil || len(pins) != 2 {
+		t.Fatalf("generated trust entries did not load: pins=%d error=%v", len(pins), err)
 	}
 }

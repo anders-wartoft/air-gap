@@ -50,27 +50,42 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 mkdir -m 700 "$TC27_WORK_DIR/client" "$TC27_WORK_DIR/server" \
-    "$TC27_WORK_DIR/clients" "$TC27_WORK_DIR/servers"
+    "$TC27_WORK_DIR/clients" "$TC27_WORK_DIR/servers" \
+    "$TC27_WORK_DIR/provision-to-downstream" "$TC27_WORK_DIR/provision-to-upstream"
 compose build
 compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$TC27_WORK_DIR/client:/keys" \
+    -v "$TC27_WORK_DIR/provision-to-downstream:/public-entries" \
     --entrypoint /airgap/bin/upstream upstream-a \
-    --generate-tls-keysets=2 --tls-key-output-dir=/keys --tls-key-name=client --tls-key-role=client
+    --generate-tls-key --tls-key-output-dir=/keys --tls-key-name=client --tls-key-role=client \
+    --json-file-dir=/public-entries
+compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$TC27_WORK_DIR/client:/keys" \
+    -v "$TC27_WORK_DIR/provision-to-downstream:/public-entries" \
+    --entrypoint /airgap/bin/upstream upstream-a \
+    --generate-tls-key --tls-key-output-dir=/keys --tls-key-name=client --tls-key-role=client \
+    --json-file-dir=/public-entries
 compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$TC27_WORK_DIR/server:/keys" \
+    -v "$TC27_WORK_DIR/provision-to-upstream:/public-entries" \
     --entrypoint /airgap/bin/downstream downstream \
-    --generate-tls-keysets=2 --tls-key-output-dir=/keys --tls-key-name=server --tls-key-role=server
+    --generate-tls-key --tls-key-output-dir=/keys --tls-key-name=server --tls-key-role=server \
+    --json-file-dir=/public-entries
+compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$TC27_WORK_DIR/server:/keys" \
+    -v "$TC27_WORK_DIR/provision-to-upstream:/public-entries" \
+    --entrypoint /airgap/bin/downstream downstream \
+    --generate-tls-key --tls-key-output-dir=/keys --tls-key-name=server --tls-key-role=server \
+    --json-file-dir=/public-entries
 
-public_entry() {
-    local base="$1" peer="$2" role="$3" path="$4" fingerprint
-    fingerprint="$(cat "$base.fingerprint")"
-    {
-        printf '{"version":1,"peer":"%s","role":"%s","publicKey":"' "$peer" "$role"
-        awk '{printf "%s\\n", $0}' "$base.pub"
-        printf '","fingerprint":"%s"}\n' "$fingerprint"
-    } > "$path"
-    chmod 600 "$path"
-}
-public_entry "$TC27_WORK_DIR/client/client-1" tc27-client client "$TC27_WORK_DIR/clients/client.json"
-public_entry "$TC27_WORK_DIR/server/server-1" tc27-server server "$TC27_WORK_DIR/servers/server.json"
+for entry in provision-to-downstream/client-1.json provision-to-downstream/client-2.json \
+    provision-to-upstream/server-1.json provision-to-upstream/server-2.json; do
+    if [[ -s "$TC27_WORK_DIR/$entry" ]]; then
+        report_check "Generated public trust entry $entry" "nonempty JSON file" "created" 0
+    else
+        report_check "Generated public trust entry $entry" "nonempty JSON file" "missing or empty" 1
+    fi
+done
+
+# Only the first identities are provisioned; the second remain untrusted controls.
+install -m 600 "$TC27_WORK_DIR/provision-to-downstream/client-1.json" "$TC27_WORK_DIR/clients/client-1.json"
+install -m 600 "$TC27_WORK_DIR/provision-to-upstream/server-1.json" "$TC27_WORK_DIR/servers/server-1.json"
 CLIENT="$(cat "$TC27_WORK_DIR/client/client-1.fingerprint")"
 SERVER="$(cat "$TC27_WORK_DIR/server/server-1.fingerprint")"
 UNKNOWN_CLIENT="$(cat "$TC27_WORK_DIR/client/client-2.fingerprint")"
@@ -153,8 +168,8 @@ assert_no_delivery() {
 echo "TC-27: trusted client/server, self-signed wrappers, no CA configured"
 restart_pair
 wait_delivery "Trusted pinned TLS data path"
-assert_contains upstream-a "Pinned TLS authenticated server peer=tc27-server fingerprint=$SERVER" "Client pins exact server key"
-assert_contains downstream "Pinned TLS authenticated client peer=tc27-client fingerprint=$CLIENT" "Server pins exact client key"
+assert_contains upstream-a "Pinned TLS authenticated server peer=server-1 fingerprint=$SERVER" "Client pins exact server key from generated JSON"
+assert_contains downstream "Pinned TLS authenticated client peer=client-1 fingerprint=$CLIENT" "Server pins exact client key from generated JSON"
 assert_contains downstream "TLS 1.3 /" "TLS 1.3 negotiated"
 
 echo "TC-27: valid but untrusted client key must not deliver"
@@ -173,5 +188,5 @@ echo "TC-27: restore original keys and prove end-to-end recovery"
 export TC27_SERVER_KEY=1
 restart_pair
 wait_delivery "Trusted keys restored: application delivery recovers"
-assert_contains upstream-a "Pinned TLS authenticated server peer=tc27-server fingerprint=$SERVER" "Restored server authenticated"
-assert_contains downstream "Pinned TLS authenticated client peer=tc27-client fingerprint=$CLIENT" "Restored client authenticated"
+assert_contains upstream-a "Pinned TLS authenticated server peer=server-1 fingerprint=$SERVER" "Restored server authenticated"
+assert_contains downstream "Pinned TLS authenticated client peer=client-1 fingerprint=$CLIENT" "Restored client authenticated"

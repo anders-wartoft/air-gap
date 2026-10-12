@@ -345,6 +345,11 @@ func Generation(t *testing.T, helper, role string) {
 	if err != nil {
 		t.Fatalf("REQ-51.02 pending: key generation command failed: %v\n%s", err, output)
 	}
+	secondOutput, err := run()
+	if err != nil {
+		t.Fatalf("second key generation command failed: %v\n%s", err, secondOutput)
+	}
+	output = append(output, secondOutput...)
 	var fingerprints []string
 	var files []string
 	var contents [][]byte
@@ -389,6 +394,27 @@ func Generation(t *testing.T, helper, role string) {
 		if strings.TrimSpace(string(fingerprint)) != want || !bytes.Contains(output, []byte(want)) {
 			t.Fatal("fingerprint file/command output does not match SPKI")
 		}
+		jsonPath := filepath.Join(dir, "public-entries", fmt.Sprintf("identity-%d.json", i))
+		data, err := os.ReadFile(jsonPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var entry trustEntry
+		if err := json.Unmarshal(data, &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Version != 1 || entry.Peer != fmt.Sprintf("identity-%d", i) ||
+			entry.Role != role || entry.PublicKey != string(publicPEM) || entry.Fingerprint != want {
+			t.Fatalf("generated JSON does not match identity %d", i)
+		}
+		info, err = os.Stat(jsonPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Errorf("public trust entry permissions: %v", info.Mode().Perm())
+		}
+		files, contents = append(files, jsonPath), append(contents, data)
 		if bytes.Contains(output, []byte("PRIVATE KEY")) {
 			t.Fatal("generation output exposes private key material")
 		}
@@ -397,8 +423,13 @@ func Generation(t *testing.T, helper, role string) {
 	if fingerprints[0] == fingerprints[1] {
 		t.Fatal("generated key-sets are not independent")
 	}
-	if output, err := run(); err == nil {
-		t.Fatalf("generation overwrote occupied paths: %s", output)
+	if output, err := run(); err != nil {
+		t.Fatalf("generation did not continue numbering: %v\n%s", err, output)
+	} else {
+		path := filepath.Join(dir, "identity-3.key")
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("next keyset was not generated at %s: %v", path, err)
+		}
 	}
 	for i, path := range files {
 		data, err := os.ReadFile(path)

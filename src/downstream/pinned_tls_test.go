@@ -10,8 +10,9 @@ import (
 
 func TestPinnedTLSGenerationHelper(t *testing.T) {
 	if dir := os.Getenv("AIRGAP_PINNED_GENERATE_DIR"); dir != "" {
-		os.Args = []string{"downstream", "--generate-tls-keysets=2", "--tls-key-output-dir=" + dir,
-			"--tls-key-name=identity", "--tls-key-role=server"}
+		os.Args = []string{"downstream", "--generate-tls-key", "--tls-key-output-dir=" + dir,
+			"--tls-key-name=identity", "--tls-key-role=server",
+			"--json-file-dir=" + filepath.Join(dir, "public-entries")}
 		Main("test")
 		os.Exit(0)
 	}

@@ -63,29 +63,86 @@ copying a public key or certificate alone cannot authenticate a peer.
 Generate local identities without starting the services:
 
 ```bash
-upstream --generate-tls-keysets=2 --tls-key-output-dir=./client-identity --tls-key-name=sender --tls-key-role=client
-downstream --generate-tls-keysets=1 --tls-key-output-dir=./server-identity --tls-key-name=receiver --tls-key-role=server
+upstream --generate-tls-key --tls-key-output-dir=./client-identity --tls-key-name=sender --tls-key-role=client --json-file-dir=./provision-to-downstream
+downstream --generate-tls-key --tls-key-output-dir=./server-identity --tls-key-name=receiver --tls-key-role=server --json-file-dir=./provision-to-upstream
+downstream --generate-tls-key --tls-key-output-dir=./server-identity --tls-key-name=receiver --tls-key-role=server --json-file-dir=./provision-to-upstream
 ```
 
-Each set produces `.key` (unencrypted PKCS#8 PEM, mode 0600), `.crt`,
-`.pub` (PUBLIC KEY PEM), and `.fingerprint` files, for example
-`sender-1.key` through `sender-1.fingerprint`. Output includes only public
-fingerprints. Generation rejects occupied output paths instead of overwriting
-keys. Names contain 1-64 ASCII letters/digits, dots, underscores, or hyphens,
-and cannot start with a dot. Counts range from 1 to 2,000.
+`--generate-tls-key` generates exactly one independent keyset. One keyset is
+the normal choice for one identity. Run the command again to create another
+identity; for example, the two downstream commands above create `receiver-1`
+and `receiver-2`. Each set produces `.key` (unencrypted PKCS#8 PEM, mode
+0600), `.crt`, `.pub` (PUBLIC KEY PEM), and `.fingerprint` files, for example
+`sender-1.key` through `sender-1.fingerprint`. Command output includes public
+fingerprints and, when requested, trust-entry paths; it never prints private
+key material. Names contain 1-64 ASCII letters/digits, dots, underscores, or
+hyphens, and cannot start with a dot.
 
-Keep private keys local. Copy only the peer's `.pub` and `.fingerprint` files
-through trusted provisioning; optionally verify fingerprints independently
-over a known voice channel. A fingerprint copied alongside a substituted key
-does not authenticate the sender of that copy.
+Numbering automatically continues after the highest existing matching
+keyset file in either output directory. Run the command again with the same
+name and directories to create `sender-2` and `sender-2.json` after
+`sender-1`; existing files are never overwritten.
 
-Create a public JSON trust entry on downstream, such as
-`trusted-clients/sender-1.json`:
+Key generation is a standalone command: it generates the files and exits
+before starting the service. Run it as a separate process; it does not change
+or interrupt an already-running upstream or downstream.
+
+Keep private keys local. Copy the peer's generated JSON trust entries through
+trusted provisioning; optionally verify fingerprints independently over a
+known voice channel. The generated JSON is the normal file to exchange: it
+contains the peer's public key and fingerprint, but no private key or TLS
+certificate.
+
+The optional `--json-file-dir` also writes one public trust entry per keyset,
+named `<tls-key-name>-<index>.json`, with `peer` set to the same
+`<tls-key-name>-<index>` value. These entries describe the generated identity:
+provision the upstream-generated client entries into downstream's
+`trusted-clients` directory, and downstream-generated server entries into
+upstream's `trusted-servers` directory. The output directory is created if
+needed; existing files are never overwritten. JSON files contain public keys
+only and are written with mode 0600.
+
+For initial setup, run key generation separately on each machine. Securely
+transfer only the generated JSON entries to the opposite machine; do not
+transfer `.key` files. For example, after generating the keys above, stage the
+JSON files through your approved provisioning channel, then install them on
+their destination hosts:
+
+```bash
+# On upstream, after receiver-1.json (and optionally receiver-2.json)
+# has been securely transferred to /secure-transfer:
+mkdir -p trusted-servers
+chmod 700 trusted-servers
+install -m 600 /secure-transfer/receiver-1.json trusted-servers/receiver-1.json
+# Optional, only if receiver-2 is an identity you intend to trust:
+# install -m 600 /secure-transfer/receiver-2.json trusted-servers/receiver-2.json
+
+# On downstream, after sender-1.json has been securely transferred
+# to /secure-transfer:
+mkdir -p trusted-clients
+chmod 700 trusted-clients
+install -m 600 /secure-transfer/sender-1.json trusted-clients/sender-1.json
+```
+
+If generating only one server identity, install only `receiver-1.json`.
+`receiver-2.json` is a separate server identity, not a second key/version
+for `receiver-1`. The configuration below uses `receiver-1` as downstream's
+active local identity.
+
+Each generated JSON entry has its own peer name. Thus multiple keysets
+represent distinct peer identities, not multiple keys for the same identity
+during rotation. For a rotation, set the replacement entry's `peer` to the
+existing peer name before provisioning it, so the old and new keys temporarily
+authorize the same identity. Remove the old entry after the rotation is
+complete.
+
+If you need to create a trust entry manually instead of generating it with
+`--json-file-dir`, its format is:
 
 ```json
 {
   "version": 1,
-  "peer": "sender-a",
+  "peer": "sender-1",
   "role": "client",
   "publicKey": "-----BEGIN PUBLIC KEY-----\n<contents of sender-1.pub>\n-----END PUBLIC KEY-----\n",
   "fingerprint": "SHA256:<contents of sender-1.fingerprint after SHA256:>"
@@ -94,10 +151,10 @@ Create a public JSON trust entry on downstream, such as
 
 Use the complete exported PEM as the JSON string (escape its newlines),
 and the complete exported fingerprint as the fingerprint string; the
-placeholders above are not valid keys. On upstream, install an equivalent
-entry for the receiver using `"role": "server"` and a local peer name.
-Multiple entries for the same peer authorize old/new keys simultaneously.
-Conflicting peer assignments for one fingerprint are rejected.
+placeholders above are not valid keys. On upstream, a server entry uses
+`"role": "server"` and the local peer name for that identity. Multiple entries
+for the same peer authorize old/new keys simultaneously. Conflicting peer
+assignments for one fingerprint are rejected.
 
 **Upstream:**
 
@@ -118,6 +175,56 @@ tcpTLSAuthMode=pinned
 tcpTLSClientAuth=require
 tcpTLSCertFile=server-identity/receiver-1.crt
 tcpTLSKeyFile=server-identity/receiver-1.key
+tcpTLSTrustedKeysDir=trusted-clients
+```
+
+**Example using exchanged JSON trust entries:**
+
+The settings are the same whether the trust entries were generated or
+written manually. `tcpTLSTrustedKeysDir` names a directory, not an individual
+JSON file: the application loads every valid, non-hidden `*.json` entry in
+that directory. The JSON authorizes the remote peer's public key; each
+application still needs its own local `.crt` and `.key` to authenticate itself.
+
+On upstream, keep the local client identity and install the JSON generated
+by downstream:
+
+```text
+client-identity/sender-1.crt
+client-identity/sender-1.key
+trusted-servers/receiver-1.json
+```
+
+**Upstream with the server JSON entry:**
+
+```properties
+transport=tcp
+tcpTLSEnabled=true
+tcpTLSAuthMode=pinned
+tcpTLSCertFile=client-identity/sender-1.crt
+tcpTLSKeyFile=client-identity/sender-1.key
+# Loads trusted-servers/receiver-1.json, with role=server.
+tcpTLSTrustedKeysDir=trusted-servers
+```
+
+On downstream, keep the local server identity and install the JSON generated
+by upstream:
+
+```text
+server-identity/receiver-1.crt
+server-identity/receiver-1.key
+trusted-clients/sender-1.json
+```
+
+**Downstream with the client JSON entry:**
+
+```properties
+transport=tcp
+tcpTLSAuthMode=pinned
+tcpTLSClientAuth=require
+tcpTLSCertFile=server-identity/receiver-1.crt
+tcpTLSKeyFile=server-identity/receiver-1.key
+# Loads trusted-clients/sender-1.json, with role=client.
 tcpTLSTrustedKeysDir=trusted-clients
 ```
 

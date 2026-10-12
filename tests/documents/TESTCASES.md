@@ -4147,12 +4147,18 @@ through mutually pinned TLS 1.3 to `target=cmd`.
 [upstream](../../config/testcases/upstream-pinned-27-docker.properties) /
 [downstream](../../config/testcases/downstream-pinned-27-docker.properties)
 configurations. Each run generates two client and two server identities
-using the real binary generation commands; only the first public identity
-from each side is provisioned to the opposite side.
+using repeated real binary `--generate-tls-key` commands with
+`--json-file-dir`. The generated `client-1.json` and `server-1.json` entries
+are installed unchanged with mode 0600 into the opposite side's trust
+directory; no hand-written JSON or PEM-to-JSON conversion is used.
+All four generated JSON entries must exist and be nonempty. Only the first
+public identity from each side is provisioned: `client-2.json` and
+`server-2.json` remain in separate provisioning directories so their keys
+stay untrusted for the rejection phases.
 
 | Phase | Required evidence |
 | --- | --- |
-| Trusted A/S | Exact peer/SPKI fingerprint authentication on both sides, TLS 1.3, and at least five distinct application messages received by downstream. |
+| Trusted A/S | Generated JSON peer names (`client-1` and `server-1`) and exact SPKI fingerprints authenticate on both sides, TLS 1.3, and at least five distinct application messages received by downstream. |
 | Unknown client U/S | Downstream explicitly rejects U's fingerprint; no received application messages during the rejection window; both services remain running. |
 | Trusted A/unknown server U | Upstream explicitly rejects U's fingerprint; no received application messages during the rejection window; both services remain running. |
 | Restore A/S | Fresh exact-fingerprint authentication and at least five distinct received messages prove recovery, not merely a successful dial/write. |
@@ -4336,12 +4342,15 @@ below is approved and implemented.
 * Key generation command on either binary:
 
   ```text
-  upstream --generate-tls-keysets=2 --tls-key-output-dir=<directory> --tls-key-name=identity --tls-key-role=client
-  downstream --generate-tls-keysets=2 --tls-key-output-dir=<directory> --tls-key-name=identity --tls-key-role=server
+  upstream --generate-tls-key --tls-key-output-dir=<directory> --tls-key-name=identity --tls-key-role=client
+  upstream --generate-tls-key --tls-key-output-dir=<directory> --tls-key-name=identity --tls-key-role=client
+  downstream --generate-tls-key --tls-key-output-dir=<directory> --tls-key-name=identity --tls-key-role=server
+  downstream --generate-tls-key --tls-key-output-dir=<directory> --tls-key-name=identity --tls-key-role=server
   ```
 
-  These commands run without service configuration or network startup.
-  They create `identity-1` and `identity-2`, each with `.key` (PKCS#8 PEM,
+  Each command runs without service configuration or network startup and
+  generates one keyset. Repeating the command automatically continues
+  numbering, creating `identity-1` and `identity-2`, each with `.key` (PKCS#8 PEM,
   mode 0600), `.crt` (TLS wrapper), `.pub` (SPKI PUBLIC KEY PEM), and
   `.fingerprint` (canonical SHA-256 fingerprint plus newline). Print public
   fingerprints, never private keys; existing output files must not change
