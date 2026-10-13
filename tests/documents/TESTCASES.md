@@ -1358,6 +1358,61 @@ Expected chain verdict:
   result    : PASS (100/100 received, 0 missing, 0 duplicate)
 ```
 
+**Docker restart-safety check.**
+
+After the chain verdict, TC-9 invokes
+[verify-tc9-dedup-restart.sh](../env/verify-tc9-dedup-restart.sh) to prove
+that a `FAIL_FAST=true` dedup instance survives the sequence that broke the
+product smoketest after an upgrade: Kafka is restarted under a running dedup,
+and dedup itself is then restarted. It uses its own Compose project and its
+own stack,
+[docker-compose.tc9-dedup-restart.yml](../env/docker-compose.tc9-dedup-restart.yml)
+(single-node KRaft Kafka, topic-init, one dedup with `restart: "no"` so that
+any self-termination is immediately visible), and does not touch the main
+TC-9 environment.
+
+The test asserts, in order:
+
+1. Dedup reaches `RUNNING` on a cold start.
+1. `group.instance.id` is set from `INSTANCE_ID` (static membership, so a
+   restart does not wait out the old group member's session timeout).
+1. With Kafka stopped, dedup logs degraded connectivity instead of exiting.
+1. Dedup is still running after the full outage window.
+1. When Kafka returns, dedup logs restored connectivity.
+1. The container's `StartedAt` is unchanged — it recovered in-process and was
+   never restarted.
+1. After an explicit `compose restart dedup`, dedup reaches `RUNNING` again,
+   even though startup takes far longer than `FAIL_FAST_STARTUP_TIMEOUT_MS`.
+1. Dedup is still running after a settle window, i.e. no restart loop.
+1. No fail-fast termination markers appear anywhere in the logs.
+
+Run the restart check alone after building the fat JAR with `make build-java`
+(a stale JAR makes the test observe old behaviour):
+
+```bash
+bash tests/env/verify-tc9-dedup-restart.sh
+```
+
+Tunables, all optional: `TC9_RESTART_OUTAGE_SECONDS` (20),
+`TC9_RESTART_RUNNING_TIMEOUT` (240), `TC9_RESTART_RESTORE_TIMEOUT` (120),
+`TC9_RESTART_DEGRADED_TIMEOUT` (120), `TC9_RESTART_SETTLE_SECONDS` (20) and
+`TC9_RESTART_INSTANCE_ID` (`dedup-1`). The stack is removed on completion.
+
+Expected output:
+
+```text
+TC-9 dedup initial startup, expected reaches RUNNING within 240s, reached RUNNING
+TC-9 dedup static membership, expected group.instance.id=dedup-1 from INSTANCE_ID, configured
+TC-9 dedup outage reporting, expected logs degraded Kafka connectivity within 120s, reported
+TC-9 dedup during 20s Kafka outage, expected process keeps running, still running
+TC-9 dedup recovery after outage, expected logs restored Kafka connectivity within 120s, recovered
+TC-9 dedup process continuity, expected same process across the outage, never restarted
+TC-9 dedup restart, expected reaches RUNNING again within 240s, reached RUNNING
+TC-9 dedup restart loop, expected still running 20s after restart, stable
+TC-9 dedup fail-fast terminations, expected none logged, none found
+─── TC-9 dedup restart safety: PASS ───
+```
+
 **Procedure (bare-metal / interactive).**
 
 1. Verify PLAINTEXT reachability.

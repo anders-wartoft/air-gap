@@ -6,7 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Method;
+import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.junit.jupiter.api.Test;
 
 class PartitionDedupAppTest {
@@ -68,6 +72,52 @@ class PartitionDedupAppTest {
     void validateRuntimeConfigurationAllowsNonPositiveFailFastValuesWhenDisabled() {
         assertDoesNotThrow(() -> PartitionDedupApp.validateRuntimeConfigurationValues(
                 5000L, 60000L, 20, false, 0L, 0L, 0L));
+    }
+
+    @Test
+    void configureStaticMembershipUsesInstanceId() {
+        Properties props = new Properties();
+
+        PartitionDedupApp.configureStaticMembership(props, " dedup-1 ");
+
+        assertEquals("dedup-1", props.getProperty(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG));
+    }
+
+    @Test
+    void configureStaticMembershipPreservesExplicitKafkaSetting() {
+        Properties props = new Properties();
+        props.setProperty(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "explicit-member");
+
+        PartitionDedupApp.configureStaticMembership(props, "dedup-1");
+
+        assertEquals("explicit-member", props.getProperty(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG));
+    }
+
+    @Test
+    void configureStaticMembershipLeavesMissingInstanceIdDynamic() {
+        Properties props = new Properties();
+
+        PartitionDedupApp.configureStaticMembership(props, " ");
+
+        assertTrue(!props.containsKey(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG));
+    }
+
+    @Test
+    void startupWaitReturnsWhenRunning() throws Exception {
+        CountDownLatch runningLatch = new CountDownLatch(0);
+
+        boolean running = PartitionDedupApp.awaitRunningOrShutdown(
+                runningLatch, new CountDownLatch(1), new AtomicBoolean(false), 1L);
+
+        assertTrue(running);
+    }
+
+    @Test
+    void startupWaitReturnsWhenShutdownStarts() throws Exception {
+        boolean running = PartitionDedupApp.awaitRunningOrShutdown(
+                new CountDownLatch(1), new CountDownLatch(0), new AtomicBoolean(true), 1L);
+
+        assertTrue(!running);
     }
 
     @Test

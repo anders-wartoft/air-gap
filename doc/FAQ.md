@@ -303,23 +303,15 @@ Then monitor memory and gap behavior, and adjust gradually.
 
 ## Deduplication gets stuck in a restart loop when FAIL_FAST is enabled
 
-If `FAIL_FAST=true`, the deduplication process exits when it does not reach `RUNNING` within the configured startup timeout.
+Current versions do not terminate merely because startup has not reached `RUNNING` within `FAIL_FAST_STARTUP_TIMEOUT_MS`. The interval produces a warning while state restoration or rebalancing continues. Temporary Kafka connectivity failures are also reported without terminating the process.
 
-In environments with slower Kafka startup, DNS, TLS handshake, or topic metadata fetch, a low value for `FAIL_FAST_STARTUP_TIMEOUT_MS` can cause repeated restarts (boot loop).
+The process still exits on terminal Kafka Streams errors so a supervisor can restart it. Packaged systemd units limit repeated failed starts to avoid an unbounded crash loop.
 
-Known working adjustment from field testing:
+For faster planned restarts, give every instance a stable and unique identity:
 
-- `FAIL_FAST_STARTUP_TIMEOUT_MS=10000` caused restarts
-- `FAIL_FAST_STARTUP_TIMEOUT_MS=30000` stabilized startup
-
-Example:
-
-```bash
-export FAIL_FAST=true
-export FAIL_FAST_STARTUP_TIMEOUT_MS=30000
-```
-
-If needed, increase further based on your environment and startup latency.
+- Set `INSTANCE_ID`; the packaged instance unit does this automatically from `%i`.
+- Alternatively, set `KAFKA_GROUP_INSTANCE_ID` explicitly.
+- Keep the same identity when restarting the same instance, and never run two members of one application with the same identity.
 
 ## I have disabled write for /tmp. Now I get an error running the deduplication
 

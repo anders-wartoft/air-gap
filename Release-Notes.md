@@ -2,6 +2,15 @@
 
 ## 0.1.14-SNAPSHOT
 
+### Dedup Restart Safety
+
+- Dedup no longer exits while Kafka Streams is legitimately rebalancing or restoring local state. `FAIL_FAST_STARTUP_TIMEOUT_MS` now controls periodic startup diagnostics instead of imposing a fatal startup deadline.
+- Temporary Kafka and DNS outages are reported as degraded connectivity while Kafka Streams reconnects in-process. Terminal Streams errors and fatal uncaught exceptions still exit non-zero for supervisor recovery.
+- `INSTANCE_ID` now supplies Kafka's static `group.instance.id` unless `KAFKA_GROUP_INSTANCE_ID` is explicitly configured, reducing session-timeout delays when a service instance restarts.
+- The packaged dedup unit orders itself after `confluent-kafka.service` and limits repeated failed starts to five attempts in five minutes, preventing unbounded restart loops without imposing a maximum state-restore duration.
+- The connectivity probe no longer blocks its monitor thread on a stalled admin client, so an outage is reported within the configured `FAIL_FAST_CHECK_TIMEOUT_MS` rather than after the Kafka admin client defaults expire.
+- TC-9 now includes an isolated Docker restart-safety check that stops and restarts Kafka under a running dedup instance, then restarts dedup itself, and verifies that it reports degraded connectivity, recovers in-process without restarting, reaches `RUNNING` again, and never logs a fail-fast termination.
+
 ### Systemd Reload Support
 
 - Added `ExecReload=/bin/kill -HUP $MAINPID` to the upstream and downstream service templates. `systemctl reload airgap-upstream@<instance>.service` and `systemctl reload airgap-downstream@<instance>.service` now send SIGHUP to reopen log files and run the existing TLS reload handling without restarting.

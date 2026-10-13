@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
@@ -117,6 +118,7 @@ public class PartitionDedupApp {
     public static final String STATE_DIR_CONFIG = System.getenv().getOrDefault("STATE_DIR_CONFIG",
             "/tmp/var/lib/kafka-streams/state");
     public static final String APPLICATION_ID = System.getenv().getOrDefault("APPLICATION_ID", "dedup-gap-app");
+    public static final String INSTANCE_ID = System.getenv().getOrDefault("INSTANCE_ID", "");
     // Allow commit interval to be set via env var (default 5 seconds)
     public static final long COMMIT_INTERVAL_MS = Long
             .parseLong(System.getenv().getOrDefault("COMMIT_INTERVAL_MS", "5000"));
@@ -130,7 +132,7 @@ public class PartitionDedupApp {
     public static final long PERSIST_INTERVAL_MS = Long
             .parseLong(System.getenv().getOrDefault("PERSIST_INTERVAL_MS", "5000"));
 
-        // If true, terminate process when Kafka connectivity cannot be established or is lost
+        // If true, terminate the process on terminal Kafka Streams failures.
         public static final boolean FAIL_FAST = Boolean
             .parseBoolean(System.getenv().getOrDefault("FAIL_FAST", "false"));
         public static final long FAIL_FAST_STARTUP_TIMEOUT_MS = Long
@@ -371,6 +373,7 @@ public class PartitionDedupApp {
                 LOG.debug("Injected Kafka property from env {} -> {}={}", k, propName, displayVal);
             }
         }
+        configureStaticMembership(props, INSTANCE_ID);
 
         validateRuntimeConfiguration();
         props.setProperty("WINDOW_SIZE", Long.toString(WINDOW_SIZE));
@@ -396,6 +399,7 @@ public class PartitionDedupApp {
         LOG.info("RETRY_BACKOFF_MAX_MS={}", RETRY_BACKOFF_MAX_MS);
         LOG.info("RETRY_BACKOFF_JITTER_PCT={}", RETRY_BACKOFF_JITTER_PCT);
         LOG.info("Application ID: {}", props.get(StreamsConfig.APPLICATION_ID_CONFIG));
+        LOG.info("Group Instance ID: {}", props.getOrDefault(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "<dynamic>"));
         LOG.info("Num Stream Threads: {}", props.get(StreamsConfig.NUM_STREAM_THREADS_CONFIG));
         LOG.info("Num Standby Replicas: {} (min instances needed: {})", props.get(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG), (NUM_STANDBY_REPLICAS + 1) + " × partitions");
         LOG.info("Processing Guarantee: {}", props.get(StreamsConfig.PROCESSING_GUARANTEE_CONFIG));
@@ -491,6 +495,7 @@ public class PartitionDedupApp {
                         if (newState == KafkaStreams.State.RUNNING) {
                             runningLatch.countDown();
                             retryAttempt.set(0);
+                            LOG.info("Kafka Streams reached RUNNING (runId={})", RUN_ID);
                         }
 
                         if (newState == KafkaStreams.State.ERROR && FAIL_FAST) {
@@ -544,15 +549,10 @@ public class PartitionDedupApp {
                     LOG.info("PartitionDedupApp started (runId={}, FAIL_FAST={})", RUN_ID, FAIL_FAST);
 
                     if (FAIL_FAST) {
-                        boolean started = runningLatch.await(FAIL_FAST_STARTUP_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-                        if (!started) {
-                            LOG.error("FAIL_FAST startup timeout: did not reach RUNNING state within {} ms",
-                                    FAIL_FAST_STARTUP_TIMEOUT_MS);
-                            initiateShutdown("FAIL_FAST startup timeout", streams, shutdownLatch, shuttingDown,
-                                    exitCode, 1);
-                        } else {
-                            failFastScheduler = startFailFastConnectivityMonitor(props, streams, shutdownLatch,
-                                    shuttingDown, exitCode);
+                        boolean started = awaitRunningOrShutdown(runningLatch, shutdownLatch, shuttingDown,
+                                FAIL_FAST_STARTUP_TIMEOUT_MS);
+                        if (started) {
+                            failFastScheduler = startFailFastConnectivityMonitor(props, shuttingDown);
                         }
                     }
 
@@ -795,6 +795,26 @@ public class PartitionDedupApp {
         }
     }
 
+    static void configureStaticMembership(Properties props, String instanceId) {
+        if (instanceId == null || instanceId.trim().isEmpty()
+                || props.containsKey(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG)) {
+            return;
+        }
+        props.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, instanceId.trim());
+    }
+
+    static boolean awaitRunningOrShutdown(CountDownLatch runningLatch, CountDownLatch shutdownLatch,
+            AtomicBoolean shuttingDown, long diagnosticIntervalMs) throws InterruptedException {
+        while (!shuttingDown.get() && shutdownLatch.getCount() > 0L) {
+            if (runningLatch.await(diagnosticIntervalMs, TimeUnit.MILLISECONDS)) {
+                return true;
+            }
+            LOG.warn("Kafka Streams has not reached RUNNING after {} ms; state restoration or rebalancing is still "
+                    + "in progress, so startup will continue", diagnosticIntervalMs);
+        }
+        return runningLatch.getCount() == 0L;
+    }
+
     private static void initiateShutdown(String reason, KafkaStreams streams, CountDownLatch shutdownLatch,
             AtomicBoolean shuttingDown, AtomicInteger exitCode, int newExitCode) {
         if (!shuttingDown.compareAndSet(false, true)) {
@@ -815,10 +835,11 @@ public class PartitionDedupApp {
         }
     }
 
-    private static ScheduledExecutorService startFailFastConnectivityMonitor(Properties streamProps, KafkaStreams streams,
-            CountDownLatch shutdownLatch, AtomicBoolean shuttingDown, AtomicInteger exitCode) {
+    private static ScheduledExecutorService startFailFastConnectivityMonitor(Properties streamProps,
+            AtomicBoolean shuttingDown) {
         Properties adminProps = createAdminProps(streamProps);
         AtomicInteger probeCounter = new AtomicInteger(0);
+        AtomicBoolean connectivityFailure = new AtomicBoolean(false);
 
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "fail-fast-kafka-monitor");
@@ -833,17 +854,24 @@ public class PartitionDedupApp {
 
             List<String> unresolvedHosts = getUnresolvedBootstrapHosts(streamProps);
             if (!unresolvedHosts.isEmpty()) {
-                LOG.error("FAIL_FAST bootstrap DNS resolution failed for hosts {}; terminating process",
-                        unresolvedHosts);
-                initiateShutdown("FAIL_FAST bootstrap DNS resolution failed", streams, shutdownLatch, shuttingDown,
-                        exitCode, 1);
+                if (connectivityFailure.compareAndSet(false, true)) {
+                    LOG.warn("Kafka connectivity degraded: bootstrap DNS resolution failed for hosts {}; "
+                            + "Kafka Streams will continue reconnecting", unresolvedHosts);
+                } else {
+                    LOG.debug("Kafka connectivity remains degraded: unresolved bootstrap hosts {}", unresolvedHosts);
+                }
                 return;
             }
 
-            try (Admin admin = Admin.create(adminProps)) {
+            Admin admin = null;
+            try {
+                admin = Admin.create(adminProps);
                 long start = System.nanoTime();
                 admin.describeCluster().nodes().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
                 int count = probeCounter.incrementAndGet();
+                if (connectivityFailure.compareAndSet(true, false)) {
+                    LOG.info("Kafka connectivity restored (runId={}, probeCount={})", RUN_ID, count);
+                }
                 if (LOG.isDebugEnabled() && (count == 1 || count % 6 == 0)) {
                     long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                     LOG.debug("FAIL_FAST connectivity probe ok (runId={}, probeCount={}, durationMs={})",
@@ -852,9 +880,13 @@ public class PartitionDedupApp {
                             durationMs);
                 }
             } catch (Exception e) {
-                LOG.error("FAIL_FAST connectivity check failed; terminating process", e);
-                initiateShutdown("FAIL_FAST Kafka connectivity check failed", streams, shutdownLatch, shuttingDown,
-                        exitCode, 1);
+                if (connectivityFailure.compareAndSet(false, true)) {
+                    LOG.warn("Kafka connectivity check failed; Kafka Streams will continue reconnecting", e);
+                } else {
+                    LOG.debug("Kafka connectivity remains degraded", e);
+                }
+            } finally {
+                closeProbeAdmin(admin);
             }
         }, 0, FAIL_FAST_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
 
@@ -919,6 +951,23 @@ public class PartitionDedupApp {
         }
     }
 
+    /**
+     * Closes a connectivity probe AdminClient without blocking the monitor thread.
+     * An unbounded {@code close()} waits for pending calls to finish, which during a
+     * Kafka outage delays the next probe by up to the admin API timeout.
+     */
+    private static void closeProbeAdmin(Admin admin) {
+        if (admin == null) {
+            return;
+        }
+
+        try {
+            admin.close(Duration.ZERO);
+        } catch (Exception closeError) {
+            LOG.debug("Error closing connectivity probe admin client", closeError);
+        }
+    }
+
     private static Properties createAdminProps(Properties streamProps) {
         Properties adminProps = new Properties();
         adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
@@ -929,6 +978,12 @@ public class PartitionDedupApp {
                 adminProps.put(key, streamProps.getProperty(key));
             }
         }
+
+        // Keep the probe bounded by FAIL_FAST_CHECK_TIMEOUT_MS instead of the admin
+        // client defaults (request 30s, API 60s), so an outage is reported promptly.
+        String probeTimeout = Long.toString(FAIL_FAST_CHECK_TIMEOUT_MS);
+        adminProps.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, probeTimeout);
+        adminProps.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, probeTimeout);
 
         return adminProps;
     }

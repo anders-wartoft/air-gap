@@ -1,0 +1,128 @@
+# TC-9 dedup restart-safety stack.
+#
+# Isolated from the main test environment (own Compose project and network,
+# no published host ports) so it can be started while the TC-9 chain stack is
+# still up. It is driven by verify-tc9-dedup-restart.sh.
+#
+# The stack is deliberately minimal: one Kafka broker that can be stopped and
+# started again, and one dedup instance running with FAIL_FAST=true. The point
+# is not to move events through the pipeline but to observe how dedup behaves
+# when Kafka disappears for a while and when dedup itself is restarted.
+#
+# `restart: "no"` on dedup is intentional. Nothing restarts the process for it,
+# so if dedup terminates the container stops and the check fails. That is the
+# regression this stack exists to catch.
+
+networks:
+  airgap-tc9-dedup-restart:
+
+services:
+  kafka:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: kafka
+    networks:
+      - airgap-tc9-dedup-restart
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      # Single broker: every internal topic has to fit on one node. The
+      # transaction state log matters here because dedup runs exactly-once.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: ${TC9_RESTART_PARTITIONS:-3}
+
+  topic-init:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: topic-init
+    networks:
+      - airgap-tc9-dedup-restart
+    depends_on:
+      kafka:
+        condition: service_started
+    environment:
+      BOOTSTRAP: kafka:9092
+      PARTITIONS: ${TC9_RESTART_PARTITIONS:-3}
+      TOPICS: transfer dedup gaps
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -eu
+        TOPICS_CMD=/usr/bin/kafka-topics
+        command -v "$$TOPICS_CMD" >/dev/null 2>&1 || TOPICS_CMD=kafka-topics.sh
+        tries=60
+        echo "[topic-init] waiting for Kafka at $$BOOTSTRAP ..."
+        while (( tries-- > 0 )); do
+          "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --list >/dev/null 2>&1 && break
+          sleep 2
+        done
+        for t in $$TOPICS; do
+          if "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --describe --topic "$$t" >/dev/null 2>&1; then
+            echo "[topic-init] $$t exists"
+          else
+            echo "[topic-init] creating $$t (partitions=$$PARTITIONS)"
+            "$$TOPICS_CMD" --bootstrap-server "$$BOOTSTRAP" --create \
+              --topic "$$t" --partitions "$$PARTITIONS" --replication-factor 1
+          fi
+        done
+        echo "[topic-init] done"
+    restart: "no"
+
+  dedup:
+    image: ${DEDUP_IMAGE:-eclipse-temurin:17-jre-noble}
+    hostname: dedup
+    networks:
+      - airgap-tc9-dedup-restart
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+    environment:
+      RAW_TOPICS: transfer
+      CLEAN_TOPIC: dedup
+      GAP_TOPIC: gaps
+      BOOTSTRAP_SERVERS: kafka:9092
+      STATE_DIR_CONFIG: /tmp/dedup-state
+      APPLICATION_ID: dedup-tc9-restart
+      WINDOW_SIZE: 1000
+      MAX_WINDOWS: 10
+      GAP_EMIT_INTERVAL_SEC: 60
+      PERSIST_INTERVAL_MS: 10000
+      # One instance, so a standby replica could never be assigned anyway.
+      NUM_STANDBY_REPLICAS: 0
+      # Static group membership comes from INSTANCE_ID, exactly as the
+      # packaged systemd template supplies it from the unit instance name.
+      INSTANCE_ID: ${TC9_RESTART_INSTANCE_ID:-dedup-1}
+      FAIL_FAST: "true"
+      # Deliberately short. A real restart that restores state from the
+      # changelog takes far longer than this, so the stack reproduces the
+      # condition that used to terminate the process on every restart.
+      FAIL_FAST_STARTUP_TIMEOUT_MS: ${TC9_RESTART_STARTUP_TIMEOUT_MS:-5000}
+      FAIL_FAST_CHECK_INTERVAL_MS: ${TC9_RESTART_CHECK_INTERVAL_MS:-4000}
+      FAIL_FAST_CHECK_TIMEOUT_MS: ${TC9_RESTART_CHECK_TIMEOUT_MS:-8000}
+    volumes:
+      - ../../java-streams/target:/airgap/dedup-jar:ro
+      - ../../config:/airgap/config:ro
+    working_dir: /airgap
+    # Nothing supervises this container. If dedup exits, the container stops
+    # and the verification notices.
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        JAR=$$(ls /airgap/dedup-jar/air-gap-deduplication-fat-*.jar 2>/dev/null | head -1)
+        if [ -z "$$JAR" ]; then
+          echo "[dedup] no fat jar under /airgap/dedup-jar/. Build it with: make build-java" >&2
+          exit 2
+        fi
+        mkdir -p "$$STATE_DIR_CONFIG" /var/log/airgap/dedup
+        echo "[dedup] jar=$$JAR instance=$$INSTANCE_ID failFast=$$FAIL_FAST startupTimeoutMs=$$FAIL_FAST_STARTUP_TIMEOUT_MS"
+        exec java -Dlog4j.configurationFile=/airgap/config/testcases/log4j2.xml -jar "$$JAR"

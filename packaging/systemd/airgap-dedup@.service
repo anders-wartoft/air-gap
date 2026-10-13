@@ -2,8 +2,10 @@
 Description=Air Gap Deduplication Service Instance %i
 Documentation=https://github.com/anders-wartoft/air-gap
 Documentation=file:///usr/share/doc/airgap-dedup/README.md
-After=network-online.target kafka.service
+After=network-online.target confluent-kafka.service
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple

@@ -207,7 +207,7 @@ class ProductionConfigurationWarningsTest {
     }
 
     @Test
-    void productionWarningsLifecycleFailFast() throws Exception {
+    void productionWarningsLifecycleFailFastKeepsRecovering() throws Exception {
         checkLifecycle(true);
     }
 
@@ -269,14 +269,13 @@ class ProductionConfigurationWarningsTest {
                 assertTrue(System.nanoTime() < deadline, "startup warning timeout");
                 Thread.sleep(20);
             }
-            if (!failFast) {
-                process.destroy();
+            if (failFast) {
+                Thread.sleep(2500);
+                assertTrue(process.isAlive(), "temporary Kafka outage must not terminate fail-fast startup");
             }
+            process.destroy();
             assertTrue(process.waitFor(20, TimeUnit.SECONDS),
                     "dedup shutdown timeout\n" + Files.readString(output));
-            if (failFast) {
-                assertEquals(1, process.exitValue(), "fail-fast must retain its failure exit code");
-            }
             List<String> startup = new ArrayList<>();
             List<String> shutdown = new ArrayList<>();
             boolean finalBlock = false;

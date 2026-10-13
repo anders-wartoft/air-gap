@@ -139,13 +139,16 @@ This is covered in the [Deduplication.md](doc/Deduplication.md) documentation
 
 For production operation of the Java deduplicator, these environment variables control startup/recovery behavior:
 
-- `FAIL_FAST` (`true`/`false`) - If `true`, the process exits with non-zero status when Kafka startup/connectivity checks fail (recommended with systemd/Kubernetes restart policy).
-- `FAIL_FAST_STARTUP_TIMEOUT_MS` - Max time to reach `RUNNING` before fail-fast termination.
-- `FAIL_FAST_CHECK_INTERVAL_MS` - Interval for runtime connectivity checks in fail-fast mode.
-- `FAIL_FAST_CHECK_TIMEOUT_MS` - Timeout per runtime connectivity check.
+- `FAIL_FAST` (`true`/`false`) - If `true`, the process exits with non-zero status on terminal Kafka Streams errors. Temporary Kafka outages remain in-process so Kafka Streams can reconnect.
+- `FAIL_FAST_STARTUP_TIMEOUT_MS` - Diagnostic interval while waiting to reach `RUNNING`; state restoration continues after the interval.
+- `FAIL_FAST_CHECK_INTERVAL_MS` - Interval for runtime Kafka connectivity diagnostics in fail-fast mode.
+- `FAIL_FAST_CHECK_TIMEOUT_MS` - Timeout per diagnostic connectivity probe.
 - `RETRY_BACKOFF_MS` - Base retry delay when `FAIL_FAST=false`.
 - `RETRY_BACKOFF_MAX_MS` - Maximum exponential retry delay when `FAIL_FAST=false`.
 - `RETRY_BACKOFF_JITTER_PCT` - Retry jitter percentage (`0-100`) applied to avoid synchronized restarts.
+
+When `INSTANCE_ID` is set, dedup also uses it as Kafka's static `group.instance.id`. Set
+`KAFKA_GROUP_INSTANCE_ID` to override that identity explicitly.
 
 See [Deduplication.md](doc/Deduplication.md) for defaults and full tuning guidance.
 

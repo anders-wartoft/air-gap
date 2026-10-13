@@ -70,17 +70,19 @@ java -jar java-streams/target/air-gap-deduplication-fat-<version>.jar
 | `STATE_DIR_CONFIG`             | Writable directory for local state                                                              | `/tmp/var/lib/kafka-streams/state`  |
 | `GAP_EMIT_INTERVAL_SEC`        | How often to emit gaps to `GAP_TOPIC` (seconds)                                                 | `60`                                |
 | `PERSIST_INTERVAL_MS`          | How often local state is synchronized with Kafka (milliseconds)                                 | `5000`                              |
-| `FAIL_FAST`                    | If `true`, terminate on Kafka startup/connectivity failures                                     | `false`                             |
-| `FAIL_FAST_STARTUP_TIMEOUT_MS` | Max time to reach `RUNNING` state in fail-fast mode (milliseconds)                              | `30000`                             |
-| `FAIL_FAST_CHECK_INTERVAL_MS`  | Interval between runtime Kafka connectivity checks in fail-fast mode (milliseconds)             | `10000`                             |
-| `FAIL_FAST_CHECK_TIMEOUT_MS`   | Timeout for each runtime Kafka connectivity check in fail-fast mode (milliseconds)              | `5000`                              |
+| `FAIL_FAST`                    | If `true`, terminate on terminal Kafka Streams errors                                           | `false`                             |
+| `FAIL_FAST_STARTUP_TIMEOUT_MS` | Diagnostic interval while waiting for `RUNNING`; recovery continues after it (milliseconds)     | `30000`                             |
+| `FAIL_FAST_CHECK_INTERVAL_MS`  | Interval between runtime Kafka connectivity diagnostics (milliseconds)                          | `10000`                             |
+| `FAIL_FAST_CHECK_TIMEOUT_MS`   | Timeout for each runtime connectivity diagnostic (milliseconds)                                 | `5000`                              |
 | `RETRY_BACKOFF_MS`             | Base delay before restart/retry when `FAIL_FAST=false` (milliseconds)                           | `5000`                              |
 | `RETRY_BACKOFF_MAX_MS`         | Upper bound for exponential retry backoff when `FAIL_FAST=false` (milliseconds)                 | `60000`                             |
 | `RETRY_BACKOFF_JITTER_PCT`     | Jitter percentage applied to retry delays to avoid synchronized retries (`0`-`100`)             | `20`                                |
 
-When `FAIL_FAST=true`, the process exits with a non-zero status code on Kafka startup/connectivity problems. This mode is intended for environments where a supervisor (for example systemd, Kubernetes, or another process monitor) restarts the service automatically.
+When `FAIL_FAST=true`, the process exits with a non-zero status code on terminal Kafka Streams errors. Temporary Kafka outages and long state restoration remain in-process so Kafka Streams can recover without repeatedly discarding startup progress. The startup timeout controls periodic warnings rather than terminating the process.
 
 When `FAIL_FAST=false`, the process stays alive and retries with exponential backoff and jitter. On startup, if source topics are temporarily unavailable, startup is delayed and retried using the same backoff settings.
+
+When `INSTANCE_ID` is set, dedup uses it as Kafka's static `group.instance.id`, reducing rebalance delays when the same service instance restarts. An explicit `KAFKA_GROUP_INSTANCE_ID` takes precedence. The identity must be unique among simultaneously running members of the same application.
 
 One of the benefits of this software is that, ideally, it should be able to support exactly-once-delivery. Since upstream can be configured to send the same events several times, we need a mechanism to de-duplicate the received data stream.
 
@@ -301,10 +303,10 @@ Topics:
 Kafka:
 
 - BOOTSTRAP_SERVERS - The Kafka connection url.
-- FAIL_FAST - If true, terminate immediately when Kafka cannot be reached at startup or during runtime checks.
-- FAIL_FAST_STARTUP_TIMEOUT_MS - Maximum startup wait time before fail-fast termination.
-- FAIL_FAST_CHECK_INTERVAL_MS - How often runtime connectivity checks are executed in fail-fast mode.
-- FAIL_FAST_CHECK_TIMEOUT_MS - Timeout for each runtime connectivity check in fail-fast mode.
+- FAIL_FAST - If true, terminate on terminal Kafka Streams errors.
+- FAIL_FAST_STARTUP_TIMEOUT_MS - Diagnostic interval while waiting for startup to reach RUNNING.
+- FAIL_FAST_CHECK_INTERVAL_MS - How often runtime connectivity diagnostics are executed in fail-fast mode.
+- FAIL_FAST_CHECK_TIMEOUT_MS - Timeout for each runtime connectivity diagnostic.
 - RETRY_BACKOFF_MS - Base retry delay in milliseconds when FAIL_FAST is false.
 - RETRY_BACKOFF_MAX_MS - Maximum retry delay in milliseconds when FAIL_FAST is false.
 - RETRY_BACKOFF_JITTER_PCT - Retry jitter percentage (0-100) applied to retry delays when FAIL_FAST is false.
