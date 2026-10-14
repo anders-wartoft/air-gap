@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"bytes"
+	"encoding/pem"
 	"log"
 	"os"
 	"path/filepath"
@@ -10,6 +11,29 @@ import (
 
 	"sitia.nu/airgap/src/logging"
 )
+
+func TestLoadTLSCertificateRedactsPasswordFilePath(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "encrypted-key.pem")
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "ENCRYPTED PRIVATE KEY",
+		Bytes: []byte("not-needed-for-password-file-read"),
+	})
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	passwordFile := filepath.Join(t.TempDir(), "sensitive-password-file-name")
+
+	_, err := LoadTLSCertificate("unused-cert.pem", keyFile, passwordFile)
+	if err == nil {
+		t.Fatal("LoadTLSCertificate() succeeded with a missing password file")
+	}
+	if strings.Contains(err.Error(), passwordFile) {
+		t.Fatalf("LoadTLSCertificate() error exposes password file path: %q", err)
+	}
+	if !strings.Contains(err.Error(), "file does not exist") {
+		t.Fatalf("LoadTLSCertificate() error = %q, want redacted not-found classification", err)
+	}
+}
 
 func TestREQ5207SaramaUsesOTLPApplicationLogger(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "sarama.log")

@@ -432,8 +432,7 @@ func (t *TCPAdapter) ReloadTLSConfig() error {
 	), "[TLS upstream]   keyFile:         %s", t.tlsKeyFile)
 	Logger.Debugf(reload.With(
 		logging.Str("airgap.config.setting", "tcpTLSKeyPasswordFile"),
-		logging.Str("file.path", t.tlsKeyPasswordFile),
-	), "[TLS upstream]   keyPasswordFile: %s", t.tlsKeyPasswordFile)
+	), "[TLS upstream]   keyPasswordFile: [redacted]")
 	Logger.Debugf(reload.With(
 		logging.Str("airgap.config.setting", "tcpTLSCipherSuites"),
 		logging.Str("airgap.config.value", t.tlsCipherSuites),

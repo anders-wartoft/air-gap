@@ -137,7 +137,14 @@ func LoadTLSCertificate(certFile, keyFile, keyPasswordFile string) (tls.Certific
 	if keyPasswordFile != "" {
 		passphrase, err := os.ReadFile(keyPasswordFile)
 		if err != nil {
-			return tls.Certificate{}, fmt.Errorf("failed to read key password file: %w", err)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				return tls.Certificate{}, errors.New("failed to read key password file: file does not exist")
+			case errors.Is(err, os.ErrPermission):
+				return tls.Certificate{}, errors.New("failed to read key password file: permission denied")
+			default:
+				return tls.Certificate{}, errors.New("failed to read key password file")
+			}
 		}
 		passphraseBytes := []byte(strings.TrimSpace(string(passphrase)))
 

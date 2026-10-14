@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -1147,11 +1146,11 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		}
 	}
 	if result.keyPasswordFile != "" && (result.keyFile != "" || result.certFile != "" || result.caFile != "") {
-		// Make sure this file exists and is readable. If not, print the complete file path for easier debugging
-		absPath, _ := filepath.Abs(result.keyPasswordFile)
+		// Make sure this file exists and is readable without exposing its path.
 		file, err := os.Open(result.keyPasswordFile)
 		if err != nil {
-			Logger.Fatalf(configInvalid("keyPasswordFile", result.keyPasswordFile).Merge(logging.Err(err)), "Cannot open keyPasswordFile '%s' (absolute path: '%s'): %v", result.keyPasswordFile, absPath, err)
+			Logger.Fatal(configInvalid("keyPasswordFile", "[redacted]").With(logging.Error("file.unreadable")),
+				"Cannot open configured keyPasswordFile; verify that it exists and is readable")
 		}
 		defer file.Close()
 	}

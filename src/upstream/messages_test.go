@@ -325,6 +325,7 @@ func TestTemplateValuesHoldNoSecrets(t *testing.T) {
 	c := DefaultConfiguration()
 	c.key = []byte("symmetric-key-material")
 	c.newkey = []byte("next-symmetric-key")
+	c.keyPasswordFile = "/secret/password-file"
 
 	values := templateValues(c)
 	for name, value := range values {
@@ -336,11 +337,17 @@ func TestTemplateValuesHoldNoSecrets(t *testing.T) {
 		t.Errorf("key material in use must render as %q, got %q and %q",
 			valueRedacted, values["key"], values["newkey"])
 	}
+	if values["keyPasswordFile"] != valueRedacted {
+		t.Errorf("keyPasswordFile must render as %q, got %q", valueRedacted, values["keyPasswordFile"])
+	}
 
 	empty := templateValues(DefaultConfiguration())
 	if empty["key"] != valueNone || empty["newkey"] != valueNone {
 		t.Errorf("absent key material must render as %q, got %q and %q",
 			valueNone, empty["key"], empty["newkey"])
+	}
+	if empty["keyPasswordFile"] != valueNone {
+		t.Errorf("absent keyPasswordFile must render as %q, got %q", valueNone, empty["keyPasswordFile"])
 	}
 }
 

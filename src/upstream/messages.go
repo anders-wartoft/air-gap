@@ -214,7 +214,7 @@ func templateValues(c TransferConfiguration) map[string]string {
 		"certFile":                            c.certFile,
 		"keyFile":                             c.keyFile,
 		"caFile":                              c.caFile,
-		"keyPasswordFile":                     c.keyPasswordFile,
+		"keyPasswordFile":                     describeSecretSetting(c.keyPasswordFile),
 		"deliverFilter":                       c.deliverFilter,
 		"topicTranslations":                   c.topicTranslations,
 		"inputFilterRules":                    c.inputFilterRules,
@@ -282,6 +282,13 @@ const (
 // which cipher is in force.
 func describeKeyMaterial(key []byte) string {
 	if len(key) == 0 {
+		return valueNone
+	}
+	return valueRedacted
+}
+
+func describeSecretSetting(value string) string {
+	if value == "" {
 		return valueNone
 	}
 	return valueRedacted
