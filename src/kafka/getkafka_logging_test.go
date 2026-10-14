@@ -35,7 +35,7 @@ func TestLoadTLSCertificateRedactsPasswordFilePath(t *testing.T) {
 	}
 }
 
-func TestSetTLSConfigParametersDoesNotLogPasswordFilePath(t *testing.T) {
+func TestSetTLSConfigParametersReturnsRedactedPasswordFileError(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "encrypted-key.pem")
 	keyPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "ENCRYPTED PRIVATE KEY",
@@ -45,29 +45,13 @@ func TestSetTLSConfigParametersDoesNotLogPasswordFilePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	passwordFile := filepath.Join(t.TempDir(), "sensitive-password-file-name")
-	logPath := filepath.Join(t.TempDir(), "kafka.log")
-	if err := logging.Logger.SetLogFile(logPath); err != nil {
-		t.Fatalf("SetLogFile: %v", err)
-	}
-	if err := logging.Logger.SetFormat(logging.FormatText); err != nil {
-		t.Fatalf("SetFormat(text): %v", err)
-	}
 
 	_, err := SetTLSConfigParameters("unused-cert.pem", keyFile, "unused-ca.pem", passwordFile)
 	if err == nil {
 		t.Fatal("SetTLSConfigParameters() succeeded with a missing password file")
 	}
-	logging.Logger.Errorf(logging.Event(logging.EventTLSHandshake), "TLS setup failed: %v", err)
-
-	raw, readErr := os.ReadFile(logPath)
-	if readErr != nil {
-		t.Fatalf("ReadFile: %v", readErr)
-	}
 	if strings.Contains(err.Error(), passwordFile) {
 		t.Fatalf("SetTLSConfigParameters() error exposes password file path: %q", err)
-	}
-	if strings.Contains(string(raw), passwordFile) {
-		t.Fatalf("TLS configuration log exposes password file path: %q", raw)
 	}
 	if !strings.Contains(err.Error(), "file does not exist") {
 		t.Fatalf("SetTLSConfigParameters() error = %q, want redacted not-found classification", err)
