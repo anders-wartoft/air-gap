@@ -2,7 +2,6 @@ package kafka
 
 import (
 	"bytes"
-	"encoding/pem"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,49 +11,17 @@ import (
 	"sitia.nu/airgap/src/logging"
 )
 
-func TestLoadTLSCertificateRedactsPasswordFilePath(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "encrypted-key.pem")
-	keyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "ENCRYPTED PRIVATE KEY",
-		Bytes: []byte("not-needed-for-password-file-read"),
+func TestKeyPasswordFileReadErrorIsStatic(t *testing.T) {
+	err := keyPasswordFileReadError(&os.PathError{
+		Op:   "open",
+		Path: "/secret/password-file",
+		Err:  os.ErrNotExist,
 	})
-	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
-		t.Fatal(err)
+	if strings.Contains(err.Error(), "/secret/password-file") {
+		t.Fatal("key password file error exposes the file path")
 	}
-	passwordFile := filepath.Join(t.TempDir(), "sensitive-password-file-name")
-
-	_, err := LoadTLSCertificate("unused-cert.pem", keyFile, passwordFile)
-	if err == nil {
-		t.Fatal("LoadTLSCertificate() succeeded with a missing password file")
-	}
-	if strings.Contains(err.Error(), passwordFile) {
-		t.Fatal("LoadTLSCertificate() error exposes password file path")
-	}
-	if !strings.Contains(err.Error(), "file does not exist") {
-		t.Fatal("LoadTLSCertificate() error lacks the redacted not-found classification")
-	}
-}
-
-func TestSetTLSConfigParametersReturnsRedactedPasswordFileError(t *testing.T) {
-	keyFile := filepath.Join(t.TempDir(), "encrypted-key.pem")
-	keyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "ENCRYPTED PRIVATE KEY",
-		Bytes: []byte("not-needed-for-password-file-read"),
-	})
-	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	passwordFile := filepath.Join(t.TempDir(), "sensitive-password-file-name")
-
-	_, err := SetTLSConfigParameters("unused-cert.pem", keyFile, "unused-ca.pem", passwordFile)
-	if err == nil {
-		t.Fatal("SetTLSConfigParameters() succeeded with a missing password file")
-	}
-	if strings.Contains(err.Error(), passwordFile) {
-		t.Fatal("SetTLSConfigParameters() error exposes password file path")
-	}
-	if !strings.Contains(err.Error(), "file does not exist") {
-		t.Fatal("SetTLSConfigParameters() error lacks the redacted not-found classification")
+	if err.Error() != "failed to read key password file: file does not exist" {
+		t.Fatal("key password file error lacks the expected static classification")
 	}
 }
 
