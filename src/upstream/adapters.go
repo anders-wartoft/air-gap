@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"regexp"
@@ -22,11 +23,24 @@ type KafkaAdapter struct {
 	settings kafka.ConsumerSettings
 }
 
-func NewKafkaAdapter(config TransferConfiguration) *KafkaAdapter {
-	settings := kafka.ConsumerSettings{
+func kafkaConsumerSettings(config TransferConfiguration) (kafka.ConsumerSettings, error) {
+	if config.kafkaFetchDefaultBytes <= 0 || config.kafkaFetchDefaultBytes > math.MaxInt32 {
+		return kafka.ConsumerSettings{}, fmt.Errorf("kafkaFetchDefaultBytes must be between 1 and %d", math.MaxInt32)
+	}
+	if config.kafkaMaxMessageBytes < config.kafkaFetchDefaultBytes || config.kafkaMaxMessageBytes > math.MaxInt32 {
+		return kafka.ConsumerSettings{}, fmt.Errorf("kafkaMaxMessageBytes must be between kafkaFetchDefaultBytes and %d", math.MaxInt32)
+	}
+	return kafka.ConsumerSettings{
 		FetchDefaultBytes: int32(config.kafkaFetchDefaultBytes),
 		FetchMaxBytes:     int32(config.kafkaMaxMessageBytes),
 		ChannelBufferSize: config.kafkaChannelBufferSize,
+	}, nil
+}
+
+func NewKafkaAdapter(config TransferConfiguration) (*KafkaAdapter, error) {
+	settings, err := kafkaConsumerSettings(config)
+	if err != nil {
+		return nil, err
 	}
 	sampler := newSystemMemorySampler(config.memoryLimitBytes)
 	sample, err := sampler.Sample()
@@ -35,7 +49,7 @@ func NewKafkaAdapter(config TransferConfiguration) *KafkaAdapter {
 			logging.Failure(),
 			logging.Error("memory.limit.unavailable"),
 		), "Memory-pressure throttling disabled because no usable memory limit could be detected: %v", err)
-		return &KafkaAdapter{settings: settings}
+		return &KafkaAdapter{settings: settings}, nil
 	}
 
 	if config.goMemoryLimitPercent > 0 {
@@ -77,7 +91,7 @@ func NewKafkaAdapter(config TransferConfiguration) *KafkaAdapter {
 		},
 	)
 	settings.BeforeMessage = controller.Wait
-	return &KafkaAdapter{settings: settings}
+	return &KafkaAdapter{settings: settings}, nil
 }
 
 func (k *KafkaAdapter) Read(ctx context.Context, name string, offset int,

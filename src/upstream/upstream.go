@@ -961,7 +961,14 @@ func Main(build string) {
 	var kafkaAdapter KafkaClient
 	switch config.source {
 	case "kafka":
-		kafkaAdapter = NewKafkaAdapter(config)
+		adapter, err := NewKafkaAdapter(config)
+		if err != nil {
+			Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.ErrorType(err),
+			), "Invalid Kafka consumer settings: %v", err)
+		}
+		kafkaAdapter = adapter
 	case "random":
 		kafkaAdapter = &RandomKafkaAdapter{}
 	default:
