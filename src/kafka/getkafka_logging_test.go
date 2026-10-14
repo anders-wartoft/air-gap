@@ -28,10 +28,10 @@ func TestLoadTLSCertificateRedactsPasswordFilePath(t *testing.T) {
 		t.Fatal("LoadTLSCertificate() succeeded with a missing password file")
 	}
 	if strings.Contains(err.Error(), passwordFile) {
-		t.Fatalf("LoadTLSCertificate() error exposes password file path: %q", err)
+		t.Fatal("LoadTLSCertificate() error exposes password file path")
 	}
 	if !strings.Contains(err.Error(), "file does not exist") {
-		t.Fatalf("LoadTLSCertificate() error = %q, want redacted not-found classification", err)
+		t.Fatal("LoadTLSCertificate() error lacks the redacted not-found classification")
 	}
 }
 
@@ -51,10 +51,10 @@ func TestSetTLSConfigParametersReturnsRedactedPasswordFileError(t *testing.T) {
 		t.Fatal("SetTLSConfigParameters() succeeded with a missing password file")
 	}
 	if strings.Contains(err.Error(), passwordFile) {
-		t.Fatalf("SetTLSConfigParameters() error exposes password file path: %q", err)
+		t.Fatal("SetTLSConfigParameters() error exposes password file path")
 	}
 	if !strings.Contains(err.Error(), "file does not exist") {
-		t.Fatalf("SetTLSConfigParameters() error = %q, want redacted not-found classification", err)
+		t.Fatal("SetTLSConfigParameters() error lacks the redacted not-found classification")
 	}
 }
 
