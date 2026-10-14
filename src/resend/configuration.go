@@ -623,6 +623,9 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				config.caFile = value
 			case "keyPasswordFile":
 				config.keyPasswordFile = value
+				Logger.Info(configOverride("command-line", key, "[set]"),
+					"Overriding keyPasswordFile with command line argument: --keyPasswordFile=[set]")
+				continue
 			case "logLevel":
 				config.logLevel = strings.ToUpper(value)
 			case "limit":
