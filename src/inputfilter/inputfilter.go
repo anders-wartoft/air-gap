@@ -142,15 +142,31 @@ func (f *InputFilter) ShouldFilterOut(payload []byte) (bool, error) {
 		}
 		if matched {
 			// First match determines the action
-			logging.Logger.Debugf("[InputFilter] Rule %d (%s) matched: %s", i+1, rule.Action, rule.Raw)
-			logging.Logger.Debugf("[InputFilter] Payload (first 200 chars): %.200s", payloadStr)
+			matchAttrs := logging.Event(logging.EventMessageFilter,
+				logging.Str("airgap.filter.kind", "input"),
+				logging.Str("airgap.filter.outcome", "rule.matched"),
+				logging.Int("airgap.filter.rule.index", int64(i+1)),
+				logging.Str("airgap.filter.rule.action", rule.Action),
+				logging.Str("airgap.filter.rule.pattern", rule.Raw),
+				logging.Bool("airgap.message.denied", rule.Action == "deny"),
+			)
+			logging.Logger.Debugf(matchAttrs, "[InputFilter] Rule %d (%s) matched: %s", i+1, rule.Action, rule.Raw)
+			logging.Logger.Debugf(matchAttrs.With(logging.Int("airgap.message.size", int64(len(payload)))),
+				"[InputFilter] Payload (first 200 chars): %.200s", payloadStr)
 			return rule.Action == "deny", nil
 		}
 	}
 
 	// No match, use default action
-	logging.Logger.Debugf("[InputFilter] No rules matched, using default action: %s", f.DefaultAction)
-	logging.Logger.Debugf("[InputFilter] Payload (first 200 chars): %.200s", payloadStr)
+	defaultAttrs := logging.Event(logging.EventMessageFilter,
+		logging.Str("airgap.filter.kind", "input"),
+		logging.Str("airgap.filter.outcome", "default.action"),
+		logging.Str("airgap.filter.rule.action", f.DefaultAction),
+		logging.Bool("airgap.message.denied", f.DefaultAction == "deny"),
+	)
+	logging.Logger.Debugf(defaultAttrs, "[InputFilter] No rules matched, using default action: %s", f.DefaultAction)
+	logging.Logger.Debugf(defaultAttrs.With(logging.Int("airgap.message.size", int64(len(payload)))),
+		"[InputFilter] Payload (first 200 chars): %.200s", payloadStr)
 	return f.DefaultAction == "deny", nil
 }
 

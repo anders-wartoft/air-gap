@@ -1,5 +1,9 @@
 package nu.sitia.airgap.streams;
 
+import nu.sitia.airgap.logging.Attrs;
+import nu.sitia.airgap.logging.Events;
+import nu.sitia.airgap.logging.Log;
+
 // File: PartitionDedupApp.java
 // Build with Kafka Streams 3.9+ and Java 17+
 //
@@ -322,6 +326,12 @@ public class PartitionDedupApp {
         }
     }
 
+    private static Attrs configAttrs(String setting, Object value) {
+        return Attrs.event(Events.CONFIG_APPLIED)
+                .with("airgap.config.setting", setting)
+                .with("airgap.config.value", String.valueOf(value));
+    }
+
     public static void main(String[] args) {
         System.out.println("Starting PartitionDedupApp " + APP_VERSION + " build " + BUILD_NUMBER + " ... runId=" + RUN_ID);
         Properties props = new Properties();
@@ -370,7 +380,8 @@ public class PartitionDedupApp {
                 if (k.toUpperCase().contains("PASSWORD") || propName.toUpperCase().contains("PASSWORD")) {
                     displayVal = "********";
                 }
-                LOG.debug("Injected Kafka property from env {} -> {}={}", k, propName, displayVal);
+                Log.debug(LOG, configAttrs(propName, displayVal)
+                        .with("airgap.config.source", k), "Injected Kafka property from env {} -> {}={}", k, propName, displayVal);
             }
         }
         configureStaticMembership(props, INSTANCE_ID);
@@ -379,33 +390,42 @@ public class PartitionDedupApp {
         props.setProperty("WINDOW_SIZE", Long.toString(WINDOW_SIZE));
         props.setProperty("MAX_WINDOWS", Integer.toString(MAX_WINDOWS));
 
-        LOG.info("Starting PartitionDedupApp {} build {} ... runId={}", APP_VERSION, BUILD_NUMBER, RUN_ID);
+        Log.info(LOG, Attrs.event(Events.APP_START)
+                .with("airgap.build.number", BUILD_NUMBER)
+                .with("airgap.run.id", RUN_ID),
+                "Starting PartitionDedupApp {} build {} ... runId={}", APP_VERSION, BUILD_NUMBER, RUN_ID);
 
-        LOG.info("BOOTSTRAP_SERVERS={}", BOOTSTRAP_SERVERS);
-        LOG.info("RAW_TOPICS={}", RAW_TOPICS);
-        LOG.info("CLEAN_TOPIC={}", CLEAN_TOPIC);
-        LOG.info("GAP_TOPIC={}", GAP_TOPIC);
-        LOG.info("STATE_DIR_CONFIG={}", STATE_DIR_CONFIG);
-        LOG.info("WINDOW_SIZE={}", WINDOW_SIZE);
-        LOG.info("MAX_WINDOWS={}", MAX_WINDOWS);
-        LOG.info("GAP_EMIT_INTERVAL_SEC={}", GAP_EMIT_INTERVAL_SEC);
-        LOG.info("MISSING_REPORT_INTERVAL_SEC={}", MISSING_REPORT_INTERVAL_SEC);
-        LOG.info("PERSIST_INTERVAL_MS={}", PERSIST_INTERVAL_MS);
-        LOG.info("FAIL_FAST={}", FAIL_FAST);
-        LOG.info("FAIL_FAST_STARTUP_TIMEOUT_MS={}", FAIL_FAST_STARTUP_TIMEOUT_MS);
-        LOG.info("FAIL_FAST_CHECK_INTERVAL_MS={}", FAIL_FAST_CHECK_INTERVAL_MS);
-        LOG.info("FAIL_FAST_CHECK_TIMEOUT_MS={}", FAIL_FAST_CHECK_TIMEOUT_MS);
-        LOG.info("RETRY_BACKOFF_MS={}", RETRY_BACKOFF_MS);
-        LOG.info("RETRY_BACKOFF_MAX_MS={}", RETRY_BACKOFF_MAX_MS);
-        LOG.info("RETRY_BACKOFF_JITTER_PCT={}", RETRY_BACKOFF_JITTER_PCT);
-        LOG.info("Application ID: {}", props.get(StreamsConfig.APPLICATION_ID_CONFIG));
-        LOG.info("Group Instance ID: {}", props.getOrDefault(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "<dynamic>"));
-        LOG.info("Num Stream Threads: {}", props.get(StreamsConfig.NUM_STREAM_THREADS_CONFIG));
-        LOG.info("Num Standby Replicas: {} (min instances needed: {})", props.get(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG), (NUM_STANDBY_REPLICAS + 1) + " × partitions");
-        LOG.info("Processing Guarantee: {}", props.get(StreamsConfig.PROCESSING_GUARANTEE_CONFIG));
-        LOG.info("Commit Interval (ms): {}", props.get(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG));
-        LOG.info("State Dir: {}", props.get(StreamsConfig.STATE_DIR_CONFIG));
-        LOG.info("Startup capability summary: runId={}, topicsCount={}, failFast={}, connectivityMonitor={}, kafkaSecurity={}",
+        Log.info(LOG, configAttrs("bootstrapServers", BOOTSTRAP_SERVERS), "BOOTSTRAP_SERVERS={}", BOOTSTRAP_SERVERS);
+        Log.info(LOG, configAttrs("rawTopics", RAW_TOPICS), "RAW_TOPICS={}", RAW_TOPICS);
+        Log.info(LOG, configAttrs("cleanTopic", CLEAN_TOPIC), "CLEAN_TOPIC={}", CLEAN_TOPIC);
+        Log.info(LOG, configAttrs("gapTopic", GAP_TOPIC), "GAP_TOPIC={}", GAP_TOPIC);
+        Log.info(LOG, configAttrs("stateDir", STATE_DIR_CONFIG), "STATE_DIR_CONFIG={}", STATE_DIR_CONFIG);
+        Log.info(LOG, configAttrs("windowSize", WINDOW_SIZE), "WINDOW_SIZE={}", WINDOW_SIZE);
+        Log.info(LOG, configAttrs("maxWindows", MAX_WINDOWS), "MAX_WINDOWS={}", MAX_WINDOWS);
+        Log.info(LOG, configAttrs("gapEmitIntervalSec", GAP_EMIT_INTERVAL_SEC), "GAP_EMIT_INTERVAL_SEC={}", GAP_EMIT_INTERVAL_SEC);
+        Log.info(LOG, configAttrs("missingReportIntervalSec", MISSING_REPORT_INTERVAL_SEC), "MISSING_REPORT_INTERVAL_SEC={}", MISSING_REPORT_INTERVAL_SEC);
+        Log.info(LOG, configAttrs("persistIntervalMs", PERSIST_INTERVAL_MS), "PERSIST_INTERVAL_MS={}", PERSIST_INTERVAL_MS);
+        Log.info(LOG, configAttrs("failFast", FAIL_FAST), "FAIL_FAST={}", FAIL_FAST);
+        Log.info(LOG, configAttrs("failFastStartupTimeoutMs", FAIL_FAST_STARTUP_TIMEOUT_MS), "FAIL_FAST_STARTUP_TIMEOUT_MS={}", FAIL_FAST_STARTUP_TIMEOUT_MS);
+        Log.info(LOG, configAttrs("failFastCheckIntervalMs", FAIL_FAST_CHECK_INTERVAL_MS), "FAIL_FAST_CHECK_INTERVAL_MS={}", FAIL_FAST_CHECK_INTERVAL_MS);
+        Log.info(LOG, configAttrs("failFastCheckTimeoutMs", FAIL_FAST_CHECK_TIMEOUT_MS), "FAIL_FAST_CHECK_TIMEOUT_MS={}", FAIL_FAST_CHECK_TIMEOUT_MS);
+        Log.info(LOG, configAttrs("retryBackoffMs", RETRY_BACKOFF_MS), "RETRY_BACKOFF_MS={}", RETRY_BACKOFF_MS);
+        Log.info(LOG, configAttrs("retryBackoffMaxMs", RETRY_BACKOFF_MAX_MS), "RETRY_BACKOFF_MAX_MS={}", RETRY_BACKOFF_MAX_MS);
+        Log.info(LOG, configAttrs("retryBackoffJitterPct", RETRY_BACKOFF_JITTER_PCT), "RETRY_BACKOFF_JITTER_PCT={}", RETRY_BACKOFF_JITTER_PCT);
+        Log.info(LOG, configAttrs("applicationId", props.get(StreamsConfig.APPLICATION_ID_CONFIG)), "Application ID: {}", props.get(StreamsConfig.APPLICATION_ID_CONFIG));
+        Log.info(LOG, configAttrs("groupInstanceId", props.getOrDefault(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "<dynamic>")), "Group Instance ID: {}", props.getOrDefault(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "<dynamic>"));
+        Log.info(LOG, configAttrs("numStreamThreads", props.get(StreamsConfig.NUM_STREAM_THREADS_CONFIG)), "Num Stream Threads: {}", props.get(StreamsConfig.NUM_STREAM_THREADS_CONFIG));
+        Log.info(LOG, configAttrs("numStandbyReplicas", props.get(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG)), "Num Standby Replicas: {} (min instances needed: {})", props.get(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG), (NUM_STANDBY_REPLICAS + 1) + " × partitions");
+        Log.info(LOG, configAttrs("processingGuarantee", props.get(StreamsConfig.PROCESSING_GUARANTEE_CONFIG)), "Processing Guarantee: {}", props.get(StreamsConfig.PROCESSING_GUARANTEE_CONFIG));
+        Log.info(LOG, configAttrs("commitIntervalMs", props.get(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG)), "Commit Interval (ms): {}", props.get(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG));
+        Log.info(LOG, configAttrs("stateDir", props.get(StreamsConfig.STATE_DIR_CONFIG)), "State Dir: {}", props.get(StreamsConfig.STATE_DIR_CONFIG));
+        Log.info(LOG, Attrs.event(Events.CONFIG_APPLIED)
+                .with("airgap.run.id", RUN_ID)
+                .with("messaging.kafka.topics.count", RAW_TOPICS.split(",").length)
+                .with("airgap.fail_fast.enabled", FAIL_FAST)
+                .with("airgap.connectivity.monitor", FAIL_FAST ? "enabled" : "disabled")
+                .with("messaging.kafka.security.protocol", resolveKafkaSecurityMode(props)),
+                "Startup capability summary: runId={}, topicsCount={}, failFast={}, connectivityMonitor={}, kafkaSecurity={}",
             RUN_ID,
             RAW_TOPICS.split(",").length,
             FAIL_FAST,
@@ -433,14 +453,14 @@ public class PartitionDedupApp {
                 try {
                     currentStreams.close(Duration.ofSeconds(10));
                 } catch (Exception e) {
-                    LOG.warn("Error while closing Kafka Streams in JVM shutdown hook", e);
+                    Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT), "Error while closing Kafka Streams in JVM shutdown hook", e);
                 }
             }
             try {
                 lifecycleFinished.await();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                LOG.warn("Interrupted waiting for dedup lifecycle cleanup", e);
+                Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT), "Interrupted waiting for dedup lifecycle cleanup", e);
             }
             if (shutdownWarningsEmitted.compareAndSet(false, true)) {
                 warnProductionConfiguration(props, "shutdown");
@@ -460,7 +480,7 @@ public class PartitionDedupApp {
                     List<String> missingSourceTopics = getMissingSourceTopics(props);
                     if (!missingSourceTopics.isEmpty()) {
                         long retryDelayMs = applyJitter(Math.max(0L, RETRY_BACKOFF_MS));
-                        LOG.warn("Source topics missing: {}. Delaying startup and retrying in {} ms",
+                        Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT).failure(), "Source topics missing: {}. Delaying startup and retrying in {} ms",
                                 missingSourceTopics,
                                 retryDelayMs);
                         try {
@@ -485,17 +505,17 @@ public class PartitionDedupApp {
                 AtomicInteger retryAttempt = new AtomicInteger(0);
                 ScheduledExecutorService failFastScheduler = null;
 
-                LOG.info("Starting KafkaStreams instance (runId={}, attempt={}, FAIL_FAST={})", RUN_ID, restartAttempt,
+                Log.info(LOG, Attrs.event(Events.KAFKA_REBALANCE), "Starting KafkaStreams instance (runId={}, attempt={}, FAIL_FAST={})", RUN_ID, restartAttempt,
                     FAIL_FAST);
 
                 try {
                     streams.setStateListener((newState, oldState) -> {
-                        LOG.debug("Kafka Streams state transition: {} -> {}", oldState, newState);
+                        Log.debug(LOG, Attrs.event(Events.KAFKA_REBALANCE), "Kafka Streams state transition: {} -> {}", oldState, newState);
 
                         if (newState == KafkaStreams.State.RUNNING) {
                             runningLatch.countDown();
                             retryAttempt.set(0);
-                            LOG.info("Kafka Streams reached RUNNING (runId={})", RUN_ID);
+                            Log.info(LOG, Attrs.event(Events.KAFKA_CONNECT), "Kafka Streams reached RUNNING (runId={})", RUN_ID);
                         }
 
                         if (newState == KafkaStreams.State.ERROR && FAIL_FAST) {
@@ -509,7 +529,7 @@ public class PartitionDedupApp {
                     });
 
                     streams.setUncaughtExceptionHandler(exception -> {
-                        LOG.error("Uncaught Streams exception", exception);
+                        Log.error(LOG, Attrs.event(Events.KAFKA_CONNECT), "Uncaught Streams exception", exception);
                         if (FAIL_FAST) {
                             initiateShutdown("Uncaught Streams exception", streams, shutdownLatch, shuttingDown,
                                     exitCode, 1);
@@ -517,18 +537,18 @@ public class PartitionDedupApp {
                         }
 
                         if (exception instanceof MissingSourceTopicException) {
-                            LOG.warn(
+                            Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT),
                                     "Source topics are not available yet (or Kafka metadata is temporarily unavailable). "
                                             + "Retrying stream thread with backoff because FAIL_FAST=false");
                         } else {
-                            LOG.warn("Retrying stream thread with backoff because FAIL_FAST=false");
+                            Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT), "Retrying stream thread with backoff because FAIL_FAST=false");
                         }
 
                         int attempt = retryAttempt.incrementAndGet();
                         long backoffNoJitter = calculateBackoffNoJitter(attempt);
                         long backoffWithJitter = applyJitter(backoffNoJitter);
 
-                        LOG.info("Retry attempt={} sleeping {} ms (base={} ms, max={} ms, jitter={}%)",
+                        Log.info(LOG, Attrs.event(Events.KAFKA_CONNECT), "Retry attempt={} sleeping {} ms (base={} ms, max={} ms, jitter={}%)",
                                 attempt,
                                 backoffWithJitter,
                                 backoffNoJitter,
@@ -539,14 +559,17 @@ public class PartitionDedupApp {
                             Thread.sleep(backoffWithJitter);
                         } catch (InterruptedException interruptedException) {
                             Thread.currentThread().interrupt();
-                            LOG.warn("Retry backoff interrupted; replacing stream thread immediately");
+                            Log.warn(LOG, Attrs.event(Events.KAFKA_REBALANCE), "Retry backoff interrupted; replacing stream thread immediately");
                         }
 
                         return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD;
                     });
 
                     streams.start();
-                    LOG.info("PartitionDedupApp started (runId={}, FAIL_FAST={})", RUN_ID, FAIL_FAST);
+                    Log.info(LOG, Attrs.event(Events.APP_READY)
+                            .with("airgap.run.id", RUN_ID)
+                            .with("airgap.fail_fast.enabled", FAIL_FAST),
+                            "PartitionDedupApp started (runId={}, FAIL_FAST={})", RUN_ID, FAIL_FAST);
 
                     if (FAIL_FAST) {
                         boolean started = awaitRunningOrShutdown(runningLatch, shutdownLatch, shuttingDown,
@@ -559,7 +582,9 @@ public class PartitionDedupApp {
                     if (!shuttingDown.get()) {
                         Collection<org.apache.kafka.streams.StreamsMetadata> storeMetadata = streams
                                 .streamsMetadataForStore(STORE_GAP);
-                        LOG.debug("All metadata for store {}: {}", STORE_GAP, storeMetadata);
+                        Log.debug(LOG, Attrs.event(Events.STATE_STORE)
+                                .with("db.system", "kafka_streams")
+                                .with("db.namespace", STORE_GAP), "All metadata for store {}: {}", STORE_GAP, storeMetadata);
                     }
 
                     shutdownLatch.await();
@@ -568,7 +593,7 @@ public class PartitionDedupApp {
                     terminateRequested.set(true);
                     initiateShutdown("Main thread interrupted", streams, shutdownLatch, shuttingDown, exitCode, 1);
                 } catch (Exception e) {
-                    LOG.error("KafkaStreams lifecycle error", e);
+                    Log.error(LOG, Attrs.event(Events.KAFKA_CONNECT), "KafkaStreams lifecycle error", e);
                     if (FAIL_FAST) {
                         terminateRequested.set(true);
                         initiateShutdown("FAIL_FAST lifecycle error", streams, shutdownLatch, shuttingDown, exitCode,
@@ -586,7 +611,7 @@ public class PartitionDedupApp {
                     try {
                         streams.close();
                     } catch (Exception closeError) {
-                        LOG.warn("Error while closing Kafka Streams in finally block", closeError);
+                        Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT), "Error while closing Kafka Streams in finally block", closeError);
                     } finally {
                         if (interrupted) {
                             Thread.currentThread().interrupt();
@@ -605,12 +630,12 @@ public class PartitionDedupApp {
                 }
 
                 if (FAIL_FAST) {
-                    LOG.info("FAIL_FAST=true and KafkaStreams stopped; terminating process");
+                    Log.info(LOG, Attrs.event(Events.KAFKA_CONNECT), "FAIL_FAST=true and KafkaStreams stopped; terminating process");
                     break;
                 }
 
                 long restartDelayMs = applyJitter(Math.max(0L, RETRY_BACKOFF_MS));
-                LOG.warn("KafkaStreams reached NOT_RUNNING; restarting in {} ms (runId={}, attempt={})",
+                Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT).failure(), "KafkaStreams reached NOT_RUNNING; restarting in {} ms (runId={}, attempt={})",
                         restartDelayMs,
                     RUN_ID,
                         restartAttempt);
@@ -628,7 +653,7 @@ public class PartitionDedupApp {
             } catch (IllegalStateException ignored) {
                 // JVM is already shutting down
             } catch (Exception removeHookError) {
-                LOG.debug("Failed to remove shutdown hook", removeHookError);
+                Log.debug(LOG, Attrs.event(Events.APP_SHUTDOWN), "Failed to remove shutdown hook", removeHookError);
             }
 
             lifecycleFinished.countDown();
@@ -696,10 +721,13 @@ public class PartitionDedupApp {
     private static void productionWarning(String phase, String setting, String value, String risk) {
         org.apache.logging.log4j.core.Logger logger =
                 (org.apache.logging.log4j.core.Logger) org.apache.logging.log4j.LogManager.getLogger(PartitionDedupApp.class);
-        logger.logMessage(PartitionDedupApp.class.getName(), org.apache.logging.log4j.Level.WARN, null,
-                new org.apache.logging.log4j.message.SimpleMessage(
-                        "[PRODUCTION-CONFIG] phase=" + phase + " setting=" + setting
-                        + " value=" + value + " risk=" + risk), null);
+        Log.warn(logger, Attrs.event(Events.CONFIG_PRODUCTION_WARNING)
+                .with("airgap.config.phase", phase)
+                .with("airgap.config.setting", setting)
+                .with("airgap.config.value", value)
+                .with("airgap.config.risk", risk),
+                "[PRODUCTION-CONFIG] phase=" + phase + " setting=" + setting
+                        + " value=" + value + " risk=" + risk);
     }
 
     private static String resolveKafkaSecurityMode(Properties props) {
@@ -809,7 +837,7 @@ public class PartitionDedupApp {
             if (runningLatch.await(diagnosticIntervalMs, TimeUnit.MILLISECONDS)) {
                 return true;
             }
-            LOG.warn("Kafka Streams has not reached RUNNING after {} ms; state restoration or rebalancing is still "
+            Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT), "Kafka Streams has not reached RUNNING after {} ms; state restoration or rebalancing is still "
                     + "in progress, so startup will continue", diagnosticIntervalMs);
         }
         return runningLatch.getCount() == 0L;
@@ -825,11 +853,12 @@ public class PartitionDedupApp {
             exitCode.compareAndSet(0, newExitCode);
         }
 
-        LOG.info("Initiating shutdown: {}", reason);
+        Log.info(LOG, Attrs.event(Events.APP_SHUTDOWN)
+                .with("airgap.shutdown.reason", reason), "Initiating shutdown: {}", reason);
         try {
             streams.close(Duration.ofSeconds(10));
         } catch (Exception e) {
-            LOG.warn("Error while closing Kafka Streams during shutdown", e);
+            Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT), "Error while closing Kafka Streams during shutdown", e);
         } finally {
             shutdownLatch.countDown();
         }
@@ -855,10 +884,12 @@ public class PartitionDedupApp {
             List<String> unresolvedHosts = getUnresolvedBootstrapHosts(streamProps);
             if (!unresolvedHosts.isEmpty()) {
                 if (connectivityFailure.compareAndSet(false, true)) {
-                    LOG.warn("Kafka connectivity degraded: bootstrap DNS resolution failed for hosts {}; "
+                    Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECTION_FAILED)
+                            .with("server.address", unresolvedHosts.toString())
+                            .failure(), "Kafka connectivity degraded: bootstrap DNS resolution failed for hosts {}; "
                             + "Kafka Streams will continue reconnecting", unresolvedHosts);
                 } else {
-                    LOG.debug("Kafka connectivity remains degraded: unresolved bootstrap hosts {}", unresolvedHosts);
+                    Log.debug(LOG, Attrs.event(Events.KAFKA_CONNECT), "Kafka connectivity remains degraded: unresolved bootstrap hosts {}", unresolvedHosts);
                 }
                 return;
             }
@@ -870,20 +901,22 @@ public class PartitionDedupApp {
                 admin.describeCluster().nodes().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
                 int count = probeCounter.incrementAndGet();
                 if (connectivityFailure.compareAndSet(true, false)) {
-                    LOG.info("Kafka connectivity restored (runId={}, probeCount={})", RUN_ID, count);
+                    Log.info(LOG, Attrs.event(Events.KAFKA_CONNECTION_RESTORED)
+                            .with("airgap.run.id", RUN_ID)
+                            .with("airgap.probe.count", count), "Kafka connectivity restored (runId={}, probeCount={})", RUN_ID, count);
                 }
                 if (LOG.isDebugEnabled() && (count == 1 || count % 6 == 0)) {
                     long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                    LOG.debug("FAIL_FAST connectivity probe ok (runId={}, probeCount={}, durationMs={})",
+                    Log.debug(LOG, Attrs.event(Events.KAFKA_CONNECT), "FAIL_FAST connectivity probe ok (runId={}, probeCount={}, durationMs={})",
                             RUN_ID,
                             count,
                             durationMs);
                 }
             } catch (Exception e) {
                 if (connectivityFailure.compareAndSet(false, true)) {
-                    LOG.warn("Kafka connectivity check failed; Kafka Streams will continue reconnecting", e);
+                    Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT).exception(e), "Kafka connectivity check failed; Kafka Streams will continue reconnecting", e);
                 } else {
-                    LOG.debug("Kafka connectivity remains degraded", e);
+                    Log.debug(LOG, Attrs.event(Events.KAFKA_CONNECT), "Kafka connectivity remains degraded", e);
                 }
             } finally {
                 closeProbeAdmin(admin);
@@ -946,7 +979,7 @@ public class PartitionDedupApp {
 
             return candidate;
         } catch (Exception e) {
-            LOG.debug("Unable to parse bootstrap server entry '{}': {}", bootstrapServer, e.getMessage());
+            Log.debug(LOG, Attrs.event(Events.KAFKA_CONNECT), "Unable to parse bootstrap server entry '{}': {}", bootstrapServer, e.getMessage());
             return candidate;
         }
     }
@@ -964,7 +997,7 @@ public class PartitionDedupApp {
         try {
             admin.close(Duration.ZERO);
         } catch (Exception closeError) {
-            LOG.debug("Error closing connectivity probe admin client", closeError);
+            Log.debug(LOG, Attrs.event(Events.KAFKA_CONNECT), "Error closing connectivity probe admin client", closeError);
         }
     }
 
@@ -1016,10 +1049,10 @@ public class PartitionDedupApp {
             return missingTopics;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            LOG.warn("Interrupted verifying source topics before startup", e);
+            Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT), "Interrupted verifying source topics before startup", e);
             return configuredTopics;
         } catch (Exception e) {
-            LOG.warn("Unable to verify source topics before startup; treating as unavailable and retrying", e);
+            Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT).exception(e), "Unable to verify source topics before startup; treating as unavailable and retrying", e);
             return configuredTopics;
         } finally {
             admin.close(Duration.ofSeconds(5));
@@ -1116,7 +1149,7 @@ public class PartitionDedupApp {
             this.windowSize = WINDOW_SIZE;
             this.maxWindows = MAX_WINDOWS;
             // Register DynamicMBean for gapDetectors
-            LOG.info("Registering Processor MBean");
+            Log.info(LOG, Attrs.event(Events.STATS_REPORT), "Registering Processor MBean");
             JmxSupport.registerProcessorMBean(this);
         }
 
@@ -1129,9 +1162,14 @@ public class PartitionDedupApp {
         public void init(org.apache.kafka.streams.processor.api.ProcessorContext<String, byte[]> context) {
             this.context = context;
             this.partition = context.taskId().partition();
-            LOG.debug("Initializing DedupAndGapProcessor for partition {}", partition);
+            Log.debug(LOG, Attrs.event(Events.KAFKA_REBALANCE)
+                    .with("messaging.destination.partition.id", String.valueOf(partition)), "Initializing DedupAndGapProcessor for partition {}", partition);
             assignedRawPartitions.add(partition);
-            LOG.info("Task assigned partition {} (runId={}); active partitions now {}",
+            Log.info(LOG, Attrs.event(Events.KAFKA_REBALANCE)
+                    .with("messaging.destination.partition.id", String.valueOf(partition))
+                    .with("airgap.run.id", RUN_ID)
+                    .with("messaging.kafka.active_partitions.count", assignedRawPartitions.size()),
+                    "Task assigned partition {} (runId={}); active partitions now {}",
                     partition,
                     RUN_ID,
                     assignedRawPartitions);
@@ -1145,14 +1183,15 @@ public class PartitionDedupApp {
                     GapDetector gd = deserializeGapDetector(entry.value, entry.key);
                     if (gd != null) {
                         gapDetectors.put(entry.key, gd);
-                        LOG.debug("Registered GapDetector for key: {}", entry.key);
+                        Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "Registered GapDetector for key: {}", entry.key);
                         JmxSupport.registerProcessorMBean(this);
                     }
                 }
             }
 
             // Persist this partition’s detector periodically
-            LOG.debug("Scheduling periodic gap detector persistence every {} ms", persistIntervalMs);
+            Log.debug(LOG, Attrs.event(Events.STATE_STORE)
+                    .with("airgap.persist.interval_ms", persistIntervalMs), "Scheduling periodic gap detector persistence every {} ms", persistIntervalMs);
             this.persistSchedule = this.context.schedule(
                     java.time.Duration.ofMillis(persistIntervalMs),
                     org.apache.kafka.streams.processor.PunctuationType.WALL_CLOCK_TIME,
@@ -1169,12 +1208,18 @@ public class PartitionDedupApp {
                                 gapStore.put(entry.getKey(), data);
                                 persisted++;
                             } catch (Exception e) {
-                                LOG.error("Failed to serialize GapDetector for {}", entry.getKey(), e);
+                                Log.error(LOG, Attrs.event(Events.STATE_STORE)
+                                        .with("db.record.key", entry.getKey()), "Failed to serialize GapDetector for {}", entry.getKey(), e);
                             }
                         }
                         if (LOG.isDebugEnabled()) {
                             long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
-                            LOG.debug("Persisted gap detectors (partition={}, count={}, totalBytes={}, durationMs={})",
+                            Log.debug(LOG, Attrs.event(Events.STATE_STORE)
+                                    .with("messaging.destination.partition.id", String.valueOf(partition))
+                                    .with("db.operation.batch.size", persisted)
+                                    .with("db.response.size", totalBytes)
+                                    .with("db.operation.duration_ms", durationMs),
+                                    "Persisted gap detectors (partition={}, count={}, totalBytes={}, durationMs={})",
                                     partition,
                                     persisted,
                                     totalBytes,
@@ -1182,7 +1227,7 @@ public class PartitionDedupApp {
                         }
                     });
 
-            LOG.debug("Emit gap: Started gap detection for partition {}", partition);
+            Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "Emit gap: Started gap detection for partition {}", partition);
             // Emit gaps only for this partition’s detector
             long emitIntervalMs = Long.parseLong(GAP_EMIT_INTERVAL_SEC) * 1000;
             this.emitSchedule = this.context.schedule(
@@ -1210,7 +1255,11 @@ public class PartitionDedupApp {
             }
             if (partition >= 0) {
                 assignedRawPartitions.remove(partition);
-                LOG.info("Task released partition {} (runId={}); active partitions now {}",
+                Log.info(LOG, Attrs.event(Events.KAFKA_REBALANCE)
+                        .with("messaging.destination.partition.id", String.valueOf(partition))
+                        .with("airgap.run.id", RUN_ID)
+                        .with("messaging.kafka.active_partitions.count", assignedRawPartitions.size()),
+                        "Task released partition {} (runId={}); active partitions now {}",
                         partition,
                         RUN_ID,
                         assignedRawPartitions);
@@ -1225,13 +1274,13 @@ public class PartitionDedupApp {
         private void emitGapsForPartition(int partition) {
             // Count missing messages for this partition
             // For this GapDetector, get current gaps
-            LOG.debug("[GAP-DEBUG] Partition {}: gapDetectors keys: {}", partition, gapDetectors.keySet());
+            Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "[GAP-DEBUG] Partition {}: gapDetectors keys: {}", partition, gapDetectors.keySet());
             int windowsScanned = 0;
             int windowsEmitted = 0;
             long rangesEmitted = 0;
             long missingOffsetsInRanges = 0;
             for (Map.Entry<String, GapDetector> entry : gapDetectors.entrySet()) {
-                LOG.debug("[GAP-DEBUG] Checking detector key {} for partition {}", entry.getKey(), partition);
+                Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "[GAP-DEBUG] Checking detector key {} for partition {}", entry.getKey(), partition);
                 String key = entry.getKey(); // key is topic_partition
                 if (!key.endsWith("_" + partition)) {
                     continue; // Skip detectors not for this partition
@@ -1239,11 +1288,11 @@ public class PartitionDedupApp {
                 // Extract topic from key (always use topic from event key, not RAW_TOPICS)
                 int lastUnderscore = key.lastIndexOf('_');
                 String topic = (lastUnderscore > 0) ? key.substring(0, lastUnderscore) : key;
-                LOG.debug("[GAP-DEBUG] Key accepted for partition {}: {} (topic: {})", partition, key, topic);
+                Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "[GAP-DEBUG] Key accepted for partition {}: {} (topic: {})", partition, key, topic);
                 GapDetector detector = entry.getValue();
-                LOG.debug("GapDetector address for key {}: {}", key, System.identityHashCode(detector));
+                Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "GapDetector address for key {}: {}", key, System.identityHashCode(detector));
                 // Log total missing count for this partition
-                LOG.debug("Partition {}: Total missing messages detected: {}", partition, detector.getMissingCounts());
+                Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "Partition {}: Total missing messages detected: {}", partition, detector.getMissingCounts());
 
                 List<GapDetector.Window> windows = detector.getWindows();
                 // For all windows, find gaps
@@ -1262,7 +1311,7 @@ public class PartitionDedupApp {
                             byte[] payload = gapListToBinaryPayload(windowMin, window.getMaxOffset(), gaps);
                             context.forward(new Record<>(gapKey, payload, System.currentTimeMillis()),
                                     "gaps-sink");
-                            LOG.debug("Emitted binary gap payload for window {} ({} bytes, {} gap ranges)",
+                            Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "Emitted binary gap payload for window {} ({} bytes, {} gap ranges)",
                                     gapKey, payload.length, gaps.size());
                             windowsEmitted++;
                             rangesEmitted += gaps.size();
@@ -1274,7 +1323,7 @@ public class PartitionDedupApp {
                                 }
                             }
                         } catch (Exception e) {
-                            LOG.error("Failed to serialize gaps for window {}", gapKey, e);
+                            Log.error(LOG, Attrs.event(Events.GAP_DETECTED), "Failed to serialize gaps for window {}", gapKey, e);
                         }
                         // Track whether this window had non-empty gaps: reset to false when gaps
                         // become empty so we don't keep emitting redundant empty-gap messages.
@@ -1283,7 +1332,7 @@ public class PartitionDedupApp {
                 }
             }
             if (LOG.isDebugEnabled()) {
-                LOG.debug(
+                Log.debug(LOG, Attrs.event(Events.GAP_DETECTED),
                         "Gap emission cycle summary (partition={}, windowsScanned={}, windowsEmitted={}, rangesEmitted={}, missingOffsetsInRanges={})",
                         partition,
                         windowsScanned,
@@ -1302,7 +1351,7 @@ public class PartitionDedupApp {
             String[] parts = key.split("_");
             if (parts.length != 3) {
                 // Non-standard keys are expected for internal passthrough records
-                LOG.trace("Non-standard key passthrough key='{}', partsCount={}",
+                Log.trace(LOG, Attrs.event(Events.MESSAGE_DELIVER), "Non-standard key passthrough key='{}', partsCount={}",
                         key,
                         parts.length);
                 totalNonStandardKeyPassthrough.merge(this.partition, 1L, Long::sum);
@@ -1311,7 +1360,7 @@ public class PartitionDedupApp {
                 if (!emptyPayload) {
                     context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 } else {
-                    LOG.trace("Dropping empty-payload non-standard key {}", key);
+                    Log.trace(LOG, Attrs.event(Events.MESSAGE_FILTER), "Dropping empty-payload non-standard key {}", key);
                 }
                 return;
             }
@@ -1323,7 +1372,7 @@ public class PartitionDedupApp {
                 offset = Long.parseLong(parts[2]);
             } catch (Exception e) {
                 // Non-standard keys are expected for internal passthrough records
-                LOG.trace(
+                Log.trace(LOG, Attrs.event(Events.MESSAGE_DELIVER),
                         "Non-standard key passthrough key='{}' (partitionPart='{}', offsetPart='{}', reason='{}')",
                         key,
                         parts[1],
@@ -1335,11 +1384,15 @@ public class PartitionDedupApp {
                 if (!emptyPayload) {
                     context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                 } else {
-                    LOG.trace("Dropping empty-payload non-standard key {} (parse error)", key);
+                    Log.trace(LOG, Attrs.event(Events.MESSAGE_FILTER), "Dropping empty-payload non-standard key {} (parse error)", key);
                 }
                 return;
             }
-            LOG.trace("Processing record from topic={}, partition={}, offset={}", topic, partition, offset);
+            Log.trace(LOG, Attrs.event(Events.KAFKA_CONSUME)
+                    .with("messaging.destination.name", topic)
+                    .with("messaging.destination.partition.id", String.valueOf(partition))
+                    .with("messaging.kafka.offset", offset),
+                    "Processing record from topic={}, partition={}, offset={}", topic, partition, offset);
             String topicPartition = topic + "_" + partition;
 
             // Increment received counter
@@ -1347,14 +1400,14 @@ public class PartitionDedupApp {
 
             GapDetector gapDetector = gapDetectors.get(topicPartition);
             if (gapDetector == null) {
-                LOG.warn("No GapDetector found for topicPartition {}, creating a new one", topicPartition);
+                Log.warn(LOG, Attrs.event(Events.GAP_DETECTED).failure(), "No GapDetector found for topicPartition {}, creating a new one", topicPartition);
                 gapDetector = new GapDetector(topic, windowSize, maxWindows);
                 gapDetectors.put(topicPartition, gapDetector);
-                LOG.debug("Registered GapDetector for key: {}", topicPartition);
+                Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "Registered GapDetector for key: {}", topicPartition);
                 // Always re-register the MBean when a new detector is added so JMX sees all
                 // partitions
                 JmxSupport.registerProcessorMBean(this);
-                LOG.debug("Re-registered Processor MBean after adding new partition: {}. Current keys: {}",
+                Log.debug(LOG, Attrs.event(Events.STATS_REPORT), "Re-registered Processor MBean after adding new partition: {}. Current keys: {}",
                         topicPartition, gapDetectors.keySet());
             }
 
@@ -1366,18 +1419,18 @@ public class PartitionDedupApp {
                         String gapKey = topic + ":" + partition + ":" + windowMin;
                         byte[] payload = gapListToBinaryPayload(windowMin, window.getMaxOffset(), gaps);
                         context.forward(new Record<>(gapKey, payload, record.timestamp()), "gaps-sink");
-                        LOG.debug("Emitted binary gap payload for purged window {} ({} bytes, {} gap ranges)",
+                        Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "Emitted binary gap payload for purged window {} ({} bytes, {} gap ranges)",
                                 gapKey, payload.length, gaps.size());
                     }
                 } catch (OutOfMemoryError oom) {
                     String errorMessage = "OutOfMemoryError while emitting gaps for purged window. Consider increasing MAX_WINDOWS or reducing WINDOW_SIZE. "
                             + oom;
-                    LOG.error(errorMessage);
+                    Log.error(LOG, Attrs.event(Events.GAP_DETECTED), errorMessage);
                     String dedupedKey = key + ":oom";
                     context.forward(new Record<>(dedupedKey, errorMessage.getBytes(), record.timestamp()),
                             "deduped-sink");
                 } catch (Exception e) {
-                    LOG.error("Failed to emit gaps for purged window", e);
+                    Log.error(LOG, Attrs.event(Events.GAP_DETECTED), "Failed to emit gaps for purged window", e);
                 }
             });
 
@@ -1392,36 +1445,43 @@ public class PartitionDedupApp {
             // they must NOT be forwarded to the clean topic.
             boolean emptyPayload = (value == null || value.length == 0);
             if (alreadyReceived == 1) {
-                LOG.trace("Key already seen {}", key);
+                Log.trace(LOG, Attrs.event(Events.MESSAGE_FILTER), "Key already seen {}", key);
                 totalDuplicates.merge(partition, 1L, Long::sum);
             } else if (alreadyReceived == 0) {
                 if (emptyPayload) {
-                    LOG.trace("Dropping empty-payload (filtered) key {}", key);
+                    Log.trace(LOG, Attrs.event(Events.MESSAGE_FILTER), "Dropping empty-payload (filtered) key {}", key);
                 } else {
-                    LOG.trace("Forwarding unique key {}", key);
+                    Log.trace(LOG, Attrs.event(Events.MESSAGE_DELIVER)
+                            .with("messaging.message.id", key), "Forwarding unique key {}", key);
                     context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                     totalEmitted.merge(partition, 1L, Long::sum);
                 }
             } else if (alreadyReceived == -1) {
                 if (emptyPayload) {
-                    LOG.trace("Dropping empty-payload (filtered) gap-fill key {}", key);
+                    Log.trace(LOG, Attrs.event(Events.MESSAGE_FILTER)
+                            .with("messaging.message.id", key)
+                            .with("airgap.filter.action", "drop"), "Dropping empty-payload (filtered) gap-fill key {}", key);
                 } else {
-                    LOG.trace("Key {} fills a gap, forwarding", key);
+                    Log.trace(LOG, Attrs.event(Events.MESSAGE_DELIVER)
+                            .with("messaging.message.id", key)
+                            .with("airgap.delivery.reason", "gap_fill"), "Key {} fills a gap, forwarding", key);
                     context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                     totalEmitted.merge(partition, 1L, Long::sum);
                     totalGapFill.merge(partition, 1L, Long::sum);
                 }
             } else if (alreadyReceived == -2) {
                 if (emptyPayload) {
-                    LOG.trace("Dropping empty-payload (filtered) below-range key {}", key);
+                    Log.trace(LOG, Attrs.event(Events.MESSAGE_FILTER), "Dropping empty-payload (filtered) below-range key {}", key);
                 } else {
-                    LOG.trace("Key {} is below known range, forwarding", key);
+                    Log.trace(LOG, Attrs.event(Events.MESSAGE_DELIVER)
+                            .with("messaging.message.id", key)
+                            .with("airgap.delivery.reason", "below_known_range"), "Key {} is below known range, forwarding", key);
                     context.forward(new Record<>(key, value, record.timestamp()), "deduped-sink");
                     totalEmitted.merge(partition, 1L, Long::sum);
                     totalBelowRange.merge(partition, 1L, Long::sum);
                 }
             } else {
-                LOG.error("Unexpected return value {} from gapDetector.check for key {}", alreadyReceived, key);
+                Log.error(LOG, Attrs.event(Events.GAP_DETECTED), "Unexpected return value {} from gapDetector.check for key {}", alreadyReceived, key);
             }
         }
 
@@ -1464,9 +1524,9 @@ public class PartitionDedupApp {
 
             try {
                 String json = REPORT_MAPPER.writeValueAsString(List.of(report));
-                LOG.info("[MISSING-REPORT] {}", json);
+                Log.info(LOG, Attrs.event(Events.GAP_REPORT), "[MISSING-REPORT] {}", json);
                 if (LOG.isDebugEnabled()) {
-                    LOG.debug(
+                    Log.debug(LOG, Attrs.event(Events.GAP_DETECTED),
                             "Partition flow summary (partition={}, deltaReceived={}, deltaEmitted={}, duplicates={}, gapFill={}, belowRange={}, nonStandardKeyPassthrough={})",
                             part,
                             deltaReceived,
@@ -1477,7 +1537,7 @@ public class PartitionDedupApp {
                             totalNonStandardKeyPassthrough.getOrDefault(part, 0L));
                 }
             } catch (Exception e) {
-                LOG.error("Failed to serialize missing report JSON", e);
+                Log.error(LOG, Attrs.event(Events.GAP_REPORT), "Failed to serialize missing report JSON", e);
             }
         }
 
@@ -1490,7 +1550,7 @@ public class PartitionDedupApp {
      */
     private static GapDetector deserializeGapDetector(byte[] data, String detectorKey) {
         if (data == null) {
-            LOG.warn("deserializeGapDetector called with null data (detectorKey={}), creating empty detector",
+            Log.warn(LOG, Attrs.event(Events.STATE_STORE).failure(), "deserializeGapDetector called with null data (detectorKey={}), creating empty detector",
                     detectorKey);
             return new GapDetector("", WINDOW_SIZE, MAX_WINDOWS);
         }
@@ -1498,16 +1558,16 @@ public class PartitionDedupApp {
                 java.io.ObjectInputStream ois = new java.io.ObjectInputStream(bis)) {
             Object obj = ois.readObject();
             if (obj instanceof GapDetector) {
-                LOG.debug("Successfully deserialized GapDetector (detectorKey={})", detectorKey);
+                Log.debug(LOG, Attrs.event(Events.STATE_STORE), "Successfully deserialized GapDetector (detectorKey={})", detectorKey);
                 return (GapDetector) obj;
             } else {
-                LOG.error(
+                Log.error(LOG, Attrs.event(Events.STATE_STORE),
                         "Deserialized object is not a recognized GapDetector for detectorKey {}: {}. Returning a new instance.",
                         detectorKey,
                         obj.getClass());
             }
         } catch (Exception e) {
-            LOG.error("Failed to deserialize GapDetector for detectorKey {}; creating empty detector", detectorKey,
+            Log.error(LOG, Attrs.event(Events.STATE_STORE), "Failed to deserialize GapDetector for detectorKey {}; creating empty detector", detectorKey,
                     e);
         }
         return new GapDetector("", WINDOW_SIZE, MAX_WINDOWS);

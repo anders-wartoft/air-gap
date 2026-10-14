@@ -14,6 +14,7 @@ import (
 
 	"sitia.nu/airgap/src/internal/pinnedtls"
 	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/udp"
 )
 
@@ -110,30 +111,61 @@ func buildUpstreamTLSConfig(caFile, certFile, keyFile, keyPasswordFile, cipherSu
 		// lgtm[go/disabled-certificate-check]
 		InsecureSkipVerify: true, //nolint:gosec
 		VerifyConnection: func(cs tls.ConnectionState) error {
-			Logger.Debugf("[TLS upstream] Handshake complete, peer certs: %d, %s / %s", len(cs.PeerCertificates), tlsVersionName(cs.Version), tls.CipherSuiteName(cs.CipherSuite))
+			handshake := logging.Event(logging.EventTLSHandshake,
+				logging.Str("airgap.tls.role", "client"),
+				logging.Str("file.path", caFile),
+			)
+			Logger.Debugf(handshake.With(
+				logging.Int("airgap.tls.peer_certificates", int64(len(cs.PeerCertificates))),
+				logging.Str("tls.protocol.version", tlsVersionName(cs.Version)),
+				logging.Str("tls.cipher", tls.CipherSuiteName(cs.CipherSuite)),
+			), "[TLS upstream] Handshake complete, peer certs: %d, %s / %s", len(cs.PeerCertificates), tlsVersionName(cs.Version), tls.CipherSuiteName(cs.CipherSuite))
 			if len(cs.PeerCertificates) == 0 {
 				return fmt.Errorf("tcpTLS: server sent no certificate")
 			}
 			leaf := cs.PeerCertificates[0]
-			Logger.Debugf("[TLS upstream] Server cert subject: %s", leaf.Subject.String())
-			Logger.Debugf("[TLS upstream] Server cert issuer:  %s", leaf.Issuer.String())
-			Logger.Debugf("[TLS upstream] Server cert CN:      %s", leaf.Subject.CommonName)
-			Logger.Debugf("[TLS upstream] Server cert not-before: %s, not-after: %s", leaf.NotBefore, leaf.NotAfter)
+			Logger.Debugf(handshake.With(
+				logging.Str("airgap.tls.certificate.subject", leaf.Subject.String()),
+			), "[TLS upstream] Server cert subject: %s", leaf.Subject.String())
+			Logger.Debugf(handshake.With(
+				logging.Str("airgap.tls.certificate.issuer", leaf.Issuer.String()),
+			), "[TLS upstream] Server cert issuer:  %s", leaf.Issuer.String())
+			Logger.Debugf(handshake.With(
+				logging.Str("airgap.tls.certificate.cn", leaf.Subject.CommonName),
+			), "[TLS upstream] Server cert CN:      %s", leaf.Subject.CommonName)
+			Logger.Debugf(handshake.With(
+				logging.Str("airgap.tls.certificate.not_before", leaf.NotBefore.Format(time.RFC3339)),
+				logging.Str("airgap.tls.certificate.not_after", leaf.NotAfter.Format(time.RFC3339)),
+			), "[TLS upstream] Server cert not-before: %s, not-after: %s", leaf.NotBefore, leaf.NotAfter)
 			switch pub := leaf.PublicKey.(type) {
 			case interface{ Size() int }: // *rsa.PublicKey
 				bits := pub.Size() * 8
-				Logger.Debugf("[TLS upstream] Server cert public key: RSA %d-bit", bits)
+				Logger.Debugf(handshake.With(
+					logging.Str("airgap.tls.certificate.key_type", "RSA"),
+					logging.Int("airgap.tls.certificate.key_bits", int64(bits)),
+				), "[TLS upstream] Server cert public key: RSA %d-bit", bits)
 				if bits > 8192 {
-					Logger.Errorf("[TLS upstream] Server cert RSA key is %d bits — Go rejects RSA keys > 8192 bits. Regenerate the server certificate with a 2048- or 4096-bit key.", bits)
+					Logger.Errorf(handshake.With(
+						logging.Failure(),
+						logging.Str("airgap.tls.certificate.key_type", "RSA"),
+						logging.Int("airgap.tls.certificate.key_bits", int64(bits)),
+						logging.Str("error.type", "certificate.key.oversized"),
+					), "[TLS upstream] Server cert RSA key is %d bits — Go rejects RSA keys > 8192 bits. Regenerate the server certificate with a 2048- or 4096-bit key.", bits)
 				}
 			default:
-				Logger.Debugf("[TLS upstream] Server cert public key type: %T", leaf.PublicKey)
+				Logger.Debugf(handshake.With(
+					logging.Str("airgap.tls.certificate.key_type", fmt.Sprintf("%T", leaf.PublicKey)),
+				), "[TLS upstream] Server cert public key type: %T", leaf.PublicKey)
 			}
 			if len(leaf.DNSNames) > 0 {
-				Logger.Debugf("[TLS upstream] Server cert SAN DNS: %v", leaf.DNSNames)
+				Logger.Debugf(handshake.With(
+					logging.Str("airgap.tls.certificate.san_dns", strings.Join(leaf.DNSNames, ",")),
+				), "[TLS upstream] Server cert SAN DNS: %v", leaf.DNSNames)
 			}
 			if len(leaf.IPAddresses) > 0 {
-				Logger.Debugf("[TLS upstream] Server cert SAN IPs: %v", leaf.IPAddresses)
+				Logger.Debugf(handshake.With(
+					logging.Int("airgap.tls.certificate.san_ip_count", int64(len(leaf.IPAddresses))),
+				), "[TLS upstream] Server cert SAN IPs: %v", leaf.IPAddresses)
 			}
 			// Manually verify the certificate chain against our CA pool
 			opts := x509.VerifyOptions{
@@ -144,24 +176,41 @@ func buildUpstreamTLSConfig(caFile, certFile, keyFile, keyPasswordFile, cipherSu
 				KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 			}
 			for _, c := range cs.PeerCertificates[1:] {
-				Logger.Debugf("[TLS upstream] Adding intermediate cert: %s", c.Subject.String())
+				Logger.Debugf(handshake.With(
+					logging.Str("airgap.tls.certificate.subject", c.Subject.String()),
+					logging.Str("airgap.tls.certificate.role", "intermediate"),
+				), "[TLS upstream] Adding intermediate cert: %s", c.Subject.String())
 				opts.Intermediates.AddCert(c)
 			}
 			if _, err := leaf.Verify(opts); err != nil {
-				Logger.Debugf("[TLS upstream] Chain verification failed: %v", err)
+				Logger.Debugf(handshake.With(
+					logging.Failure(),
+					logging.Str("error.type", "certificate.chain.invalid"),
+					logging.ErrorType(err),
+				), "[TLS upstream] Chain verification failed: %v", err)
 				return fmt.Errorf("tcpTLS: server certificate chain verification failed: %w", err)
 			}
-			Logger.Debugf("[TLS upstream] Chain verification OK")
+			Logger.Debug(handshake, "[TLS upstream] Chain verification OK")
 			// Apply CN regex if configured
 			if cnRegex != nil {
 				cn := leaf.Subject.CommonName
 				if !cnRegex.MatchString(cn) {
-					Logger.Errorf("[TLS upstream] Server CN %q rejected by pattern %q — update tcpTLSServerCNRegex or regenerate the server certificate", cn, cnRegex.String())
+					Logger.Errorf(handshake.With(
+						logging.Failure(),
+						logging.Str("airgap.tls.certificate.cn", cn),
+						logging.Str("airgap.tls.server_cn_regex", cnRegex.String()),
+						logging.Str("error.type", "certificate.cn.rejected"),
+					), "[TLS upstream] Server CN %q rejected by pattern %q — update tcpTLSServerCNRegex or regenerate the server certificate", cn, cnRegex.String())
 					return fmt.Errorf("tcpTLS: server certificate CN %q does not match pattern %q", cn, cnRegex.String())
 				}
-				Logger.Infof("[TLS upstream] Authenticated server CN %q (pattern %q)", cn, cnRegex.String())
+				Logger.Infof(handshake.With(
+					logging.Str("airgap.tls.certificate.cn", cn),
+					logging.Str("airgap.tls.server_cn_regex", cnRegex.String()),
+				), "[TLS upstream] Authenticated server CN %q (pattern %q)", cn, cnRegex.String())
 			} else {
-				Logger.Infof("[TLS upstream] Authenticated server CN %q by CA chain (no CN regex)", leaf.Subject.CommonName)
+				Logger.Infof(handshake.With(
+					logging.Str("airgap.tls.certificate.cn", leaf.Subject.CommonName),
+				), "[TLS upstream] Authenticated server CN %q by CA chain (no CN regex)", leaf.Subject.CommonName)
 			}
 			return nil
 		},
@@ -259,14 +308,22 @@ func newTCPAdapter(address string, tlsConfig *tls.Config, manager *pinnedtls.Man
 	if err != nil {
 		// Store the error but don't fail - we'll retry on first message
 		adapter.err = err
-		Logger.Warnf("Failed to connect to TCP server at %s on startup, will retry: %v", address, err)
+		Logger.Warnf(logging.Event(logging.EventTCPConnection,
+			logging.Failure(),
+			logging.Str("server.address", address),
+			logging.Bool("airgap.tls.enabled", tlsConfig != nil),
+			logging.ErrorType(err),
+		), "Failed to connect to TCP server at %s on startup, will retry: %v", address, err)
 	} else {
 		if err := adapter.admit(conn); err != nil {
 			conn.Close()
 			return nil, err
 		}
 		adapter.conn = conn
-		Logger.Infof("Connected to TCP server at %s", address)
+		Logger.Infof(logging.Event(logging.EventTCPConnection,
+			logging.Str("server.address", address),
+			logging.Bool("airgap.tls.enabled", tlsConfig != nil),
+		), "Connected to TCP server at %s", address)
 	}
 
 	return adapter, nil
@@ -290,17 +347,41 @@ func (t *TCPAdapter) ReloadTLSConfig() error {
 	if t.pinned {
 		return fmt.Errorf("pinned TLS requires complete configuration reload, not certificate-only reload")
 	}
+	reload := logging.Event(logging.EventTLSCertReload,
+		logging.Str("airgap.tls.role", "client"),
+		logging.Str("server.address", t.addr),
+	)
 	if t.tlsConfig == nil {
-		Logger.Debugf("[TLS upstream] ReloadTLSConfig: TLS not enabled, nothing to do")
+		Logger.Debug(reload.With(
+			logging.Bool("airgap.tls.enabled", false),
+		), "[TLS upstream] ReloadTLSConfig: TLS not enabled, nothing to do")
 		return nil
 	}
-	Logger.Debugf("[TLS upstream] ReloadTLSConfig: reloading TLS configuration")
-	Logger.Debugf("[TLS upstream]   caFile:          %s", t.tlsCAFile)
-	Logger.Debugf("[TLS upstream]   certFile:        %s", t.tlsCertFile)
-	Logger.Debugf("[TLS upstream]   keyFile:         %s", t.tlsKeyFile)
-	Logger.Debugf("[TLS upstream]   keyPasswordFile: %s", t.tlsKeyPasswordFile)
-	Logger.Debugf("[TLS upstream]   cipherSuites:    %s", t.tlsCipherSuites)
-	Logger.Debugf("[TLS upstream]   serverCNRegex:   %s", t.tlsServerCNRegex)
+	Logger.Debug(reload, "[TLS upstream] ReloadTLSConfig: reloading TLS configuration")
+	Logger.Debugf(reload.With(
+		logging.Str("airgap.config.setting", "tcpTLSCAFile"),
+		logging.Str("file.path", t.tlsCAFile),
+	), "[TLS upstream]   caFile:          %s", t.tlsCAFile)
+	Logger.Debugf(reload.With(
+		logging.Str("airgap.config.setting", "tcpTLSCertFile"),
+		logging.Str("file.path", t.tlsCertFile),
+	), "[TLS upstream]   certFile:        %s", t.tlsCertFile)
+	Logger.Debugf(reload.With(
+		logging.Str("airgap.config.setting", "tcpTLSKeyFile"),
+		logging.Str("file.path", t.tlsKeyFile),
+	), "[TLS upstream]   keyFile:         %s", t.tlsKeyFile)
+	Logger.Debugf(reload.With(
+		logging.Str("airgap.config.setting", "tcpTLSKeyPasswordFile"),
+		logging.Str("file.path", t.tlsKeyPasswordFile),
+	), "[TLS upstream]   keyPasswordFile: %s", t.tlsKeyPasswordFile)
+	Logger.Debugf(reload.With(
+		logging.Str("airgap.config.setting", "tcpTLSCipherSuites"),
+		logging.Str("airgap.config.value", t.tlsCipherSuites),
+	), "[TLS upstream]   cipherSuites:    %s", t.tlsCipherSuites)
+	Logger.Debugf(reload.With(
+		logging.Str("airgap.config.setting", "tcpTLSServerCNRegex"),
+		logging.Str("airgap.config.value", t.tlsServerCNRegex),
+	), "[TLS upstream]   serverCNRegex:   %s", t.tlsServerCNRegex)
 
 	// Log file modification times so it's easy to confirm fresh certs were picked up
 	for label, path := range map[string]string{
@@ -312,9 +393,19 @@ func (t *TCPAdapter) ReloadTLSConfig() error {
 			continue
 		}
 		if fi, err := os.Stat(path); err == nil {
-			Logger.Debugf("[TLS upstream]   %s mtime: %s (size %d bytes)", label, fi.ModTime().Format(time.RFC3339), fi.Size())
+			Logger.Debugf(reload.With(
+				logging.Str("airgap.tls.file.kind", label),
+				logging.Str("file.path", path),
+				logging.Str("file.modified", fi.ModTime().Format(time.RFC3339)),
+				logging.Int("file.size", fi.Size()),
+			), "[TLS upstream]   %s mtime: %s (size %d bytes)", label, fi.ModTime().Format(time.RFC3339), fi.Size())
 		} else {
-			Logger.Warnf("[TLS upstream]   %s: cannot stat %q: %v", label, path, err)
+			Logger.Warnf(reload.With(
+				logging.Failure(),
+				logging.Str("airgap.tls.file.kind", label),
+				logging.Str("file.path", path),
+				logging.ErrorType(err),
+			), "[TLS upstream]   %s: cannot stat %q: %v", label, path, err)
 		}
 	}
 
@@ -323,10 +414,13 @@ func (t *TCPAdapter) ReloadTLSConfig() error {
 		t.tlsCipherSuites, t.tlsServerCNRegex,
 	)
 	if err != nil {
-		Logger.Debugf("[TLS upstream] ReloadTLSConfig: buildUpstreamTLSConfig failed: %v", err)
+		Logger.Debugf(reload.With(
+			logging.Failure(),
+			logging.ErrorType(err),
+		), "[TLS upstream] ReloadTLSConfig: buildUpstreamTLSConfig failed: %v", err)
 		return fmt.Errorf("[TLS upstream] certificate reload failed: %w", err)
 	}
-	Logger.Debugf("[TLS upstream] ReloadTLSConfig: new TLS config built successfully")
+	Logger.Debug(reload, "[TLS upstream] ReloadTLSConfig: new TLS config built successfully")
 
 	t.mu.Lock()
 	t.tlsConfig = newCfg
@@ -339,11 +433,17 @@ func (t *TCPAdapter) ReloadTLSConfig() error {
 	t.mu.Unlock()
 
 	if hadConn {
-		Logger.Debugf("[TLS upstream] ReloadTLSConfig: existing connection closed; retry loop will reconnect with new cert")
+		Logger.Debug(reload.With(
+			logging.Bool("airgap.transport.connected", true),
+		), "[TLS upstream] ReloadTLSConfig: existing connection closed; retry loop will reconnect with new cert")
 	} else {
-		Logger.Debugf("[TLS upstream] ReloadTLSConfig: no active connection at reload time")
+		Logger.Debug(reload.With(
+			logging.Bool("airgap.transport.connected", false),
+		), "[TLS upstream] ReloadTLSConfig: no active connection at reload time")
 	}
-	Logger.Infof("[TLS upstream] TLS certificates reloaded from %s; reconnecting with new cert", t.tlsCertFile)
+	Logger.Infof(reload.With(
+		logging.Str("file.path", t.tlsCertFile),
+	), "[TLS upstream] TLS certificates reloaded from %s; reconnecting with new cert", t.tlsCertFile)
 	return nil
 }
 
@@ -362,19 +462,35 @@ func (t *TCPAdapter) dialConfig(config *tls.Config) (net.Conn, error) {
 		conn, err := tls.DialWithDialer(dialer, "tcp", t.addr, config)
 		if err != nil {
 			errStr := err.Error()
+			dialFailure := logging.Event(logging.EventTLSHandshake,
+				logging.Failure(),
+				logging.Str("airgap.tls.role", "client"),
+				logging.Str("server.address", t.addr),
+				logging.Error("_OTHER"),
+			)
 			switch {
 			case strings.Contains(errStr, "RSA key larger than"):
-				Logger.Errorf("[TLS upstream] Dial %s failed: server certificate has an oversized RSA key (%s). Regenerate the server certificate with a 2048- or 4096-bit key.", t.addr, errStr)
+				Logger.Errorf(dialFailure.With(
+					logging.Str("error.type", "certificate.key.oversized"),
+				), "[TLS upstream] Dial %s failed: server certificate has an oversized RSA key (%s). Regenerate the server certificate with a 2048- or 4096-bit key.", t.addr, errStr)
 			case strings.Contains(errStr, "certificate has expired") || strings.Contains(errStr, "certificate is not yet valid"):
-				Logger.Errorf("[TLS upstream] Dial %s failed: server certificate validity period error — check system clock and certificate dates (%s)", t.addr, errStr)
+				Logger.Errorf(dialFailure.With(
+					logging.Str("error.type", "certificate.validity"),
+				), "[TLS upstream] Dial %s failed: server certificate validity period error — check system clock and certificate dates (%s)", t.addr, errStr)
 			case strings.Contains(errStr, "certificate signed by unknown authority") || strings.Contains(errStr, "x509: "):
-				Logger.Errorf("[TLS upstream] Dial %s failed: certificate chain error — check tcpTLSCAFile matches the server's issuing CA (%s)", t.addr, errStr)
+				Logger.Errorf(dialFailure.With(
+					logging.Str("error.type", "certificate.chain.invalid"),
+				), "[TLS upstream] Dial %s failed: certificate chain error — check tcpTLSCAFile matches the server's issuing CA (%s)", t.addr, errStr)
 			case strings.Contains(errStr, "bad certificate") || strings.Contains(errStr, "unknown certificate"):
-				Logger.Errorf("[TLS upstream] Dial %s failed: server rejected our client certificate — check tcpTLSCertFile/tcpTLSKeyFile and that the CA matches (%s)", t.addr, errStr)
+				Logger.Errorf(dialFailure.With(
+					logging.Str("error.type", "certificate.rejected"),
+				), "[TLS upstream] Dial %s failed: server rejected our client certificate — check tcpTLSCertFile/tcpTLSKeyFile and that the CA matches (%s)", t.addr, errStr)
 			case strings.Contains(errStr, "no such file") || strings.Contains(errStr, "connection refused"):
 				// low-level network error — let caller log at appropriate level
 			default:
-				Logger.Errorf("[TLS upstream] Dial %s TLS error: %s", t.addr, errStr)
+				Logger.Errorf(dialFailure.With(
+					logging.Str("error.type", "tls.dial"),
+				), "[TLS upstream] Dial %s TLS error: %s", t.addr, errStr)
 			}
 		}
 		return conn, err
@@ -443,10 +559,18 @@ func (t *TCPAdapter) ensureConnected() bool {
 		conn.Close()
 		return false
 	}
+	recovered := t.err != nil
 	t.conn = conn
 	t.err = nil
 	t.mu.Unlock()
-	Logger.Infof("Connected to TCP server at %s", t.addr)
+	attrs := logging.Event(logging.EventTCPConnection,
+		logging.Str("server.address", t.addr),
+		logging.Bool("airgap.tls.enabled", config != nil),
+	)
+	if recovered {
+		attrs[0] = logging.Str(logging.AttrEventName, logging.EventTransportConnectionRestored)
+	}
+	Logger.Infof(attrs, "Connected to TCP server at %s", t.addr)
 	return true
 }
 

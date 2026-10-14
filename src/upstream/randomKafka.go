@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/logging"
 )
 
 // RandomKafkaAdapter implements KafkaClient by generating synthetic messages.
@@ -27,16 +28,30 @@ func (r *RandomKafkaAdapter) Read(
 	bootstrapServers, topic, group, from string,
 	handler kafka.KafkaHandler,
 ) {
-	Logger.Debugf("RandomKafkaAdapter Read() called: name=%s offset=%d topic=%q group=%q from=%q",
+	Logger.Debugf(logging.Event(logging.EventKafkaConsume,
+		logging.Str("airgap.kafka.source", "random"),
+		logging.Str("airgap.kafka.consumer.name", name),
+		logging.Int("messaging.kafka.offset", int64(offset)),
+		logging.Str("messaging.destination.name", topic),
+		logging.Str("messaging.consumer.group.name", group),
+		logging.Str("airgap.kafka.from", from),
+	), "RandomKafkaAdapter Read() called: name=%s offset=%d topic=%q group=%q from=%q",
 		name, offset, topic, group, from)
 
 	func() {
 		i := 0
-		Logger.Debugf("RandomKafkaAdapter goroutine started")
+		Logger.Debug(logging.Event(logging.EventKafkaConsume,
+			logging.Str("airgap.kafka.source", "random"),
+			logging.Str("airgap.kafka.consumer.name", name),
+		), "RandomKafkaAdapter goroutine started")
 		for {
 			select {
 			case <-ctx.Done():
-				Logger.Debugf("RandomKafkaAdapter context cancelled, stopping generator")
+				Logger.Debug(logging.Event(logging.EventAppShutdown,
+					logging.Str("airgap.kafka.source", "random"),
+					logging.Str("airgap.kafka.consumer.name", name),
+					logging.Int("airgap.message.count", int64(i)),
+				), "RandomKafkaAdapter context cancelled, stopping generator")
 				return
 			default:
 				id := fmt.Sprintf("random_%d", i)
@@ -49,7 +64,11 @@ func (r *RandomKafkaAdapter) Read(
 				func() {
 					defer func() {
 						if r := recover(); r != nil {
-							Logger.Errorf("RandomKafkaAdapter handler panic: %v", r)
+							Logger.Errorf(logging.Event(logging.EventAppPanic,
+								logging.Failure(),
+								logging.Str("airgap.kafka.source", "random"),
+								logging.Str("airgap.message.id", id),
+							).Merge(logging.Exception(r)), "RandomKafkaAdapter handler panic: %v", r)
 							cont = false
 						}
 					}()
@@ -58,7 +77,11 @@ func (r *RandomKafkaAdapter) Read(
 
 				i++
 				if !cont {
-					Logger.Debugf("RandomKafkaAdapter handler requested stop for id=%s", id)
+					Logger.Debugf(logging.Event(logging.EventAppShutdown,
+						logging.Str("airgap.kafka.source", "random"),
+						logging.Str("airgap.message.id", id),
+						logging.Int("airgap.message.count", int64(i)),
+					), "RandomKafkaAdapter handler requested stop for id=%s", id)
 					return
 				}
 			}

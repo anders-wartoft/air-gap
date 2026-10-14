@@ -770,3 +770,211 @@ settings, network message framing/versioning, freshness/replay rules,
 resource limits, and scale budgets. These are design decisions, not
 already implemented interfaces. No production FIPS or post-quantum claim
 may be inferred solely from choosing TLS or a Go default.
+
+## REQ-52 — Optional OpenTelemetry log format
+
+> Upstream, downstream, dedup, create, and resend must optionally write their
+> internal application logs as OpenTelemetry Protocol JSON (OTLP/JSON), while
+> retaining the current plain-text logging as the default.
+
+* Status: **Implemented**.
+* Implemented in: 0.1.14-SNAPSHOT
+* Covered by: Go unit tests and TC-28
+* Scope: Upstream, downstream, dedup, create, and resend. Kafka message
+  payloads transferred through air-gap are not application logs and are
+  outside this requirement. The `gaps` utility is outside this acceptance
+  batch.
+
+### REQ-52.01 — Opt-in format and backwards-compatible default
+
+The current plain-text format must remain the default when no log-format option
+is configured. Operators must be able to opt in to OTLP/JSON without changing
+the application's delivery behavior, log level, or log destination. Existing
+plain-text configurations must continue to work without modification.
+
+The Go applications select the format with `logFormat=text|otel` or their
+application-specific `AIRGAP_<APPLICATION>_LOG_FORMAT` environment variable.
+The environment variable overrides the configuration file. Dedup selects an
+OTLP-capable Log4j configuration; its existing PatternLayout configuration
+remains the default.
+
+An empty value is equivalent to the default `text` value. The aliases `otlp`
+and `otlp/json` may be accepted for operator convenience, but emitted records
+must still meet the same OTLP/JSON contract. Any other value must fail
+explicitly; it must not silently fall back to text or emit a success-shaped
+record.
+
+### REQ-52.02 — One complete OTLP/JSON envelope per line
+
+In OTel mode, every application log event emitted after the format has been
+activated must be one complete UTF-8 JSON object on one physical output line.
+Embedded quotes, backslashes, control characters, Unicode, and newlines in a
+message must be JSON-escaped and must not split or corrupt the record.
+
+Each line must use the OTLP JSON representation and contain exactly one
+`resourceLogs` entry, one `scopeLogs` entry, and one `logRecords` entry. The
+record must be independently parseable; consumers must not need records before
+or after it to decode the envelope.
+
+Bootstrap diagnostics emitted before an application has read and activated its
+logging configuration may retain the default text format. Container-entrypoint,
+JVM launcher, and Log4j status diagnostics are not application log events.
+
+### REQ-52.03 — Resource and instrumentation identity
+
+Every OTLP/JSON envelope must include these non-empty resource attributes:
+
+* `service.name` — the emitting application (`upstream`, `downstream`, `dedup`,
+  `create`, or `resend`);
+* `service.instance.id` — the configured application instance ID when one is
+  available, otherwise a stable hostname-based fallback for the process.
+
+Every envelope must include a non-empty instrumentation scope name. Identity
+values must be JSON-escaped and must not be inferred from the log message body.
+
+### REQ-52.04 — Timestamp, severity, and body mapping
+
+Each log record must include:
+
+* `timeUnixNano` and `observedTimeUnixNano` as decimal-string Unix timestamps
+  in nanoseconds;
+* `severityText` preserving the application's effective level;
+* the corresponding OpenTelemetry base `severityNumber`: TRACE=1, DEBUG=5,
+  INFO=9, WARN=13, ERROR=17, FATAL=21;
+* `body.stringValue` containing the complete formatted application message.
+
+The two timestamps may be equal when the event is observed locally. They must
+be positive and must not move an event into a different process run. Formatting
+arguments must be resolved before the body is encoded.
+
+### REQ-52.05 — Attributes and OTLP type fidelity
+
+Application metadata must be represented as OTLP key/value attributes, not by
+adding non-standard siblings to the OTLP envelope. String, integer, and boolean
+attributes must use `stringValue`, decimal-string `intValue`, and `boolValue`
+respectively, following protobuf JSON mapping for 64-bit integers.
+
+Attribute keys within one record must be unique. Enabling OTel format alone
+must not invent integrity or signature attributes. Optional hashing or chaining
+may add documented `airgap.log.*` attributes, but signing and signature
+verification are explicitly deferred to a later requirement.
+
+### REQ-52.06 — Destination and transport boundary
+
+OTel mode changes only the record encoding. Console output must remain console
+output and a configured log file must remain the destination. Air-gap must not
+open an OTLP network connection, require an OpenTelemetry Collector, buffer
+logs for export, or change application exit behavior merely because OTel mode
+is enabled. Once a record has been written to the selected stream or file,
+shipping and retention are outside air-gap's responsibility.
+
+Write or encoding failures must be reported explicitly through the existing
+logging/error path. They must not be represented as successful OTLP events and
+must not recursively loop forever.
+
+### REQ-52.07 — Filtering, ordering, and concurrency
+
+Existing log-level filtering must apply before encoding: filtered events must
+not produce empty envelopes. Concurrent writers must produce complete,
+non-interleaved JSON lines, with no lost or duplicated application event caused
+by the formatter. The output order must be the order in which the logging
+framework accepts records for writing.
+
+Third-party library messages routed through the application's configured logger
+must use the selected format. Direct output written outside the application
+logging framework is outside this requirement and must not be mistaken for an
+OTLP application record.
+
+### REQ-52.08 — End-to-end acceptance
+
+TC-28 must run the real packaged binaries and:
+
+1. send exactly 100 Kafka events through upstream, downstream, and dedup;
+2. deliberately filter part of the first transfer so the downstream result is
+   incomplete;
+3. use `create` to export the detected gaps, copy the resend file across the
+   simulated boundary to the upstream side, and run `resend`;
+4. verify that the downstream clean Kafka topic receives every recoverable
+   event with no duplicates and that dedup reports the detected gaps closed;
+5. inspect internal application logs from upstream, downstream, dedup, create,
+   and resend and validate every REQ-52.02 through REQ-52.05 field and type,
+   and the semantic attributes required by REQ-52.09;
+6. prove the default separately in Go unit tests: without opt-in, the existing
+   text format is retained and no OTLP envelope is emitted.
+
+The resend-file copy must be an explicit host-side or Docker copy step; create
+and resend must not share the same file path in a way that bypasses the
+operational transfer the tools are intended to support.
+
+### REQ-52.09 — Semantic attributes
+
+A log record has two audiences. The body is written for a human. EventName and
+attributes are written for a machine, and a consumer must be able to classify,
+filter, and alert on a record without parsing the body.
+
+Every application log record emitted in OTel format must carry:
+
+* EventName — a non-empty first-class OpenTelemetry LogRecord field, serialized
+  as `eventName` in OTLP/JSON. It identifies what kind of event the record
+  describes and must not be duplicated in the attributes array. Names are
+  hierarchical and come from a closed source catalogue.
+
+A record must additionally carry, where applicable:
+
+* `service.version` — the build version of the emitting binary, as a Resource
+  attribute on every record. It must not be duplicated as a LogRecord
+  attribute.
+* `error.type` — required for a failed operation and absent on success. It must
+  be predictable and low-cardinality; an arbitrary error message is not a type.
+  The deprecated `error.message` and project-specific `event.result` attributes
+  must not be emitted.
+* Actual exceptions use an EventName ending in `.exception` and carry
+  `exception.type` or `exception.message` plus `exception.stacktrace` when
+  available. Ordinary Go errors are not automatically exception events.
+  Recovery is represented by a distinct EventName such as
+  `kafka.connection.restored`, not a success boolean.
+* Domain attributes that make the event self-describing, such as the broker,
+  topic, partition, offset, file path, configured setting, or failure type the
+  message refers to. A value that is interesting enough to interpolate into the
+  body is interesting enough to expose as an attribute. Where the OpenTelemetry
+  semantic conventions define a name for such a value, that name must be used;
+  otherwise the `airgap.` namespace applies.
+
+Semantic attributes must not be emitted in text format. Text output is the
+backwards-compatible default required by REQ-52.01, and it must remain
+byte-identical whether or not call sites supply attributes. The integrity
+attributes of REQ-52.05 are unaffected and keep their existing text rendering.
+
+A call site must not be able to set an attribute in the reserved `airgap.log.*`
+namespace. Those keys are produced by the integrity machinery, and an
+application record must not be able to assert a hash, sequence number, or chain
+value that the framework did not compute. Such attributes must be discarded
+before the record is encoded, as must attributes with an empty key, and
+duplicate keys must be reduced to their first occurrence so that the uniqueness
+rule of REQ-52.05 always holds.
+
+Kafka attributes must follow the targeted OpenTelemetry messaging conventions,
+including `messaging.consumer.group.name`,
+`messaging.destination.partition.id`, `messaging.destination.name`, and
+`messaging.kafka.offset`. This requirement targets OpenTelemetry semantic
+conventions 1.38.0; conventions marked Development may be migrated explicitly
+when the project updates that target.
+
+### REQ-52.10 — Optional signed log checkpoints
+
+When `log-signing-cert`, `log-signing-key`, and a signer identity are
+configured together with a hash chain, completed anchor records must carry an
+Ed25519 signature over a canonical checkpoint statement. The statement must
+bind the hash algorithm, anchor range, preceding and final chain values,
+service identity, process start, run/segment/window identities, signer ID, and
+public-key ID.
+
+The signing certificate must be dedicated to log signing, use an Ed25519 key,
+and allow `digitalSignature`. The public-key ID must be the SHA-256 fingerprint
+of the DER SubjectPublicKeyInfo. A verifier must resolve that ID through an
+independently trusted key registry; a public key supplied only by the log
+record is not trusted.
+
+Signing is optional and must not change the text default or unsigned OTLP
+output. A signing failure must be surfaced in the log output and must never be
+represented as a valid signature.

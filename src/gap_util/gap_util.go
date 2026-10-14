@@ -59,23 +59,37 @@ func GetAllGaps(key string) Gaps {
 // Return true iff the message has already been received (duplicate)
 func CheckNextNumber(key string, number int64) bool {
 	var returnValue bool = false
-	Logger.Debugf("checkNextNumber %s %d", key, number)
+	Logger.Debugf(logging.Event(logging.EventGapReport,
+		logging.Str("airgap.gap.key", key),
+		logging.Int("airgap.message.number", number),
+	), "checkNextNumber %s %d", key, number)
 	mu.Lock()
 	defer mu.Unlock()
 	currentGaps, ok := allGaps[key]
 	if ok == false {
-		Logger.Debugf("Adding new currentGaps with key %s", key)
+		Logger.Debugf(logging.Event(logging.EventGapReport,
+			logging.Str("airgap.gap.key", key),
+			logging.Str("airgap.gap.action", "track.create"),
+		), "Adding new currentGaps with key %s", key)
 		// not found, initialize a new Gaps struct
 		currentGaps = Gaps{
 			ExpectedNumber: 0,
 			Gaps:           []Gap{},
 		}
 	} else {
-		Logger.Debugf("Using stored currentGaps with expectedNumber: %d", currentGaps.ExpectedNumber)
+		Logger.Debugf(logging.Event(logging.EventGapReport,
+			logging.Str("airgap.gap.key", key),
+			logging.Str("airgap.gap.action", "track.reuse"),
+			logging.Int("airgap.message.expected_number", currentGaps.ExpectedNumber),
+		), "Using stored currentGaps with expectedNumber: %d", currentGaps.ExpectedNumber)
 	}
 	// Check if the currentGaps->number is the next expected
 	if currentGaps.ExpectedNumber == number {
-		Logger.Debugf("received number %d was the expected", number)
+		Logger.Debugf(logging.Event(logging.EventGapReport,
+			logging.Str("airgap.gap.key", key),
+			logging.Str("airgap.gap.action", "in.sequence"),
+			logging.Int("airgap.message.number", number),
+		), "received number %d was the expected", number)
 		// Yes, update the struct so we expect the next number
 		currentGaps.ExpectedNumber++
 	} else if number > currentGaps.ExpectedNumber {
@@ -85,7 +99,12 @@ func CheckNextNumber(key string, number int64) bool {
 			To:        (number - 1),
 			Timestamp: time.Now(),
 		}
-		Logger.Debugf("Gap detected. Adding from %d to %d", gap.From, gap.To)
+		Logger.Debugf(logging.Event(logging.EventGapDetected,
+			logging.Str("airgap.gap.key", key),
+			logging.Int("airgap.gap.from", gap.From),
+			logging.Int("airgap.gap.to", gap.To),
+			logging.Int("airgap.gap.length", gap.To-gap.From+1),
+		), "Gap detected. Adding from %d to %d", gap.From, gap.To)
 		currentGaps.Gaps = append(currentGaps.Gaps, gap)
 		currentGaps.ExpectedNumber = number + 1
 	} else {
@@ -97,24 +116,40 @@ func CheckNextNumber(key string, number int64) bool {
 			gap := currentGaps.Gaps[gapNumber]
 			// There is a gap for this number
 			if number == gap.From && number == gap.To {
-				Logger.Debugf("Number is this gap, remove gap")
+				Logger.Debugf(logging.Event(logging.EventGapClosed,
+					logging.Str("airgap.gap.key", key),
+					logging.Str("airgap.gap.action", "remove"),
+					logging.Int("airgap.message.number", number),
+				), "Number is this gap, remove gap")
 				// Gap was missing just this number
 				// remove the gap
 				currentGaps.Gaps = append(currentGaps.Gaps[:gapNumber], currentGaps.Gaps[gapNumber+1:]...)
 			} else if number == gap.From && number != gap.To {
 				// just remove the from. There are other missing numbers too
-				Logger.Debugf("Number is the start of this gap, adding from")
+				Logger.Debugf(logging.Event(logging.EventGapClosed,
+					logging.Str("airgap.gap.key", key),
+					logging.Str("airgap.gap.action", "shrink.from"),
+					logging.Int("airgap.message.number", number),
+				), "Number is the start of this gap, adding from")
 				gap.From += 1
 				currentGaps.Gaps[gapNumber] = gap
 			} else if number != gap.From && number == gap.To {
 				// missing just the last one
-				Logger.Debugf("Number is the end of this gap, subtracting to")
+				Logger.Debugf(logging.Event(logging.EventGapClosed,
+					logging.Str("airgap.gap.key", key),
+					logging.Str("airgap.gap.action", "shrink.to"),
+					logging.Int("airgap.message.number", number),
+				), "Number is the end of this gap, subtracting to")
 				gap.To -= 1
 				currentGaps.Gaps[gapNumber] = gap
 			} else {
 				// The gap is more than 2 long and the received item is in the middle of the gap
 				// Split the gap into two gaps with from .. number-1, number+1 .. to
-				Logger.Debugf("Creating new gap")
+				Logger.Debugf(logging.Event(logging.EventGapClosed,
+					logging.Str("airgap.gap.key", key),
+					logging.Str("airgap.gap.action", "split"),
+					logging.Int("airgap.message.number", number),
+				), "Creating new gap")
 				newGap := Gap{
 					From:      number + 1,
 					To:        gap.To,

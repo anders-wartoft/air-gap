@@ -71,9 +71,16 @@ func UpdateKafkaStatus(newStatus string) {
 		previousKafkaStatus = kafkaStatus
 		kafkaStatus = newStatus
 		if newStatus == "running" {
-			Logger.Infof("Kafka status restored to running (was: %s)", previousKafkaStatus)
+			Logger.Infof(logging.Event(logging.EventKafkaConnectionRestored,
+				logging.Str("airgap.kafka.status", newStatus),
+				logging.Str("airgap.kafka.status.previous", previousKafkaStatus),
+			), "Kafka status restored to running (was: %s)", previousKafkaStatus)
 		} else {
-			Logger.Errorf("Kafka status changed to error: %s (was: %s)", newStatus, previousKafkaStatus)
+			Logger.Errorf(logging.Event(logging.EventKafkaConnect,
+				logging.Failure(),
+				logging.Str("airgap.kafka.status", newStatus),
+				logging.Str("airgap.kafka.status.previous", previousKafkaStatus),
+			), "Kafka status changed to error: %s (was: %s)", newStatus, previousKafkaStatus)
 		}
 	}
 	kafkaStatusMu.Unlock()
@@ -88,7 +95,10 @@ func RunDownstream(transportReceiver TransportReceiver, stopChan <-chan struct{}
 	if config.mtu == 0 {
 		mtuValue, err := mtu.GetMTU(config.nic, fmt.Sprintf("%s:%d", config.targetIP, config.targetPort))
 		if err != nil {
-			Logger.Fatal(err)
+			Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+				logging.Str("airgap.config.setting", "mtu"),
+				logging.Str("airgap.network.interface", config.nic),
+			).Merge(logging.Err(err)), err)
 		}
 		config.mtu = uint16(mtuValue)
 	}
@@ -101,7 +111,9 @@ func RunDownstream(transportReceiver TransportReceiver, stopChan <-chan struct{}
 		}()
 	}
 
-	Logger.Infof("Downstream version: %s", BuildNumber)
+	Logger.Infof(logging.Event(logging.EventAppStart,
+		logging.Str("airgap.build.number", BuildNumber),
+	), "Downstream version: %s", BuildNumber)
 	sendMessage(protocol.TYPE_STATUS, "", config.topic,
 		fmt.Appendf(nil, "Downstream starting %s server on port %d", config.transport, config.targetPort))
 
@@ -138,7 +150,10 @@ func RunDownstream(transportReceiver TransportReceiver, stopChan <-chan struct{}
 	<-stopChan
 	if config.transport == "tcp" {
 		if err := transportReceiver.Close(); err != nil {
-			Logger.Errorf("Failed to close TCP receiver: %v", err)
+			Logger.Errorf(logging.Event(logging.EventTCPClose,
+				logging.Failure(),
+				logging.ErrorType(err),
+			), "Failed to close TCP receiver: %v", err)
 		}
 	}
 
@@ -147,19 +162,29 @@ func RunDownstream(transportReceiver TransportReceiver, stopChan <-chan struct{}
 }
 func handleUdpMessage(msg []byte) {
 	if pinnedtls.IsRotationFrame(msg) {
-		Logger.Errorf("Pinned rotation rejected on non-control transport")
+		Logger.Error(logging.Event(logging.EventTLSPinRotate,
+			logging.Failure(),
+			logging.Str("error.type", "rotation.unsupported.transport"),
+			logging.Str("network.transport", config.transport),
+		), "Pinned rotation rejected on non-control transport")
 		return
 	}
 	messageType, messageID, payload, err := protocol.ParseMessage(msg, cache)
 	if err != nil {
-		Logger.Errorf("Failed to parse message: %v", err)
+		Logger.Errorf(logging.Event(logging.EventProtocolDecode,
+			logging.Int("airgap.message.size", int64(len(msg))),
+		).Merge(logging.Err(err)), "Failed to parse message: %v", err)
 		// Update transport status on parse errors
 		transportStatusMu.Lock()
 		newStatus := fmt.Sprintf("parse error: %v", err)
 		if transportStatus != newStatus {
 			previousTransportStatus = transportStatus
 			transportStatus = newStatus
-			Logger.Errorf("Transport status changed to error: %s (was: %s)", newStatus, previousTransportStatus)
+			Logger.Errorf(logging.Event(logging.EventProtocolDecode,
+				logging.Failure(),
+				logging.Str("airgap.transport.status", newStatus),
+				logging.Str("airgap.transport.status.previous", previousTransportStatus),
+			), "Transport status changed to error: %s (was: %s)", newStatus, previousTransportStatus)
 		}
 		transportStatusMu.Unlock()
 		return
@@ -170,7 +195,10 @@ func handleUdpMessage(msg []byte) {
 	if transportStatus != "running" {
 		previousTransportStatus = transportStatus
 		transportStatus = "running"
-		Logger.Infof("Transport status restored to running (was: %s)", previousTransportStatus)
+		Logger.Infof(logging.Event(logging.EventTransportConnectionRestored,
+			logging.Str("airgap.transport.status", transportStatus),
+			logging.Str("airgap.transport.status.previous", previousTransportStatus),
+		), "Transport status restored to running (was: %s)", previousTransportStatus)
 	}
 	transportStatusMu.Unlock()
 
@@ -186,26 +214,35 @@ func handleUdpMessage(msg []byte) {
 
 	switch {
 	case protocol.IsMessageType(messageType, protocol.TYPE_CLEARTEXT):
+		msgAttrs := logging.Event(logging.EventMessageDeliver,
+			logging.Str("airgap.message.id", messageID),
+			logging.Str("messaging.destination.name", topic),
+			logging.Decimal("messaging.destination.partition.id", int64(partition)),
+		)
 		if protocol.IsMessageType(messageType, protocol.TYPE_COMPRESSED_GZIP) {
 			if Logger.CanLog(logging.DEBUG) {
-				Logger.Debugf("Gzip, payload length", len(payload))
+				Logger.Debugf(msgAttrs.With(logging.Int("airgap.message.size", int64(len(payload)))),
+					"Gzip, payload length %d", len(payload))
 			}
 			payload, err = protocol.DecompressGzip(payload, config.maximumDecompressSize)
 			if err != nil {
-				Logger.Errorf("Decompress error: %v", err)
+				Logger.Errorf(msgAttrs.Merge(logging.Err(err)), "Decompress error: %v", err)
 				sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
 				return
 			}
 			if Logger.CanLog(logging.DEBUG) {
-				Logger.Debugf("unzipped, payload length", len(payload))
+				Logger.Debugf(msgAttrs.With(logging.Int("airgap.message.size", int64(len(payload)))),
+					"unzipped, payload length %d", len(payload))
 			}
 		}
 		if partition < 0 || partition > 2147483647 {
-			Logger.Fatalf("Partition out of int32 range: %d", partition)
+			Logger.Fatalf(msgAttrs.With(logging.Failure()),
+				"Partition out of int32 range: %d", partition)
 			os.Exit(1)
 		}
 		if len(payload) == 0 {
-			Logger.Debugf("Writing empty payload for messageID=%s to topic=%s partition=%d, messageType=%d", messageID, topic, partition, messageType)
+			Logger.Debugf(msgAttrs.With(logging.Int("airgap.message.size", 0)),
+				"Writing empty payload for messageID=%s to topic=%s partition=%d, messageType=%d", messageID, topic, partition, messageType)
 		}
 		kafkaWriter.Write(messageID, topic, int32(partition), payload)
 		atomic.AddInt64(&receivedEvents, 1)
@@ -214,26 +251,33 @@ func handleUdpMessage(msg []byte) {
 		atomic.AddInt64(&totalSent, 1)
 
 	case protocol.IsMessageType(messageType, protocol.TYPE_MESSAGE):
+		msgAttrs := logging.Event(logging.EventCryptoDecrypt,
+			logging.Str("airgap.message.id", messageID),
+			logging.Str("messaging.destination.name", topic),
+			logging.Decimal("messaging.destination.partition.id", int64(partition)),
+		)
 		decrypted, err := protocol.Decrypt(payload, config.key)
 		if err != nil {
-			Logger.Errorf("Decrypt error: %v", err)
+			Logger.Errorf(msgAttrs.Merge(logging.Err(err)), "Decrypt error: %v", err)
 			sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
 			return
 		}
 		if protocol.IsMessageType(messageType, protocol.TYPE_COMPRESSED_GZIP) {
 			decrypted, err = protocol.DecompressGzip(decrypted, config.maximumDecompressSize)
 			if err != nil {
-				Logger.Errorf("Decompress after decrypt error: %v", err)
+				Logger.Errorf(msgAttrs.Merge(logging.Err(err)), "Decompress after decrypt error: %v", err)
 				sendMessage(protocol.TYPE_ERROR, messageID, config.topic, []byte(err.Error()))
 				return
 			}
 		}
 		if partition < 0 || partition > 2147483647 {
-			Logger.Fatalf("Partition out of int32 range: %d", partition)
+			Logger.Fatalf(msgAttrs.With(logging.Failure()),
+				"Partition out of int32 range: %d", partition)
 			os.Exit(1)
 		}
 		if len(decrypted) == 0 {
-			Logger.Debugf("Writing empty decrypted payload for messageID=%s to topic=%s partition=%d", messageID, topic, partition)
+			Logger.Debugf(msgAttrs.With(logging.Int("airgap.message.size", 0)),
+				"Writing empty decrypted payload for messageID=%s to topic=%s partition=%d", messageID, topic, partition)
 		}
 		kafkaWriter.Write(messageID, topic, int32(partition), decrypted)
 		atomic.AddInt64(&receivedEvents, 1)
@@ -246,7 +290,11 @@ func handleUdpMessage(msg []byte) {
 		last := atomic.LoadInt64(&lastKeyExchangeNano)
 		minInterval := int64(config.keyExchangeMinIntervalSecs) * int64(time.Second)
 		if minInterval > 0 && now-last < minInterval {
-			Logger.Warnf("KEY_EXCHANGE rate limit: dropping duplicate key exchange request (< %ds since last)", config.keyExchangeMinIntervalSecs)
+			Logger.Warnf(logging.Event(logging.EventCryptoKeyLoad,
+				logging.Failure(),
+				logging.Str("error.type", "rate.limited"),
+				logging.Int("airgap.crypto.key.exchange.min.interval.seconds", int64(config.keyExchangeMinIntervalSecs)),
+			), "KEY_EXCHANGE rate limit: dropping duplicate key exchange request (< %ds since last)", config.keyExchangeMinIntervalSecs)
 			return
 		}
 		atomic.StoreInt64(&lastKeyExchangeNano, now)
@@ -267,7 +315,9 @@ func handleUdpMessage(msg []byte) {
 // logStatistics logs periodic stats about received/sent messages
 func logStatistics(stopChan <-chan struct{}) {
 	interval := time.Duration(config.logStatistics) * time.Second
-	Logger.Printf("Starting statistics logger with interval %v", interval)
+	Logger.Infof(logging.Event(logging.EventStatsReport,
+		logging.Int("airgap.stats.interval.seconds", int64(config.logStatistics)),
+	), "Starting statistics logger with interval %v", interval)
 	for {
 		select {
 		case <-stopChan:
@@ -315,7 +365,18 @@ func logStatistics(stopChan <-chan struct{}) {
 
 			if Logger.CanLog(logging.INFO) {
 				b, _ := json.Marshal(stats)
-				Logger.Info("STATISTICS: " + string(b))
+				Logger.Info(logging.Event(logging.EventStatsReport,
+					logging.Str("airgap.instance.id", config.id),
+					logging.Int("airgap.stats.interval.seconds", int64(config.logStatistics)),
+					logging.Int("airgap.message.count", recv),
+					logging.Int("airgap.message.sent", sent),
+					logging.Int("airgap.stats.eps", recv/int64(config.logStatistics)),
+					logging.Int("airgap.message.total.received", atomic.LoadInt64(&totalReceived)),
+					logging.Int("airgap.message.total.sent", atomic.LoadInt64(&totalSent)),
+					logging.Str("airgap.transport.status", transportStatus),
+					logging.Str("airgap.kafka.status", kafkaStatus),
+					logging.Int("airgap.cache.entries", int64(cache.GetCacheSize())),
+				), "STATISTICS: "+string(b))
 
 			}
 		}
@@ -326,13 +387,15 @@ func logStatistics(stopChan <-chan struct{}) {
 func Main(build string) {
 	if handled, err := pinnedtls.GenerateCommand(os.Args[1:], "server", os.Stdout); handled {
 		if err != nil {
-			Logger.Fatal(err)
+			Logger.Fatal(logging.Event(logging.EventTLSPinVerify).Merge(logging.Err(err)), err)
 		}
 		return
 	}
 	BuildNumber = build
-	Logger.Printf("Downstream version: %s starting up...", version.GitVersion)
-	Logger.Printf("Build number: %s", BuildNumber)
+	Logger.Infof(logging.Event(logging.EventAppStart), "Downstream version: %s starting up...", version.GitVersion)
+	Logger.Infof(logging.Event(logging.EventAppStart,
+		logging.Str("airgap.build.number", BuildNumber),
+	), "Build number: %s", BuildNumber)
 
 	var fileName string
 	var overrideArgs []string
@@ -343,36 +406,57 @@ func Main(build string) {
 		} else if fileName == "" {
 			fileName = arg
 		} else {
-			Logger.Fatal("Too many non-dashed command line parameters. Only one property file allowed.")
+			Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.config.setting", "propertyFile"),
+				logging.Str("airgap.config.value", arg),
+			), "Too many non-dashed command line parameters. Only one property file allowed.")
 		}
 	}
 
 	configuration := defaultConfiguration()
 	configuration, err := readConfiguration(fileName, configuration)
 	if err != nil {
-		Logger.Fatalf("Failed to read configuration: %v", err)
+		Logger.Fatalf(logging.Event(logging.EventConfigLoad,
+			logging.Str("file.path", fileName),
+		).Merge(logging.Err(err)), "Failed to read configuration: %v", err)
 	}
 	configuration = overrideConfiguration(configuration)
 	configuration = parseCommandLineOverrides(overrideArgs, configuration)
 	resolved := configuration
 	if configuration.tcpTLSAuthMode == "pinned" {
 		if err := pinnedtls.ValidateReloadFile(fileName); err != nil {
-			Logger.Fatal(err)
+			Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+				logging.Str("file.path", fileName),
+				logging.Str("airgap.config.setting", "tcpTLSAuthMode"),
+				logging.Str("airgap.config.value", configuration.tcpTLSAuthMode),
+			).Merge(logging.Err(err)), err)
 		}
 	}
 	configuration = checkConfiguration(configuration)
 	config = configuration
 
 	if config.logFileName != "" {
-		Logger.Printf("pid:%d", os.Getpid())
-		Logger.Print("Configuring log to: " + config.logFileName)
-		Logger.Print("Log to file started up")
+		Logger.Infof(logging.Event(logging.EventAppStart,
+			logging.Int("process.pid", int64(os.Getpid())),
+		), "pid:%d", os.Getpid())
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "logFileName"),
+			logging.Str("file.path", config.logFileName),
+		), "Configuring log to: "+config.logFileName)
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "logFileName"),
+			logging.Str("file.path", config.logFileName),
+		), "Log to file started up")
 	}
 
 	if config.mtu == 0 {
 		mtuValue, err := mtu.GetMTU(config.nic, fmt.Sprintf("%s:%d", config.targetIP, config.targetPort))
 		if err != nil {
-			Logger.Fatal(err)
+			Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+				logging.Str("airgap.config.setting", "mtu"),
+				logging.Str("airgap.network.interface", config.nic),
+			).Merge(logging.Err(err)), err)
 		}
 		config.mtu = uint16(mtuValue)
 	}
@@ -385,23 +469,38 @@ func Main(build string) {
 	var receiver TransportReceiver
 	switch config.transport {
 	case "tcp":
-		Logger.Print("Using TCP receiver adapter")
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "transport"),
+			logging.Str("airgap.config.value", "tcp"),
+		), "Using TCP receiver adapter")
 		receiver = NewTCPAdapter(config)
 	default:
-		Logger.Print("Using UDP receiver adapter")
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "transport"),
+			logging.Str("airgap.config.value", "udp"),
+		), "Using UDP receiver adapter")
 		receiver = NewUDPAdapter(config)
 	}
 	defer receiver.Close()
 
 	switch config.target {
 	case "cmd":
-		Logger.Print("Using command line Kafka adapter")
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "target"),
+			logging.Str("airgap.config.value", "cmd"),
+		), "Using command line Kafka adapter")
 		kafkaWriter = NewCmdAdapter()
 	case "null":
-		Logger.Print("Using null adapter for performance testing")
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "target"),
+			logging.Str("airgap.config.value", "null"),
+		), "Using null adapter for performance testing")
 		kafkaWriter = NewNullAdapter()
 	default:
-		Logger.Print("Using Kafka adapter")
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "target"),
+			logging.Str("airgap.config.value", config.target),
+		), "Using Kafka adapter")
 		kafkaWriter = NewKafkaAdapter()
 		kafka.StopBackgroundThread()
 		connectToKafka(config)
@@ -426,7 +525,10 @@ func Main(build string) {
 	for {
 		select {
 		case <-sigterm:
-			Logger.Printf("Received SIGTERM, shutting down")
+			Logger.Infof(logging.Event(logging.EventAppShutdown,
+				logging.Str("airgap.shutdown.reason", "SIGTERM"),
+				logging.Str("airgap.instance.id", config.id),
+			), "Received SIGTERM, shutting down")
 			sendMessage(protocol.TYPE_STATUS, "", config.topic,
 				fmt.Appendf(nil, "Downstream %s terminating by signal...", config.id))
 			kafka.FlushCache()
@@ -440,11 +542,15 @@ func Main(build string) {
 			config.WarnProductionConfiguration("shutdown")
 			return
 		case <-hup:
-			Logger.Printf("SIGHUP received: reopening logs with name %s and reloading TLS certificates", config.logFileName)
+			hupAttrs := logging.Event(logging.EventAppReload,
+				logging.Str("airgap.shutdown.reason", "SIGHUP"),
+				logging.Str("file.path", config.logFileName),
+			)
+			Logger.Infof(hupAttrs, "SIGHUP received: reopening logs with name %s and reloading TLS certificates", config.logFileName)
 			if config.logFileName != "" {
-				Logger.Printf("Reopening logs for logrotate. New name: %s", config.logFileName)
+				Logger.Infof(hupAttrs, "Reopening logs for logrotate. New name: %s", config.logFileName)
 				if err := Logger.SetLogFile(config.logFileName); err != nil {
-					Logger.Errorf("Failed reopening log file: %v", err)
+					Logger.Errorf(hupAttrs.Merge(logging.Err(err)), "Failed reopening log file: %v", err)
 				}
 			}
 			if tcpAdapter, ok := receiver.(*TCPAdapter); ok {
@@ -455,12 +561,16 @@ func Main(build string) {
 					err = tcpAdapter.ReloadTLSCert()
 				}
 				if err != nil {
-					Logger.Errorf("TLS certificate reload failed: %v", err)
+					Logger.Errorf(logging.Event(logging.EventTLSCertReload,
+						logging.Str("file.path", fileName),
+					).Merge(logging.Err(err)), "TLS certificate reload failed: %v", err)
 				}
 			}
-			Logger.Printf("SIGHUP handling completed")
+			Logger.Info(hupAttrs, "SIGHUP handling completed")
 		case <-done:
-			Logger.Printf("RunDownstream finished, exiting")
+			Logger.Info(logging.Event(logging.EventAppStop,
+				logging.Str("airgap.instance.id", config.id),
+			), "RunDownstream finished, exiting")
 			sendMessage(protocol.TYPE_STATUS, "", config.topic,
 				fmt.Appendf(nil, "Downstream %s shutting down", config.id))
 			kafka.FlushCache()

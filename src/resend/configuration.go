@@ -110,6 +110,39 @@ func defaultConfiguration() TransferConfiguration {
 	return config
 }
 
+// configApplied describes a setting that has been read and applied, so a
+// consumer can see which setting changed without parsing the body.
+func configApplied(setting, value string) logging.Attrs {
+	return logging.Event(logging.EventConfigApplied,
+		logging.Str("airgap.config.setting", setting),
+		logging.Str("airgap.config.value", value),
+	)
+}
+
+// configInvalid describes a setting that failed validation.
+func configInvalid(setting, value string) logging.Attrs {
+	return logging.Event(logging.EventConfigInvalid,
+		logging.Failure(),
+		logging.Str("airgap.config.setting", setting),
+		logging.Str("airgap.config.value", value),
+	)
+}
+
+// configOverride describes a setting replaced by the environment or the
+// command line. The source says which of the two did it.
+func configOverride(source, setting, value string) logging.Attrs {
+	return logging.Event(logging.EventConfigOverride,
+		logging.Str("airgap.config.source", source),
+		logging.Str("airgap.config.setting", setting),
+		logging.Str("airgap.config.value", value),
+	)
+}
+
+// errAttr carries the failure detail of an error onto an existing list.
+func errAttr(err error) logging.Attr {
+	return logging.ErrorType(err)
+}
+
 // Parse the configuration file and return a TransferConfiguration struct.
 func readParameters(fileName string, result TransferConfiguration) (TransferConfiguration, error) {
 	if fileName == "" {
@@ -124,12 +157,18 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 	}
 	if err != nil {
 		// No file, but that's ok. Maybe the user only uses environment variables
-		Logger.Fatalf("File: %s not found.", fileName)
+		Logger.Fatalf(logging.Event(logging.EventConfigLoad,
+			logging.Failure(),
+			logging.Str("file.path", fileName),
+			errAttr(err),
+		), "File: %s not found.", fileName)
 		return result, nil
 	}
 	defer file.Close()
 
-	Logger.Print("Reading configuration from file " + fileName)
+	Logger.Info(logging.Event(logging.EventConfigLoad,
+		logging.Str("file.path", fileName),
+	), "Reading configuration from file "+fileName)
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -147,6 +186,13 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 		switch key {
 		case "id":
 			result.id = value
+			logging.Logger.SetInstanceID(value)
+		case logging.OptionFormat, logging.OptionHash, logging.OptionHashChain,
+			logging.OptionSigningCertificate, logging.OptionSigningKey,
+			logging.OptionSignerID, logging.OptionSigningEKU:
+			if _, err := logging.ApplyOption(key, value); err != nil {
+				return result, err
+			}
 		case "nic":
 			result.nic = value
 		case "targetIP":
@@ -155,27 +201,27 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 			result.targetPort, err = strconv.Atoi(value)
 		case "logFileName":
 			result.logFileName = value
-			Logger.Printf("logFileName: %s", value)
+			Logger.Infof(configApplied("logFileName", value), "logFileName: %s", value)
 		case "bootstrapServers":
 			result.bootstrapServers = value
-			Logger.Printf("bootstrapServers: %s", value)
+			Logger.Infof(configApplied("bootstrapServers", value), "bootstrapServers: %s", value)
 		case "topic":
 			result.topic = value
-			Logger.Printf("topic: %s", value)
+			Logger.Infof(configApplied("topic", value), "topic: %s", value)
 		case "groupID":
 			result.groupID = value
 		case "logLevel":
 			result.logLevel = strings.ToUpper(value)
-			Logger.Printf("logLevel: %s", result.logLevel)
+			Logger.Infof(configApplied("logLevel", value), "logLevel: %s", result.logLevel)
 		case "certFile":
 			result.certFile = value
-			Logger.Printf("certFile: %s", value)
+			Logger.Infof(configApplied("certFile", value), "certFile: %s", value)
 		case "keyFile":
 			result.keyFile = value
-			Logger.Printf("keyFile: %s", value)
+			Logger.Infof(configApplied("keyFile", value), "keyFile: %s", value)
 		case "caFile":
 			result.caFile = value
-			Logger.Printf("caFile: %s", value)
+			Logger.Infof(configApplied("caFile", value), "caFile: %s", value)
 		case "keyPasswordFile":
 			result.keyPasswordFile = value
 		case "limit":
@@ -185,108 +231,121 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 		case "logStatistics":
 			result.logStatistics, err = strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error parsing logStatistics: %v", err)
+				Logger.Fatalf(configInvalid("logStatistics", value).With(errAttr(err)),
+					"Error parsing logStatistics: %v", err)
 			}
 			if result.logStatistics < 0 {
 				result.logStatistics = 0
 			}
-			Logger.Printf("logStatistics: %d", result.logStatistics)
+			Logger.Infof(configApplied("logStatistics", value), "logStatistics: %d", result.logStatistics)
 		case "from":
 			result.from = value
-			Logger.Printf("from: %s", result.from)
+			Logger.Infof(configApplied("from", value), "from: %s", result.from)
 		case "to":
 			result.to = value
-			Logger.Printf("to: %s", result.to)
+			Logger.Infof(configApplied("to", value), "to: %s", result.to)
 		case "encryption":
 			result.encryption = strings.ToLower(value) == "true"
-			Logger.Printf("encryption: %t", result.encryption)
+			Logger.Infof(configApplied("encryption", value), "encryption: %t", result.encryption)
 		case "publicKeyFile":
 			result.publicKeyFile = value
-			Logger.Printf("publicKeyFile: %s", result.publicKeyFile)
+			Logger.Infof(configApplied("publicKeyFile", value), "publicKeyFile: %s", result.publicKeyFile)
 		case "generateNewSymmetricKeyEvery":
 			result.generateNewSymmetricKeyEvery, err = strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error parsing generateNewSymmetricKeyEvery: %v", err)
+				Logger.Fatalf(configInvalid("generateNewSymmetricKeyEvery", value).With(errAttr(err)),
+					"Error parsing generateNewSymmetricKeyEvery: %v", err)
 			}
 			if result.generateNewSymmetricKeyEvery < 0 {
 				result.generateNewSymmetricKeyEvery = 0
 			}
-			Logger.Printf("generateNewSymmetricKeyEvery: %d", result.generateNewSymmetricKeyEvery)
+			Logger.Infof(configApplied("generateNewSymmetricKeyEvery", value), "generateNewSymmetricKeyEvery: %d", result.generateNewSymmetricKeyEvery)
 		case "payloadSize":
 			if value == "auto" {
 				result.payloadSize = 0
 			} else {
 				tmp, err := strconv.Atoi(value)
 				if err != nil {
-					Logger.Fatalf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or a two byte integer", value)
+					Logger.Fatalf(configInvalid("payloadSize", value).With(errAttr(err)),
+						"Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or a two byte integer", value)
 				} else if tmp < 0 || tmp > 65535 {
-					Logger.Fatalf("Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or 0-65535", value)
+					Logger.Fatalf(configInvalid("payloadSize", value),
+						"Error in config payloadSize. Illegal value: %s. Legal values are 'auto' or 0-65535", value)
 				} else {
 					result.payloadSize = uint16(tmp)
 				}
 			}
 			if result.payloadSize < 500 || result.payloadSize > 65507-protocol.HEADER_SIZE {
 				if result.payloadSize != 0 { // auto-detect payloadSize when payloadSize=0
-					Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", result.payloadSize, 65507-protocol.HEADER_SIZE)
+					Logger.Fatalf(configInvalid("payloadSize", value),
+						"Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", result.payloadSize, 65507-protocol.HEADER_SIZE)
 				}
 			}
-			Logger.Printf("payloadSize: %d", result.payloadSize)
+			Logger.Infof(configApplied("payloadSize", value), "payloadSize: %d", result.payloadSize)
 		case "eps":
 			result.eps, err = strconv.ParseFloat(value, 64)
 			if err != nil {
-				Logger.Fatalf("Error parsing eps: %v", err)
+				Logger.Fatalf(configInvalid("eps", value).With(errAttr(err)),
+					"Error parsing eps: %v", err)
 			}
 			if result.eps < -1 {
 				result.eps = -1
 			}
-			Logger.Printf("eps: %f", result.eps)
+			Logger.Infof(configApplied("eps", value), "eps: %f", result.eps)
 		case "compressWhenLengthExceeds":
 			tmp, err := strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error in config compressWhenLengthExceeds. Illegal value: %s. Legal values are a non-negative integer", value)
+				Logger.Fatalf(configInvalid("compressWhenLengthExceeds", value).With(errAttr(err)),
+					"Error in config compressWhenLengthExceeds. Illegal value: %s. Legal values are a non-negative integer", value)
 			} else {
 				if tmp < 0 {
-					Logger.Fatalf("Error in config compressWhenLengthExceeds. Illegal value: %s. Legal values are a non-negative integer", value)
+					Logger.Fatalf(configInvalid("compressWhenLengthExceeds", value),
+						"Error in config compressWhenLengthExceeds. Illegal value: %s. Legal values are a non-negative integer", value)
 				} else {
 					result.compressWhenLengthExceeds = tmp
-					Logger.Printf("compressWhenLengthExceeds: %d", result.compressWhenLengthExceeds)
+					Logger.Infof(configApplied("compressWhenLengthExceeds", value), "compressWhenLengthExceeds: %d", result.compressWhenLengthExceeds)
 				}
 			}
 		case "partitionStartValue":
 			v, err := strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
+				Logger.Fatalf(configInvalid("partitionStartValue", value).With(errAttr(err)),
+					"Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
 			}
 			if v < 0 {
-				Logger.Fatalf("Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
+				Logger.Fatalf(configInvalid("partitionStartValue", value),
+					"Error in config partitionStartValue. Illegal value: %s. Legal values are a non-negative integer", value)
 			}
 			result.partitionStartValue = v
-			Logger.Printf("partitionStartValue: %d", result.partitionStartValue)
+			Logger.Infof(configApplied("partitionStartValue", value), "partitionStartValue: %d", result.partitionStartValue)
 		case "partitionStopValue":
 			v, err := strconv.Atoi(value)
 			if err != nil {
-				Logger.Fatalf("Error in config partitionStopValue. Illegal value: %s. Legal values are a non-negative integer", value)
+				Logger.Fatalf(configInvalid("partitionStopValue", value).With(errAttr(err)),
+					"Error in config partitionStopValue. Illegal value: %s. Legal values are a non-negative integer", value)
 			}
 			if v < 0 {
-				Logger.Fatalf("Error in config partitionStopValue. Illegal value: %s. Legal values are a non-negative integer", value)
+				Logger.Fatalf(configInvalid("partitionStopValue", value),
+					"Error in config partitionStopValue. Illegal value: %s. Legal values are a non-negative integer", value)
 			}
 			result.partitionStopValue = v
-			Logger.Printf("partitionStopValue: %d", result.partitionStopValue)
+			Logger.Infof(configApplied("partitionStopValue", value), "partitionStopValue: %d", result.partitionStopValue)
 		case "inputFilterRules":
 			result.inputFilterRules = value
-			Logger.Printf("inputFilterRules: %s", value)
+			Logger.Infof(configApplied("inputFilterRules", value), "inputFilterRules: %s", value)
 		case "inputFilterDefaultAction":
 			result.inputFilterDefaultAction = strings.ToLower(value)
-			Logger.Printf("inputFilterDefaultAction: %s", result.inputFilterDefaultAction)
+			Logger.Infof(configApplied("inputFilterDefaultAction", value), "inputFilterDefaultAction: %s", result.inputFilterDefaultAction)
 		case "inputFilterTimeout":
 			tmp, err := strconv.Atoi(value)
 			if err != nil || tmp <= 0 {
-				Logger.Fatalf("Error in config inputFilterTimeout. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
+				Logger.Fatalf(configInvalid("inputFilterTimeout", value),
+					"Error in config inputFilterTimeout. Illegal value: %s. Legal values are a positive integer (milliseconds)", value)
 			}
 			result.inputFilterTimeout = tmp
-			Logger.Printf("inputFilterTimeout: %d", result.inputFilterTimeout)
+			Logger.Infof(configApplied("inputFilterTimeout", value), "inputFilterTimeout: %d", result.inputFilterTimeout)
 		default:
-			Logger.Printf("Unknown configuration key: %s", key)
+			Logger.Infof(configInvalid(key, value), "Unknown configuration key: %s", key)
 		}
 	}
 
@@ -298,110 +357,127 @@ func readParameters(fileName string, result TransferConfiguration) (TransferConf
 }
 
 func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
-
-	Logger.Print("Checking configuration from environment variables...")
 	prefix := "AIRGAP_RESEND_"
+
+	Logger.Info(logging.Event(logging.EventConfigOverride,
+		logging.Str("airgap.config.source", "environment"),
+		logging.Str("airgap.config.prefix", prefix),
+	), "Checking configuration from environment variables...")
 	if id := os.Getenv(prefix + "ID"); id != "" {
-		Logger.Print("Overriding id with environment variable: " + prefix + "ID" + " with value: " + id)
+		Logger.Info(configOverride("environment", "id", id), "Overriding id with environment variable: "+prefix+"ID"+" with value: "+id)
 		config.id = id
 	}
 	if nic := os.Getenv(prefix + "NIC"); nic != "" {
-		Logger.Print("Overriding nic with environment variable: " + prefix + "NIC" + " with value: " + nic)
+		Logger.Info(configOverride("environment", "nic", nic), "Overriding nic with environment variable: "+prefix+"NIC"+" with value: "+nic)
 		config.nic = nic
 	}
 	if targetIP := os.Getenv(prefix + "TARGET_IP"); targetIP != "" {
-		Logger.Print("Overriding targetIP with environment variable: " + prefix + "TARGET_IP" + " with value: " + targetIP)
+		Logger.Info(configOverride("environment", "targetIP", targetIP), "Overriding targetIP with environment variable: "+prefix+"TARGET_IP"+" with value: "+targetIP)
 		config.targetIP = targetIP
 	}
 	if targetPort := os.Getenv(prefix + "TARGET_PORT"); targetPort != "" {
 		value, err := strconv.Atoi(targetPort)
 		if err != nil {
-			Logger.Fatalf("Error parsing TARGET_PORT environment variable: %v", err)
+			Logger.Fatalf(configInvalid("targetPort", targetPort).With(errAttr(err)),
+				"Error parsing TARGET_PORT environment variable: %v", err)
 		}
-		Logger.Print("Overriding targetPort with environment variable: " + prefix + "TARGET_PORT" + " with value: " + targetPort)
+		Logger.Info(configOverride("environment", "targetPort", targetPort), "Overriding targetPort with environment variable: "+prefix+"TARGET_PORT"+" with value: "+targetPort)
 		config.targetPort = value
 	}
 	if bootstrapServers := os.Getenv(prefix + "BOOTSTRAP_SERVERS"); bootstrapServers != "" {
-		Logger.Print("Overriding bootstrapServers with environment variable: " + prefix + "BOOTSTRAP_SERVERS" + " with value: " + bootstrapServers)
+		Logger.Info(configOverride("environment", "bootstrapServers", bootstrapServers), "Overriding bootstrapServers with environment variable: "+prefix+"BOOTSTRAP_SERVERS"+" with value: "+bootstrapServers)
 		config.bootstrapServers = bootstrapServers
 	}
 	if topic := os.Getenv(prefix + "TOPIC"); topic != "" {
-		Logger.Print("Overriding topic with environment variable: " + prefix + "TOPIC" + " with value: " + topic)
+		Logger.Info(configOverride("environment", "topic", topic), "Overriding topic with environment variable: "+prefix+"TOPIC"+" with value: "+topic)
 		config.topic = topic
 	}
 	if groupID := os.Getenv(prefix + "GROUP_ID"); groupID != "" {
-		Logger.Print("Overriding groupID with environment variable: " + prefix + "GROUP_ID" + " with value: " + groupID)
+		Logger.Info(configOverride("environment", "groupID", groupID), "Overriding groupID with environment variable: "+prefix+"GROUP_ID"+" with value: "+groupID)
 		config.groupID = groupID
 	}
 	if logLevel := os.Getenv(prefix + "LOG_LEVEL"); logLevel != "" {
-		Logger.Print("Overriding logLevel with environment variable: " + prefix + "LOG_LEVEL" + " with value: " + logLevel)
+		Logger.Info(configOverride("environment", "logLevel", logLevel), "Overriding logLevel with environment variable: "+prefix+"LOG_LEVEL"+" with value: "+logLevel)
 		config.logLevel = logLevel
 	}
 	if logFileName := os.Getenv(prefix + "LOG_FILE_NAME"); logFileName != "" {
-		Logger.Print("Overriding logFileName with environment variable: " + prefix + "LOG_FILE_NAME" + " with value: " + logFileName)
+		Logger.Info(configOverride("environment", "logFileName", logFileName), "Overriding logFileName with environment variable: "+prefix+"LOG_FILE_NAME"+" with value: "+logFileName)
 		config.logFileName = logFileName
 	}
+	if err := logging.ApplyEnvironmentOptions(prefix); err != nil {
+		Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.source", "environment"),
+			errAttr(err),
+		), "%v", err)
+	}
 	if certFile := os.Getenv(prefix + "CERT_FILE"); certFile != "" {
-		Logger.Print("Overriding certFile with environment variable: " + prefix + "CERT_FILE" + " with value: " + certFile)
+		Logger.Info(configOverride("environment", "certFile", certFile), "Overriding certFile with environment variable: "+prefix+"CERT_FILE"+" with value: "+certFile)
 		config.certFile = certFile
 	}
 	if keyFile := os.Getenv(prefix + "KEY_FILE"); keyFile != "" {
-		Logger.Print("Overriding keyFile with environment variable: " + prefix + "KEY_FILE" + " with value: " + keyFile)
+		Logger.Info(configOverride("environment", "keyFile", keyFile), "Overriding keyFile with environment variable: "+prefix+"KEY_FILE"+" with value: "+keyFile)
 		config.keyFile = keyFile
 	}
 	if caFile := os.Getenv(prefix + "CA_FILE"); caFile != "" {
-		Logger.Print("Overriding caFile with environment variable: " + prefix + "CA_FILE" + " with value: " + caFile)
+		Logger.Info(configOverride("environment", "caFile", caFile), "Overriding caFile with environment variable: "+prefix+"CA_FILE"+" with value: "+caFile)
 		config.caFile = caFile
 	}
 	if keyPasswordFile := os.Getenv(prefix + "KEY_PASSWORD_FILE"); keyPasswordFile != "" {
-		Logger.Print("Overriding keyPasswordFile with environment variable: " + prefix + "KEY_PASSWORD_FILE")
+		Logger.Info(logging.Event(logging.EventConfigOverride,
+			logging.Str("airgap.config.source", "environment"),
+			logging.Str("airgap.config.setting", "keyPasswordFile"),
+		), "Overriding keyPasswordFile with environment variable: "+prefix+"KEY_PASSWORD_FILE")
 		config.keyPasswordFile = keyPasswordFile
 	}
 	if limit := os.Getenv(prefix + "LIMIT"); limit != "" {
-		Logger.Print("Overriding limit with environment variable: " + prefix + "LIMIT" + " with value: " + limit)
+		Logger.Info(configOverride("environment", "limit", limit), "Overriding limit with environment variable: "+prefix+"LIMIT"+" with value: "+limit)
 		config.limit = strings.ToLower(limit)
 	}
 	if resendFileName := os.Getenv(prefix + "RESULT_FILE_NAME"); resendFileName != "" {
-		Logger.Print("Overriding resendFileName with environment variable: " + prefix + "RESULT_FILE_NAME" + " with value: " + resendFileName)
+		Logger.Info(configOverride("environment", "resendFileName", resendFileName), "Overriding resendFileName with environment variable: "+prefix+"RESULT_FILE_NAME"+" with value: "+resendFileName)
 		config.resendFileName = resendFileName
 	}
 	if logStatistics := os.Getenv(prefix + "LOG_STATISTICS"); logStatistics != "" {
 		value, err := strconv.Atoi(logStatistics)
 		if err != nil {
-			Logger.Fatalf("Error parsing LOG_STATISTICS environment variable: %v", err)
+			Logger.Fatalf(configInvalid("logStatistics", logStatistics).With(errAttr(err)),
+				"Error parsing LOG_STATISTICS environment variable: %v", err)
 		}
 		if value < 0 {
 			value = 0
 		}
-		Logger.Print("Overriding logStatistics with environment variable: " + prefix + "LOG_STATISTICS" + " with value: " + logStatistics)
+		Logger.Info(configOverride("environment", "logStatistics", logStatistics), "Overriding logStatistics with environment variable: "+prefix+"LOG_STATISTICS"+" with value: "+logStatistics)
 		config.logStatistics = value
 	}
 	if from := os.Getenv(prefix + "FROM"); from != "" {
-		Logger.Print("Overriding from with environment variable: " + prefix + "FROM" + " with value: " + from)
+		Logger.Info(configOverride("environment", "from", from), "Overriding from with environment variable: "+prefix+"FROM"+" with value: "+from)
 		config.from = from
 	}
 	if to := os.Getenv(prefix + "TO"); to != "" {
-		Logger.Print("Overriding to with environment vairable: " + prefix + "TO" + " with value: " + to)
+		Logger.Info(configOverride("environment", "to", to),
+			"Overriding to with environment vairable: "+prefix+"TO"+" with value: "+to)
 		config.to = to
 	}
 	if encryption := os.Getenv(prefix + "ENCRYPTION"); encryption != "" {
 		value := strings.ToLower(encryption) == "true"
-		Logger.Print("Overriding encryption with environment variable: " + prefix + "ENCRYPTION" + " with value: " + encryption)
+		Logger.Info(configOverride("environment", "encryption", encryption), "Overriding encryption with environment variable: "+prefix+"ENCRYPTION"+" with value: "+encryption)
 		config.encryption = value
 	}
 	if publicKeyFile := os.Getenv(prefix + "PUBLIC_KEY_FILE"); publicKeyFile != "" {
-		Logger.Print("Overriding publicKeyFile with environment variable: " + prefix + "PUBLIC_KEY_FILE" + " with value: " + publicKeyFile)
+		Logger.Info(configOverride("environment", "publicKeyFile", publicKeyFile), "Overriding publicKeyFile with environment variable: "+prefix+"PUBLIC_KEY_FILE"+" with value: "+publicKeyFile)
 		config.publicKeyFile = publicKeyFile
 	}
 	if generateNewSymmetricKeyEvery := os.Getenv(prefix + "GENERATE_NEW_SYMMETRIC_KEY_EVERY"); generateNewSymmetricKeyEvery != "" {
 		value, err := strconv.Atoi(generateNewSymmetricKeyEvery)
 		if err != nil {
-			Logger.Fatalf("Error parsing GENERATE_NEW_SYMMETRIC_KEY_EVERY environment variable: %v", err)
+			Logger.Fatalf(configInvalid("generateNewSymmetricKeyEvery", generateNewSymmetricKeyEvery).With(errAttr(err)),
+				"Error parsing GENERATE_NEW_SYMMETRIC_KEY_EVERY environment variable: %v", err)
 		}
 		if value < 0 {
 			value = 0
 		}
-		Logger.Print("Overriding generateNewSymmetricKeyEvery with environment variable: " + prefix + "GENERATE_NEW_SYMMETRIC_KEY_EVERY" + " with value: " + generateNewSymmetricKeyEvery)
+		Logger.Info(configOverride("environment", "generateNewSymmetricKeyEvery", generateNewSymmetricKeyEvery), "Overriding generateNewSymmetricKeyEvery with environment variable: "+prefix+"GENERATE_NEW_SYMMETRIC_KEY_EVERY"+" with value: "+generateNewSymmetricKeyEvery)
 		config.generateNewSymmetricKeyEvery = value
 	}
 	if payloadSize := os.Getenv(prefix + "PAYLOAD_SIZE"); payloadSize != "" {
@@ -410,18 +486,21 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		} else {
 			value, err := strconv.Atoi(payloadSize)
 			if err != nil {
-				Logger.Fatalf("Error parsing PAYLOAD_SIZE environment variable: %v", err)
+				Logger.Fatalf(configInvalid("payloadSize", payloadSize).With(errAttr(err)),
+					"Error parsing PAYLOAD_SIZE environment variable: %v", err)
 			}
 			if value < 500 || value > 65507-protocol.HEADER_SIZE {
 				if value != 0 { // auto-detect payloadSize when payloadSize=0
-					Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", value, 65507-protocol.HEADER_SIZE)
+					Logger.Fatalf(configInvalid("payloadSize", payloadSize),
+						"Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", value, 65507-protocol.HEADER_SIZE)
 				}
 			}
 			if value < 0 || value > 65535 {
-				Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values must fit in uint16 (0-65535)", value)
+				Logger.Fatalf(configInvalid("payloadSize", payloadSize),
+					"Error in config payloadSize. Illegal value: %d. Legal values must fit in uint16 (0-65535)", value)
 				os.Exit(1)
 			}
-			Logger.Print("Overriding payloadSize with environment variable: " + prefix + "PAYLOAD_SIZE" + " with value: " + payloadSize)
+			Logger.Info(configOverride("environment", "payloadSize", payloadSize), "Overriding payloadSize with environment variable: "+prefix+"PAYLOAD_SIZE"+" with value: "+payloadSize)
 			// Safe: value is checked to fit in uint16 above, and Logger.Fatalf terminates execution if not.
 			// codeql[incorrect-integer-conversion]: value is checked and fatal error terminates on overflow
 			config.payloadSize = uint16(value)
@@ -430,56 +509,62 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	if eps := os.Getenv(prefix + "EPS"); eps != "" {
 		value, err := strconv.ParseFloat(eps, 64)
 		if err != nil {
-			Logger.Fatalf("Error parsing EPS environment variable: %v", err)
+			Logger.Fatalf(configInvalid("eps", eps).With(errAttr(err)),
+				"Error parsing EPS environment variable: %v", err)
 		}
 		if value < -1 {
 			value = -1
 		}
-		Logger.Print("Overriding eps with environment variable: " + prefix + "EPS" + " with value: " + eps)
+		Logger.Info(configOverride("environment", "eps", eps), "Overriding eps with environment variable: "+prefix+"EPS"+" with value: "+eps)
 		config.eps = value
 	}
 	if compressWhenLengthExceeds := os.Getenv(prefix + "COMPRESS_WHEN_LENGTH_EXCEEDS"); compressWhenLengthExceeds != "" {
 		if compressWhenLengthExceedsInt, err := strconv.Atoi(compressWhenLengthExceeds); err == nil {
-			Logger.Print("Overriding compressWhenLengthExceeds with environment variable: " + prefix + "COMPRESS_WHEN_LENGTH_EXCEEDS" + " with value: " + compressWhenLengthExceeds)
+			Logger.Info(configOverride("environment", "compressWhenLengthExceeds", compressWhenLengthExceeds), "Overriding compressWhenLengthExceeds with environment variable: "+prefix+"COMPRESS_WHEN_LENGTH_EXCEEDS"+" with value: "+compressWhenLengthExceeds)
 			config.compressWhenLengthExceeds = compressWhenLengthExceedsInt
 		}
 	}
 	if partitionStartValue := os.Getenv(prefix + "PARTITION_START_VALUE"); partitionStartValue != "" {
 		value, err := strconv.Atoi(partitionStartValue)
 		if err != nil {
-			Logger.Fatalf("Error parsing PARTITION_START_VALUE environment variable: %v", err)
+			Logger.Fatalf(configInvalid("partitionStartValue", partitionStartValue).With(errAttr(err)),
+				"Error parsing PARTITION_START_VALUE environment variable: %v", err)
 		}
 		if value < 0 {
-			Logger.Fatalf("Error parsing PARTITION_START_VALUE environment variable: %s must be a non-negative integer", partitionStartValue)
+			Logger.Fatalf(configInvalid("partitionStartValue", partitionStartValue),
+				"Error parsing PARTITION_START_VALUE environment variable: %s must be a non-negative integer", partitionStartValue)
 		}
-		Logger.Print("Overriding partitionStartValue with environment variable: " + prefix + "PARTITION_START_VALUE" + " with value: " + partitionStartValue)
+		Logger.Info(configOverride("environment", "partitionStartValue", partitionStartValue), "Overriding partitionStartValue with environment variable: "+prefix+"PARTITION_START_VALUE"+" with value: "+partitionStartValue)
 		config.partitionStartValue = value
 	}
 	if partitionStopValue := os.Getenv(prefix + "PARTITION_STOP_VALUE"); partitionStopValue != "" {
 		value, err := strconv.Atoi(partitionStopValue)
 		if err != nil {
-			Logger.Fatalf("Error parsing PARTITION_STOP_VALUE environment variable: %v", err)
+			Logger.Fatalf(configInvalid("partitionStopValue", partitionStopValue).With(errAttr(err)),
+				"Error parsing PARTITION_STOP_VALUE environment variable: %v", err)
 		}
 		if value < 0 {
-			Logger.Fatalf("Error parsing PARTITION_STOP_VALUE environment variable: %s must be a non-negative integer", partitionStopValue)
+			Logger.Fatalf(configInvalid("partitionStopValue", partitionStopValue),
+				"Error parsing PARTITION_STOP_VALUE environment variable: %s must be a non-negative integer", partitionStopValue)
 		}
-		Logger.Print("Overriding partitionStopValue with environment variable: " + prefix + "PARTITION_STOP_VALUE" + " with value: " + partitionStopValue)
+		Logger.Info(configOverride("environment", "partitionStopValue", partitionStopValue), "Overriding partitionStopValue with environment variable: "+prefix+"PARTITION_STOP_VALUE"+" with value: "+partitionStopValue)
 		config.partitionStopValue = value
 	}
 	if inputFilterRules := os.Getenv(prefix + "INPUT_FILTER_RULES"); inputFilterRules != "" {
-		Logger.Print("Overriding inputFilterRules with environment variable: " + prefix + "INPUT_FILTER_RULES" + " with value: " + inputFilterRules)
+		Logger.Info(configOverride("environment", "inputFilterRules", inputFilterRules), "Overriding inputFilterRules with environment variable: "+prefix+"INPUT_FILTER_RULES"+" with value: "+inputFilterRules)
 		config.inputFilterRules = inputFilterRules
 	}
 	if inputFilterDefaultAction := os.Getenv(prefix + "INPUT_FILTER_DEFAULT_ACTION"); inputFilterDefaultAction != "" {
-		Logger.Print("Overriding inputFilterDefaultAction with environment variable: " + prefix + "INPUT_FILTER_DEFAULT_ACTION" + " with value: " + inputFilterDefaultAction)
+		Logger.Info(configOverride("environment", "inputFilterDefaultAction", inputFilterDefaultAction), "Overriding inputFilterDefaultAction with environment variable: "+prefix+"INPUT_FILTER_DEFAULT_ACTION"+" with value: "+inputFilterDefaultAction)
 		config.inputFilterDefaultAction = strings.ToLower(inputFilterDefaultAction)
 	}
 	if inputFilterTimeout := os.Getenv(prefix + "INPUT_FILTER_TIMEOUT"); inputFilterTimeout != "" {
 		value, err := strconv.Atoi(inputFilterTimeout)
 		if err != nil || value <= 0 {
-			Logger.Fatalf("Error parsing INPUT_FILTER_TIMEOUT environment variable: %v", err)
+			Logger.Fatalf(configInvalid("inputFilterTimeout", inputFilterTimeout),
+				"Error parsing INPUT_FILTER_TIMEOUT environment variable: %v", err)
 		}
-		Logger.Print("Overriding inputFilterTimeout with environment variable: " + prefix + "INPUT_FILTER_TIMEOUT" + " with value: " + inputFilterTimeout)
+		Logger.Info(configOverride("environment", "inputFilterTimeout", inputFilterTimeout), "Overriding inputFilterTimeout with environment variable: "+prefix+"INPUT_FILTER_TIMEOUT"+" with value: "+inputFilterTimeout)
 		config.inputFilterTimeout = value
 	}
 
@@ -492,7 +577,8 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 		if strings.HasPrefix(arg, "--") {
 			kv := strings.SplitN(arg[2:], "=", 2)
 			if len(kv) != 2 {
-				Logger.Warnf("Ignoring malformed command line override: %s", arg)
+				Logger.Warnf(configInvalid("", arg).With(logging.Str("airgap.config.source", "command-line")),
+					"Ignoring malformed command line override: %s", arg)
 				continue
 			}
 			key := kv[0]
@@ -501,6 +587,16 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			switch key {
 			case "id":
 				config.id = value
+				logging.Logger.SetInstanceID(value)
+			case logging.OptionFormat, logging.OptionHash, logging.OptionHashChain,
+				logging.OptionSigningCertificate, logging.OptionSigningKey,
+				logging.OptionSignerID, logging.OptionSigningEKU:
+				if _, err := logging.ApplyOption(key, value); err != nil {
+					logging.Logger.Fatal(configInvalid(key, value).With(
+						logging.Str("airgap.config.source", "command-line"),
+						errAttr(err),
+					), err)
+				}
 			case "nic":
 				config.nic = value
 			case "targetIP":
@@ -508,7 +604,8 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			case "targetPort":
 				v, err := strconv.Atoi(value)
 				if err != nil {
-					Logger.Fatalf("Error parsing targetPort command line argument: %v", err)
+					Logger.Fatalf(configInvalid("targetPort", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing targetPort command line argument: %v", err)
 				}
 				config.targetPort = v
 			case "bootstrapServers":
@@ -536,7 +633,8 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			case "logStatistics":
 				v, err := strconv.Atoi(value)
 				if err != nil {
-					Logger.Fatalf("Error parsing logStatistics command line argument: %v", err)
+					Logger.Fatalf(configInvalid("logStatistics", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing logStatistics command line argument: %v", err)
 				}
 				if v < 0 {
 					v = 0
@@ -553,7 +651,8 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			case "generateNewSymmetricKeyEvery":
 				v, err := strconv.Atoi(value)
 				if err != nil {
-					Logger.Fatalf("Error parsing generateNewSymmetricKeyEvery command line argument: %v", err)
+					Logger.Fatalf(configInvalid("generateNewSymmetricKeyEvery", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing generateNewSymmetricKeyEvery command line argument: %v", err)
 				}
 				if v < 0 {
 					v = 0
@@ -566,15 +665,18 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				}
 				payloadSize, err := strconv.Atoi(value)
 				if err != nil {
-					Logger.Fatalf("Error parsing payloadSize command line argument: %v", err)
+					Logger.Fatalf(configInvalid("payloadSize", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing payloadSize command line argument: %v", err)
 				}
 				if payloadSize < 500 || payloadSize > 65507-protocol.HEADER_SIZE {
 					if payloadSize != 0 { // auto-detect payloadSize when payloadSize=0
-						Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", payloadSize, 65507-protocol.HEADER_SIZE)
+						Logger.Fatalf(configInvalid("payloadSize", value).With(logging.Str("airgap.config.source", "command-line")),
+							"Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", payloadSize, 65507-protocol.HEADER_SIZE)
 					}
 				}
 				if payloadSize < 0 || payloadSize > 65535 {
-					Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values must fit in uint16 (0-65535)", payloadSize)
+					Logger.Fatalf(configInvalid("payloadSize", value).With(logging.Str("airgap.config.source", "command-line")),
+						"Error in config payloadSize. Illegal value: %d. Legal values must fit in uint16 (0-65535)", payloadSize)
 					os.Exit(1)
 				}
 				// Safe: payloadSize is checked to fit in uint16 above, and Logger.Fatalf terminates execution if not.
@@ -582,7 +684,8 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			case "eps":
 				v, err := strconv.ParseFloat(value, 64)
 				if err != nil {
-					Logger.Fatalf("Error parsing eps command line argument: %v", err)
+					Logger.Fatalf(configInvalid("eps", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing eps command line argument: %v", err)
 				}
 				if v < -1 {
 					v = -1
@@ -591,52 +694,63 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			case "compressWhenLengthExceeds":
 				compressWhenLengthExceeds, err := strconv.Atoi(value)
 				if err != nil {
-					Logger.Fatalf("Error parsing compressWhenLengthExceeds value %s. Legal values are positive integers", compressWhenLengthExceeds)
+					Logger.Fatalf(configInvalid("compressWhenLengthExceeds", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing compressWhenLengthExceeds value %s. Legal values are positive integers", value)
 				}
 				config.compressWhenLengthExceeds = compressWhenLengthExceeds
 			case "partition":
 				v, err := strconv.Atoi(value)
 				if err != nil {
-					Logger.Fatalf("Error parsing partition command line argument: %v", err)
+					Logger.Fatalf(configInvalid("partition", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing partition command line argument: %v", err)
 				}
 				if v < 0 {
-					Logger.Fatalf("Error parsing partition command line argument: %s must be a positive integer", value)
+					Logger.Fatalf(configInvalid("partition", value).With(logging.Str("airgap.config.source", "command-line")),
+						"Error parsing partition command line argument: %s must be a positive integer", value)
 				}
 				config.partition = v
 			case "offsetFrom":
 				v, err := strconv.ParseInt(value, 10, 64)
 				if err != nil {
-					Logger.Fatalf("Error parsing offsetFrom command line argument: %v", err)
+					Logger.Fatalf(configInvalid("offsetFrom", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing offsetFrom command line argument: %v", err)
 				}
 				if v < 0 {
-					Logger.Fatalf("Error parsing offsetFrom command line argument: %s must be a positive integer", value)
+					Logger.Fatalf(configInvalid("offsetFrom", value).With(logging.Str("airgap.config.source", "command-line")),
+						"Error parsing offsetFrom command line argument: %s must be a positive integer", value)
 				}
 				config.offsetFrom = v
 			case "offsetTo":
 				v, err := strconv.ParseInt(value, 10, 64)
 				if err != nil {
-					Logger.Fatalf("Error parsing offsetTo command line argument: %v", err)
+					Logger.Fatalf(configInvalid("offsetTo", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing offsetTo command line argument: %v", err)
 				}
 				if v < -1 {
-					Logger.Fatalf("Error parsing offsetTo command line argument: %s must be >= -1", value)
+					Logger.Fatalf(configInvalid("offsetTo", value).With(logging.Str("airgap.config.source", "command-line")),
+						"Error parsing offsetTo command line argument: %s must be >= -1", value)
 				}
 				config.offsetTo = v
 			case "partitionStartValue":
 				v, err := strconv.Atoi(value)
 				if err != nil {
-					Logger.Fatalf("Error parsing partitionStartValue command line argument: %v", err)
+					Logger.Fatalf(configInvalid("partitionStartValue", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing partitionStartValue command line argument: %v", err)
 				}
 				if v < 0 {
-					Logger.Fatalf("Error parsing partitionStartValue command line argument: %s must be a non-negative integer", value)
+					Logger.Fatalf(configInvalid("partitionStartValue", value).With(logging.Str("airgap.config.source", "command-line")),
+						"Error parsing partitionStartValue command line argument: %s must be a non-negative integer", value)
 				}
 				config.partitionStartValue = v
 			case "partitionStopValue":
 				v, err := strconv.Atoi(value)
 				if err != nil {
-					Logger.Fatalf("Error parsing partitionStopValue command line argument: %v", err)
+					Logger.Fatalf(configInvalid("partitionStopValue", value).With(logging.Str("airgap.config.source", "command-line"), errAttr(err)),
+						"Error parsing partitionStopValue command line argument: %v", err)
 				}
 				if v < 0 {
-					Logger.Fatalf("Error parsing partitionStopValue command line argument: %s must be a non-negative integer", value)
+					Logger.Fatalf(configInvalid("partitionStopValue", value).With(logging.Str("airgap.config.source", "command-line")),
+						"Error parsing partitionStopValue command line argument: %s must be a non-negative integer", value)
 				}
 				config.partitionStopValue = v
 			case "inputFilterRules":
@@ -646,15 +760,18 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			case "inputFilterTimeout":
 				v, err := strconv.Atoi(value)
 				if err != nil || v <= 0 {
-					Logger.Fatalf("Error parsing inputFilterTimeout command line argument: must be a positive integer (milliseconds)")
+					Logger.Fatalf(configInvalid("inputFilterTimeout", value).With(logging.Str("airgap.config.source", "command-line")),
+						"Error parsing inputFilterTimeout command line argument: must be a positive integer (milliseconds)")
 				}
 				config.inputFilterTimeout = v
 			default:
 				found = false
-				Logger.Warnf("Unknown command line override: %s", key)
+				Logger.Warnf(configInvalid(key, value).With(logging.Str("airgap.config.source", "command-line")),
+					"Unknown command line override: %s", key)
 			}
 			if found {
-				Logger.Printf("Overriding %s with command line argument: --%s=%s", key, key, value)
+				Logger.Infof(configOverride("command-line", key, value),
+					"Overriding %s with command line argument: --%s=%s", key, key, value)
 			}
 		}
 	}
@@ -663,51 +780,63 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 
 // Check the configuration. On fail, will terminate the application
 func checkConfiguration(result TransferConfiguration) TransferConfiguration {
-	Logger.Print("Validating the configuration...")
+	Logger.Info(logging.Event(logging.EventConfigParse),
+		"Validating the configuration...")
 
 	if result.id == "" {
-		Logger.Fatalf("Missing required configuration: id")
+		Logger.Fatalf(configInvalid("id", result.id).With(logging.Str("error.type", "missing.required")),
+			"Missing required configuration: id")
 	}
 	if result.nic == "" {
-		Logger.Fatalf("Missing required configuration: nic")
+		Logger.Fatalf(configInvalid("nic", result.nic).With(logging.Str("error.type", "missing.required")),
+			"Missing required configuration: nic")
 	}
 	if result.targetIP == "" {
-		Logger.Fatalf("Missing required configuration: targetIP")
+		Logger.Fatalf(configInvalid("targetIP", result.targetIP).With(logging.Str("error.type", "missing.required")),
+			"Missing required configuration: targetIP")
 	}
 	if result.targetPort == 0 {
-		Logger.Fatalf("Missing required configuration: targetPort")
+		Logger.Fatalf(configInvalid("targetPort", strconv.Itoa(result.targetPort)).With(logging.Str("error.type", "missing.required")),
+			"Missing required configuration: targetPort")
 	}
 	if result.logFileName != "" {
 		// Check that the logFileName is a valid file name
 		file, err := os.OpenFile(result.logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
-			Logger.Fatalf("Cannot open log file '%s' for writing: %v", result.logFileName, err)
+			Logger.Fatalf(configInvalid("logFileName", result.logFileName).With(logging.Str("file.path", result.logFileName), errAttr(err)),
+				"Cannot open log file '%s' for writing: %v", result.logFileName, err)
 		}
 		defer file.Close()
 		// Check that we can write to that file
 		if _, err := file.WriteString(""); err != nil {
-			Logger.Fatalf("Cannot write to log file '%s': %v", result.logFileName, err)
+			Logger.Fatalf(configInvalid("logFileName", result.logFileName).With(logging.Str("file.path", result.logFileName), errAttr(err)),
+				"Cannot write to log file '%s': %v", result.logFileName, err)
 		}
 	}
 	if result.logLevel != "" {
 		Logger.SetLogLevel(result.logLevel)
 		var tmp = Logger.GetLogLevel()
 		if (tmp == result.logLevel) == false {
-			Logger.Fatalf("Error in config logLevel. Illegal value: %s. Legal values are TRACE, DEBUG, INFO, WARN, ERROR, FATAL", result.logLevel)
+			Logger.Fatalf(configInvalid("logLevel", result.logLevel),
+				"Error in config logLevel. Illegal value: %s. Legal values are TRACE, DEBUG, INFO, WARN, ERROR, FATAL", result.logLevel)
 		} else {
-			Logger.Printf("logLevel: %s", tmp)
+			Logger.Infof(configApplied("logLevel", tmp),
+				"logLevel: %s", tmp)
 		}
 	}
 	// if one of certFile, keyFile or caFile is given, they all must be
 	if result.certFile != "" || result.keyFile != "" || result.caFile != "" {
 		if result.certFile == "" {
-			Logger.Fatalf("Missing required configuration: certFile")
+			Logger.Fatalf(configInvalid("certFile", result.certFile).With(logging.Str("error.type", "missing.required")),
+				"Missing required configuration: certFile")
 		}
 		if result.keyFile == "" {
-			Logger.Fatalf("Missing required configuration: keyFile")
+			Logger.Fatalf(configInvalid("keyFile", result.keyFile).With(logging.Str("error.type", "missing.required")),
+				"Missing required configuration: keyFile")
 		}
 		if result.caFile == "" {
-			Logger.Fatalf("Missing required configuration: caFile")
+			Logger.Fatalf(configInvalid("caFile", result.caFile).With(logging.Str("error.type", "missing.required")),
+				"Missing required configuration: caFile")
 		}
 	}
 	if result.keyPasswordFile != "" && (result.keyFile != "" || result.certFile != "" || result.caFile != "") {
@@ -715,58 +844,78 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		absPath, _ := filepath.Abs(result.keyPasswordFile)
 		file, err := os.Open(result.keyPasswordFile)
 		if err != nil {
-			Logger.Fatalf("Cannot open keyPasswordFile '%s' (absolute path: '%s'): %v", result.keyPasswordFile, absPath, err)
+			Logger.Fatalf(configInvalid("keyPasswordFile", result.keyPasswordFile).With(logging.Str("file.path", absPath), errAttr(err)),
+				"Cannot open keyPasswordFile '%s' (absolute path: '%s'): %v", result.keyPasswordFile, absPath, err)
 		}
 		defer file.Close()
 	}
 	if result.limit != "all" && result.limit != "first" {
-		Logger.Fatalf("Error in config limit. Illegal value: %s. Legal values are all, first", result.limit)
+		Logger.Fatalf(configInvalid("limit", result.limit),
+			"Error in config limit. Illegal value: %s. Legal values are all, first", result.limit)
 	}
 	if result.resendFileName != "" {
 		// Check that the resendFileName is a valid file name and that we can read from it
 		file, err := os.OpenFile(result.resendFileName, os.O_RDONLY, 0644)
 		if err != nil {
-			Logger.Fatalf("Cannot open result file '%s' for reading: %v", result.resendFileName, err)
+			Logger.Fatalf(configInvalid("resendFileName", result.resendFileName).With(logging.Str("file.path", result.resendFileName), errAttr(err)),
+				"Cannot open result file '%s' for reading: %v", result.resendFileName, err)
 		}
 		defer file.Close()
 	}
 	if result.encryption {
 		if result.publicKeyFile == "" {
-			Logger.Fatalf("encryption is enabled, but publicKeyFile is not set")
+			Logger.Fatalf(configInvalid("publicKeyFile", result.publicKeyFile).With(logging.Str("error.type", "missing.required")),
+				"encryption is enabled, but publicKeyFile is not set")
 		} else {
 			pubKey := readPublicKey(result.publicKeyFile)
 			if pubKey == nil {
-				Logger.Fatalf("Failed to load public key from file '%s': %v", result.publicKeyFile)
+				Logger.Fatalf(logging.Event(logging.EventCryptoKeyLoad,
+					logging.Failure(),
+					logging.Str("file.path", result.publicKeyFile),
+				),
+					"Failed to load public key from file '%s'", result.publicKeyFile)
 			}
 			result.publicKey = pubKey
-			Logger.Printf("Loaded public key from file '%s'", result.publicKeyFile)
+			Logger.Infof(logging.Event(logging.EventCryptoKeyLoad,
+				logging.Str("file.path", result.publicKeyFile),
+			),
+				"Loaded public key from file '%s'", result.publicKeyFile)
 		}
 		if result.generateNewSymmetricKeyEvery < 0 {
-			Logger.Fatalf("Error in config generateNewSymmetricKeyEvery. Illegal value: %d. Legal values are 0 or higher", result.generateNewSymmetricKeyEvery)
+			Logger.Fatalf(configInvalid("generateNewSymmetricKeyEvery", strconv.Itoa(result.generateNewSymmetricKeyEvery)),
+				"Error in config generateNewSymmetricKeyEvery. Illegal value: %d. Legal values are 0 or higher", result.generateNewSymmetricKeyEvery)
 		}
 		if result.generateNewSymmetricKeyEvery > 0 {
 			nextKeyGeneration = time.Now().Add(time.Duration(result.generateNewSymmetricKeyEvery) * time.Second)
-			Logger.Printf("New symmetric keys will be generated every %d seconds", result.generateNewSymmetricKeyEvery)
+			Logger.Infof(configApplied("generateNewSymmetricKeyEvery", strconv.Itoa(result.generateNewSymmetricKeyEvery)),
+				"New symmetric keys will be generated every %d seconds", result.generateNewSymmetricKeyEvery)
 		} else {
-			Logger.Printf("The same symmetric key will be used for the entire session")
+			Logger.Info(configApplied("generateNewSymmetricKeyEvery", strconv.Itoa(result.generateNewSymmetricKeyEvery)),
+				"The same symmetric key will be used for the entire session")
 		}
-		Logger.Printf("Symmetric key generated")
+		Logger.Info(logging.Event(logging.EventCryptoKeyLoad),
+			"Symmetric key generated")
 	} else {
-		Logger.Printf("encryption is disabled")
+		Logger.Info(configApplied("encryption", strconv.FormatBool(result.encryption)),
+			"encryption is disabled")
 	}
 	if result.payloadSize < 500 || result.payloadSize > 65507 {
 		if result.payloadSize != 0 { // auto-detect payloadSize when payloadSize=0
-			Logger.Fatalf("Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", result.payloadSize, 65507-protocol.HEADER_SIZE)
+			Logger.Fatalf(configInvalid("payloadSize", strconv.Itoa(int(result.payloadSize))),
+				"Error in config payloadSize. Illegal value: %d. Legal values are between 500 and %d", result.payloadSize, 65507-protocol.HEADER_SIZE)
 		}
 	}
 	if result.eps < -1 {
-		Logger.Fatalf("Error in config eps. Illegal value: %d. Legal values are -1 or higher", result.eps)
+		Logger.Fatalf(configInvalid("eps", strconv.FormatFloat(result.eps, 'f', -1, 64)),
+			"Error in config eps. Illegal value: %v. Legal values are -1 or higher", result.eps)
 	}
 	if result.partitionStartValue < 0 {
-		Logger.Fatalf("Error in config partitionStartValue. Illegal value: %d. Legal values are 0 or higher", result.partitionStartValue)
+		Logger.Fatalf(configInvalid("partitionStartValue", strconv.Itoa(result.partitionStartValue)),
+			"Error in config partitionStartValue. Illegal value: %d. Legal values are 0 or higher", result.partitionStartValue)
 	}
 	if result.partitionStopValue < 0 {
-		Logger.Fatalf("Error in config partitionStopValue. Illegal value: %d. Legal values are 0 or higher", result.partitionStopValue)
+		Logger.Fatalf(configInvalid("partitionStopValue", strconv.Itoa(result.partitionStopValue)),
+			"Error in config partitionStopValue. Illegal value: %d. Legal values are 0 or higher", result.partitionStopValue)
 	}
 
 	// Set up input filtering based on payload content
@@ -775,18 +924,23 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		timeout := time.Duration(result.inputFilterTimeout) * time.Millisecond
 		result.inputFilter, err = inputfilter.LoadFilterRules(result.inputFilterRules, result.inputFilterDefaultAction, timeout)
 		if err != nil {
-			Logger.Fatalf("Error loading input filter rules: %v", err)
+			Logger.Fatalf(configInvalid("inputFilterRules", result.inputFilterRules).With(errAttr(err)),
+				"Error loading input filter rules: %v", err)
 		}
-		Logger.Printf("Input filtering is enabled")
-		Logger.Print(result.inputFilter.GetRulesSummary())
+		Logger.Info(configApplied("inputFilterRules", result.inputFilterRules),
+			"Input filtering is enabled")
+		Logger.Info(configApplied("inputFilterRules", result.inputFilterRules),
+			result.inputFilter.GetRulesSummary())
 	} else {
 		result.inputFilter = nil
-		Logger.Printf("No input filtering is enabled.")
+		Logger.Info(configApplied("inputFilterRules", result.inputFilterRules),
+			"No input filtering is enabled.")
 	}
 
 	if result.logFileName != "" {
 		if err := Logger.SetLogFile(result.logFileName); err != nil {
-			Logger.Fatal(err)
+			Logger.Fatal(configInvalid("logFileName", result.logFileName).With(logging.Str("file.path", result.logFileName), errAttr(err)),
+				err)
 		}
 	}
 	result.WarnProductionConfiguration("startup")
@@ -794,39 +948,72 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 }
 
 func logConfiguration(config TransferConfiguration) {
-	Logger.Printf("Configuration:")
-	Logger.Printf("  id: %s", config.id)
-	Logger.Printf("  nic: %s", config.nic)
-	Logger.Printf("  targetIP: %s", config.targetIP)
-	Logger.Printf("  targetPort: %d", config.targetPort)
-	Logger.Printf("  logLevel: %s", config.logLevel)
-	Logger.Printf("  logFileName: %s", config.logFileName)
-	Logger.Printf("  bootstrapServers: %s", config.bootstrapServers)
-	Logger.Printf("  topic: %s", config.topic)
-	Logger.Printf("  groupID: %s", config.groupID)
-	Logger.Printf("  limit: %s", config.limit)
-	Logger.Printf("  certFile: %s", config.certFile)
-	Logger.Printf("  keyFile: %s", config.keyFile)
-	Logger.Printf("  keyPasswordFile: [set]")
-	Logger.Printf("  caFile: %s", config.caFile)
-	Logger.Printf("  resendFileName: %s", config.resendFileName)
-	Logger.Printf("  logStatistics: %d", config.logStatistics)
-	Logger.Printf("  from: %s", config.from)
-	Logger.Printf("  to: %s", config.to)
-	Logger.Printf("  encryption: %t", config.encryption)
-	Logger.Printf("  eps: %f", config.eps)
+	Logger.Info(logging.Event(logging.EventConfigApplied),
+		"Configuration:")
+	Logger.Infof(configApplied("id", config.id),
+		"  id: %s", config.id)
+	Logger.Infof(configApplied("nic", config.nic),
+		"  nic: %s", config.nic)
+	Logger.Infof(configApplied("targetIP", config.targetIP),
+		"  targetIP: %s", config.targetIP)
+	Logger.Infof(configApplied("targetPort", strconv.Itoa(config.targetPort)),
+		"  targetPort: %d", config.targetPort)
+	Logger.Infof(configApplied("logLevel", config.logLevel),
+		"  logLevel: %s", config.logLevel)
+	Logger.Infof(configApplied("logFileName", config.logFileName),
+		"  logFileName: %s", config.logFileName)
+	Logger.Infof(configApplied("bootstrapServers", config.bootstrapServers),
+		"  bootstrapServers: %s", config.bootstrapServers)
+	Logger.Infof(configApplied("topic", config.topic),
+		"  topic: %s", config.topic)
+	Logger.Infof(configApplied("groupID", config.groupID),
+		"  groupID: %s", config.groupID)
+	Logger.Infof(configApplied("limit", config.limit),
+		"  limit: %s", config.limit)
+	Logger.Infof(configApplied("certFile", config.certFile),
+		"  certFile: %s", config.certFile)
+	Logger.Infof(configApplied("keyFile", config.keyFile),
+		"  keyFile: %s", config.keyFile)
+	Logger.Info(configApplied("keyPasswordFile", "[set]"),
+		"  keyPasswordFile: [set]")
+	Logger.Infof(configApplied("caFile", config.caFile),
+		"  caFile: %s", config.caFile)
+	Logger.Infof(configApplied("resendFileName", config.resendFileName),
+		"  resendFileName: %s", config.resendFileName)
+	Logger.Infof(configApplied("logStatistics", strconv.Itoa(config.logStatistics)),
+		"  logStatistics: %d", config.logStatistics)
+	Logger.Infof(configApplied("from", config.from),
+		"  from: %s", config.from)
+	Logger.Infof(configApplied("to", config.to),
+		"  to: %s", config.to)
+	Logger.Infof(configApplied("encryption", strconv.FormatBool(config.encryption)),
+		"  encryption: %t", config.encryption)
+	Logger.Infof(configApplied("eps", strconv.FormatFloat(config.eps, 'f', -1, 64)),
+		"  eps: %f", config.eps)
 	if config.encryption {
-		Logger.Printf("  publicKeyFile: %s", config.publicKeyFile)
-		Logger.Printf("  generateNewSymmetricKeyEvery: %d", config.generateNewSymmetricKeyEvery)
+		Logger.Infof(configApplied("publicKeyFile", config.publicKeyFile),
+			"  publicKeyFile: %s", config.publicKeyFile)
+		Logger.Infof(configApplied("generateNewSymmetricKeyEvery", strconv.Itoa(config.generateNewSymmetricKeyEvery)),
+			"  generateNewSymmetricKeyEvery: %d", config.generateNewSymmetricKeyEvery)
 	}
-	Logger.Printf("  payloadSize: %d", config.payloadSize)
-	Logger.Printf("  compressWhenLengthExceeds: %d bytes", config.compressWhenLengthExceeds)
-	Logger.Printf("  partition: %d", config.partition)
-	Logger.Printf("  partitionStartValue: %d", config.partitionStartValue)
-	Logger.Printf("  partitionStopValue: %d", config.partitionStopValue)
-	Logger.Printf("  offsetFrom: %d", config.offsetFrom)
-	Logger.Printf("  offsetTo: %d", config.offsetTo)
-	Logger.Printf("  inputFilterRules: %s", config.inputFilterRules)
-	Logger.Printf("  inputFilterDefaultAction: %s", config.inputFilterDefaultAction)
-	Logger.Printf("  inputFilterTimeout: %dms", config.inputFilterTimeout)
+	Logger.Infof(configApplied("payloadSize", strconv.Itoa(int(config.payloadSize))),
+		"  payloadSize: %d", config.payloadSize)
+	Logger.Infof(configApplied("compressWhenLengthExceeds", strconv.Itoa(config.compressWhenLengthExceeds)),
+		"  compressWhenLengthExceeds: %d bytes", config.compressWhenLengthExceeds)
+	Logger.Infof(configApplied("partition", strconv.Itoa(config.partition)),
+		"  partition: %d", config.partition)
+	Logger.Infof(configApplied("partitionStartValue", strconv.Itoa(config.partitionStartValue)),
+		"  partitionStartValue: %d", config.partitionStartValue)
+	Logger.Infof(configApplied("partitionStopValue", strconv.Itoa(config.partitionStopValue)),
+		"  partitionStopValue: %d", config.partitionStopValue)
+	Logger.Infof(configApplied("offsetFrom", strconv.FormatInt(config.offsetFrom, 10)),
+		"  offsetFrom: %d", config.offsetFrom)
+	Logger.Infof(configApplied("offsetTo", strconv.FormatInt(config.offsetTo, 10)),
+		"  offsetTo: %d", config.offsetTo)
+	Logger.Infof(configApplied("inputFilterRules", config.inputFilterRules),
+		"  inputFilterRules: %s", config.inputFilterRules)
+	Logger.Infof(configApplied("inputFilterDefaultAction", config.inputFilterDefaultAction),
+		"  inputFilterDefaultAction: %s", config.inputFilterDefaultAction)
+	Logger.Infof(configApplied("inputFilterTimeout", strconv.Itoa(config.inputFilterTimeout)),
+		"  inputFilterTimeout: %dms", config.inputFilterTimeout)
 }

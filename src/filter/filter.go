@@ -51,14 +51,27 @@ func NewFilter(config string) (*Filter, error) {
 
 	k := groups[1][0] - groups[0][0]
 	if groups[2][0] != groups[1][0]+k {
-		Logger.Fatalf("The third group starts with an unexpected number. Got %d but expected %d",
+		Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "deliverFilter"),
+			logging.Int("airgap.filter.group_start.actual", groups[2][0]),
+			logging.Int("airgap.filter.group_start.expected", groups[1][0]+k),
+		), "The third group starts with an unexpected number. Got %d but expected %d",
 			groups[2][0], groups[1][0]+k)
 	}
 	e := doSelfTest(groups, k)
 	if e != nil {
-		Logger.Fatalf("The self test of the expression %s failed with error: %v", config, e)
+		Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "deliverFilter"),
+			logging.Str("airgap.config.value", config),
+			logging.ErrorType(e),
+		), "The self test of the expression %s failed with error: %v", config, e)
 	} else {
-		Logger.Printf("Self test of the expression ok")
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "deliverFilter"),
+			logging.Str("airgap.config.value", config),
+		), "Self test of the expression ok")
 	}
 	return &Filter{
 		groups: groups,
@@ -118,10 +131,19 @@ func doSelfTest(groups [][]int64, k int64) error {
 	for i := 1; i <= largestNumber; i++ {
 		valid := isValidNumber(int64(i), groups, k) // Convert i to int64
 		isInGroups := inGroup(int64(i), groups)     // Convert i to int64
-		Logger.Printf("%d: isValid returned %v inGroup returned %v",
+		Logger.Infof(logging.Event(logging.EventMessageFilter,
+			logging.Int("airgap.message.number", int64(i)),
+			logging.Bool("airgap.filter.valid", valid),
+			logging.Bool("airgap.filter.in_group", isInGroups),
+		), "%d: isValid returned %v inGroup returned %v",
 			i, valid, isInGroups)
 		if valid != isInGroups {
-			Logger.Printf("%d: isValid returned %v inGroup returned %v",
+			Logger.Infof(logging.Event(logging.EventMessageFilter,
+				logging.Failure(),
+				logging.Int("airgap.message.number", int64(i)),
+				logging.Bool("airgap.filter.valid", valid),
+				logging.Bool("airgap.filter.in_group", isInGroups),
+			), "%d: isValid returned %v inGroup returned %v",
 				i, valid, isInGroups)
 			return fmt.Errorf("self test failed for %d: isValid returned %v, inGroup returned %v",
 				i, valid, isInGroups)
@@ -139,11 +161,18 @@ func doSelfTest(groups [][]int64, k int64) error {
 func main() {
 	f, err := NewFilter("2,3,22,23,42,43")
 	if err != nil {
-		Logger.Fatalf("Error creating filter: %v", err)
+		Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "deliverFilter"),
+			logging.ErrorType(err),
+		), "Error creating filter: %v", err)
 	}
 
 	from := int64(23413421342141234)
 	for i := from; i < 20+from; i++ {
-		Logger.Printf("%d -> %v", i, f.Check(i))
+		Logger.Infof(logging.Event(logging.EventMessageFilter,
+			logging.Int("airgap.message.number", i),
+			logging.Bool("airgap.filter.deliver", f.Check(i)),
+		), "%d -> %v", i, f.Check(i))
 	}
 }

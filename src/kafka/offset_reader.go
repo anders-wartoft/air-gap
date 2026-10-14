@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
+	"sitia.nu/airgap/src/logging"
 )
 
 // ReadFromOffset starts a partition consumer at startOffset (inclusive) and forwards messages to callback until ctx is done.
@@ -182,7 +183,12 @@ func TailTopic(ctx context.Context, brokers, topic string, callback func(string,
 			defer wg.Done()
 			pc, err := consumer.ConsumePartition(topic, partition, sarama.OffsetNewest)
 			if err != nil {
-				Logger.Errorf("TailTopic: consume partition %d: %v", partition, err)
+				Logger.Errorf(logging.Event(logging.EventKafkaConsume,
+					logging.Failure(),
+					logging.Str("messaging.destination.name", topic),
+					logging.Decimal("messaging.destination.partition.id", int64(partition)),
+					logging.ErrorType(err),
+				), "TailTopic: consume partition %d: %v", partition, err)
 				return
 			}
 			defer pc.Close()

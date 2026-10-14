@@ -17,6 +17,7 @@ import (
 
 	"github.com/RoaringBitmap/roaring"
 	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/version"
 )
 
@@ -111,8 +112,11 @@ func bitmapToRanges(rb *roaring.Bitmap) [][]int64 {
 // It reads a configuration file from the command line parameter,
 // initializes the necessary variables, and starts the upstream process.
 func Main(BuildNumber string, kafkaReader KafkaReader) {
-	Logger.Printf("CreateResourceBundle version: %s starting up...", version.GitVersion)
-	Logger.Printf("Build number: %s", BuildNumber)
+	Logger.Infof(logging.Event(logging.EventAppStart),
+		"CreateResourceBundle version: %s starting up...", version.GitVersion)
+	Logger.Infof(logging.Event(logging.EventAppStart,
+		logging.Str("airgap.build.number", BuildNumber),
+	), "Build number: %s", BuildNumber)
 	fileName := ""
 	var overrideArgs []string
 	// Parse command line: first non-dashed argument is fileName, rest are overrides
@@ -122,7 +126,11 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 		} else if fileName == "" {
 			fileName = arg
 		} else {
-			Logger.Fatalf("Too many non-dashed command line parameters. Only one property file allowed.")
+			Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.config.source", "command-line"),
+				logging.Str("airgap.config.value", arg),
+			), "Too many non-dashed command line parameters. Only one property file allowed.")
 		}
 	}
 
@@ -151,16 +159,24 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 		// Make sure we have everything we need in the config
 		configuration = checkConfiguration(configuration)
 		if err != nil {
-			Logger.Fatalf("Error reading configuration file %s: %v", fileName, err)
+			Logger.Fatalf(logging.Event(logging.EventConfigLoad,
+				logging.Str("file.path", fileName),
+			).Merge(logging.Err(err)), "Error reading configuration file %s: %v", fileName, err)
 		}
 		// Add to package variable
 		config = configuration
 
 		// Set the log file name
 		if config.logFileName != "" {
-			Logger.Print("Configuring log to: " + config.logFileName)
-			Logger.Printf("CreateResourceBundle version: %s", version.GitVersion)
-			Logger.Print("Log to file started up")
+			Logger.Info(logging.Event(logging.EventConfigApplied,
+				logging.Str("airgap.config.setting", "logFileName"),
+				logging.Str("file.path", config.logFileName),
+			), "Configuring log to: "+config.logFileName)
+			Logger.Infof(logging.Event(logging.EventAppStart),
+				"CreateResourceBundle version: %s", version.GitVersion)
+			Logger.Info(logging.Event(logging.EventAppStart,
+				logging.Str("file.path", config.logFileName),
+			), "Log to file started up")
 		}
 
 		// Now log the complete configuration to stdout or file
@@ -177,7 +193,9 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 			defer close(signalHandlerStopped)
 			select {
 			case <-sigterm:
-				Logger.Print("Received termination signal, stopping create")
+				Logger.Info(logging.Event(logging.EventAppShutdown,
+					logging.Str("airgap.shutdown.reason", "sigterm"),
+				), "Received termination signal, stopping create")
 				cancel()
 			case <-signalHandlerDone:
 			}
@@ -192,22 +210,41 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 			atomic.AddInt64(&totalReceived, 1)
 			pw, err := parseGapPayload(key, received)
 			if err != nil {
-				Logger.Errorf("Failed to parse gap message: %v", err)
+				Logger.Errorf(logging.Event(logging.EventCreateScan,
+					logging.Str("airgap.message.id", id),
+					logging.Str("messaging.destination.name", config.topic),
+				).Merge(logging.Err(err)), "Failed to parse gap message: %v", err)
 				return keepRunning
 			}
-			Logger.Debugf("Parsed gap window: topic=%s, partition=%d, windowMin=%d, windowMax=%d, gaps=%v",
+			Logger.Debugf(logging.Event(logging.EventCreateScan,
+				logging.Str("messaging.destination.name", pw.topic),
+				logging.Decimal("messaging.destination.partition.id", int64(pw.partition)),
+				logging.Int("airgap.gap.window.min", pw.windowMin),
+				logging.Int("airgap.gap.window.max", pw.windowMax),
+				logging.Int("airgap.gap.count", int64(len(pw.relGaps))),
+			), "Parsed gap window: topic=%s, partition=%d, windowMin=%d, windowMax=%d, gaps=%v",
 				pw.topic, pw.partition, pw.windowMin, pw.windowMax, pw.relGaps)
 			keyStr := fmt.Sprintf("%s-%d-%d", pw.topic, pw.partition, pw.windowMin)
 			lastEntries[keyStr] = pw
 			return keepRunning
 		}
 
-		Logger.Printf("Reading from Kafka %s", config.bootstrapServers)
+		Logger.Infof(logging.Event(logging.EventKafkaConsume,
+			logging.Str("server.address", config.bootstrapServers),
+			logging.Str("messaging.destination.name", config.topic),
+			logging.Str("messaging.consumer.group.name", config.groupID),
+		), "Reading from Kafka %s", config.bootstrapServers)
 		if configuration.certFile != "" || configuration.keyFile != "" || configuration.caFile != "" {
-			Logger.Print("Using TLS for Kafka")
+			Logger.Info(logging.Event(logging.EventTLSHandshake,
+				logging.Str("server.address", config.bootstrapServers),
+				logging.Str("file.path", configuration.certFile),
+			), "Using TLS for Kafka")
 			_, err := kafka.SetTLSConfigParameters(configuration.certFile, configuration.keyFile, configuration.caFile, configuration.keyPasswordFile)
 			if err != nil {
-				Logger.Panicf("Failed to configure TLS: %v", err)
+				Logger.Panicf(logging.Event(logging.EventTLSHandshake,
+					logging.Str("server.address", config.bootstrapServers),
+					logging.Str("file.path", configuration.certFile),
+				).Merge(logging.Err(err)), "Failed to configure TLS: %v", err)
 			}
 		}
 
@@ -216,7 +253,11 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 		// Read all available messages, then exit
 		err = kafkaReader.ReadToEnd(ctx, config.bootstrapServers, config.topic, group, kafkaHandler)
 		if err != nil && ctx.Err() == nil {
-			Logger.Fatalf("Error reading to end of topic: %v", err)
+			Logger.Fatalf(logging.Event(logging.EventKafkaConsume,
+				logging.Str("server.address", config.bootstrapServers),
+				logging.Str("messaging.destination.name", config.topic),
+				logging.Str("messaging.consumer.group.name", group),
+			).Merge(logging.Err(err)), "Error reading to end of topic: %v", err)
 		}
 
 		writeResults(lastEntries, config)
@@ -228,7 +269,7 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 	<-signalHandlerStopped
 	cancel()
 	// Exit after reload finishes (batch mode)
-	Logger.Print("CreateResourceBundle finished, exiting.")
+	Logger.Info(logging.Event(logging.EventAppStop), "CreateResourceBundle finished, exiting.")
 	config.WarnProductionConfiguration("shutdown")
 	os.Exit(0)
 }
@@ -281,13 +322,27 @@ func writeResults(lastEntries map[string]parsedWindow, config TransferConfigurat
 			for _, gap := range w.relGaps {
 				if len(gap) == 1 {
 					absOffset := gap[0] + w.windowMin
-					Logger.Debugf("Converting gap [%d] in window [%d..%d] to absolute offset [%d]",
+					Logger.Debugf(logging.Event(logging.EventCreateScan,
+						logging.Str("messaging.destination.name", w.topic),
+						logging.Decimal("messaging.destination.partition.id", int64(w.partition)),
+						logging.Int("airgap.gap.window.min", w.windowMin),
+						logging.Int("airgap.gap.window.max", w.windowMax),
+						logging.Int("airgap.gap.from", absOffset),
+					), "Converting gap [%d] in window [%d..%d] to absolute offset [%d]",
 						gap[0], w.windowMin, w.windowMax, absOffset)
 					absoluteGaps = append(absoluteGaps, []interface{}{float64(absOffset)})
 				} else if len(gap) == 2 {
 					absFrom := gap[0] + w.windowMin
 					absTo := gap[1] + w.windowMin
-					Logger.Debugf("Converting gap [%d,%d] in window [%d..%d] to absolute offsets [%d,%d]",
+					Logger.Debugf(logging.Event(logging.EventCreateScan,
+						logging.Str("messaging.destination.name", w.topic),
+						logging.Decimal("messaging.destination.partition.id", int64(w.partition)),
+						logging.Int("airgap.gap.window.min", w.windowMin),
+						logging.Int("airgap.gap.window.max", w.windowMax),
+						logging.Int("airgap.gap.from", absFrom),
+						logging.Int("airgap.gap.to", absTo),
+						logging.Int("airgap.gap.length", absTo-absFrom+1),
+					), "Converting gap [%d,%d] in window [%d..%d] to absolute offsets [%d,%d]",
 						gap[0], gap[1], w.windowMin, w.windowMax, absFrom, absTo)
 					absoluteGaps = append(absoluteGaps, []interface{}{
 						float64(absFrom),
@@ -312,7 +367,10 @@ func writeResults(lastEntries map[string]parsedWindow, config TransferConfigurat
 
 		b, err := json.Marshal(outputEntry)
 		if err != nil {
-			Logger.Errorf("Failed to marshal entry: %v", err)
+			Logger.Errorf(logging.Event(logging.EventCreateFileWrite,
+				logging.Str("messaging.destination.name", first.topic),
+				logging.Decimal("messaging.destination.partition.id", int64(first.partition)),
+			).Merge(logging.Err(err)), "Failed to marshal entry: %v", err)
 			continue
 		}
 		results = append(results, json.RawMessage(b))
@@ -333,9 +391,14 @@ func writeResults(lastEntries map[string]parsedWindow, config TransferConfigurat
 	if config.resendFileName != "" {
 		err := os.WriteFile(config.resendFileName, []byte(outputStr), 0644)
 		if err != nil {
-			Logger.Errorf("Failed to write resend file: %v", err)
+			Logger.Errorf(logging.Event(logging.EventCreateFileWrite,
+				logging.Str("file.path", config.resendFileName),
+			).Merge(logging.Err(err)), "Failed to write resend file: %v", err)
 		} else {
-			Logger.Printf("Results written to %s", config.resendFileName)
+			Logger.Infof(logging.Event(logging.EventCreateFileWrite,
+				logging.Str("file.path", config.resendFileName),
+				logging.Int("airgap.resend.result.count", int64(len(results))),
+			), "Results written to %s", config.resendFileName)
 		}
 	} else {
 		fmt.Println(outputStr)

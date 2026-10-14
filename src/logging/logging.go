@@ -1,10 +1,14 @@
 package logging
 
 import (
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Log levels
@@ -22,18 +26,189 @@ const (
 var logLevel = INFO // default
 var logger = log.New(os.Stderr, "", log.LstdFlags)
 
-// StdLogger exposes the underlying *log.Logger for use with libraries like Sarama
+// StdLogger exposes the underlying *log.Logger for use with libraries like Sarama.
+// Records written through it bypass the integrity chain, because they do not pass
+// through emit.
 var StdLogger = logger
+
+// output mirrors the destination held by logger. The standard logger prefixes
+// every line with a timestamp, which OTLP/JSON must not carry, so structured
+// records are written to this writer directly.
+var output io.Writer = os.Stderr
+
+// emitMu serialises the whole emit path. Sequence numbers and chain values must
+// follow the order records actually reach the output, so the integrity state is
+// updated under the same lock that performs the write.
+var emitMu sync.Mutex
+
+var integrity integrityState
+
+var logFormat = FormatText
 
 // LoggerType for OOP-style logging
 type LoggerType struct{}
 
 var Logger = &LoggerType{}
 
+// SetFormat selects the output encoding, either text or otel.
+func (l *LoggerType) SetFormat(format string) error {
+	normalized := strings.ToLower(strings.TrimSpace(format))
+	switch normalized {
+	case "", FormatText:
+		normalized = FormatText
+	case FormatOTel, "otlp", "otlp/json":
+		normalized = FormatOTel
+	default:
+		return fmt.Errorf("unsupported log format %q, supported values are %s and %s",
+			format, FormatText, FormatOTel)
+	}
+
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	logFormat = normalized
+	return nil
+}
+
+// GetFormat returns the active output encoding.
+func (l *LoggerType) GetFormat() string {
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	return logFormat
+}
+
+// SetHashAlgorithm enables per-record payload hashing. An empty value or "none"
+// disables hashing, and with it the chain.
+func (l *LoggerType) SetHashAlgorithm(algorithm string) error {
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	return integrity.configureIntegrity(algorithm)
+}
+
+// SetHashChainLength sets the anchor interval of the hash chain. Zero leaves
+// records with only their own payload hash.
+func (l *LoggerType) SetHashChainLength(length int) error {
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	return integrity.configureChainLength(length)
+}
+
+// writeRecord renders and writes a single record, and advances the integrity
+// state. The caller must hold emitMu.
+//
+// Semantic attributes are emitted in OTLP output only. Text output is the
+// historical, human-readable format, and keeping it byte-identical is what
+// allows otel to be opt-in without changing any existing installation.
+func writeRecord(timestamp time.Time, level LogLevel, body string, semantic Attrs, extra []Attr) []Attr {
+	if level >= ERROR {
+		semantic = semantic.With(Failure())
+	}
+	stamped := integrity.stamp(body)
+	writeRecordWithStamp(timestamp, level, body, semantic, extra, stamped)
+	return stamped
+}
+
+func writeRecordWithStamp(timestamp time.Time, level LogLevel, body string, semantic Attrs, extra, stamped []Attr) {
+	if logFormat != FormatOTel {
+		var attrs []Attr
+		if len(extra) > 0 || len(stamped) > 0 {
+			attrs = make([]Attr, 0, len(extra)+len(stamped))
+			attrs = append(attrs, extra...)
+			attrs = append(attrs, stamped...)
+		}
+
+		logger.Print(formatTextRecord(level, body, attrs))
+		return
+	}
+
+	semantic = sanitize(semantic)
+
+	var attrs []Attr
+	if len(semantic) > 0 || len(extra) > 0 || len(stamped) > 0 {
+		attrs = make([]Attr, 0, len(semantic)+len(extra)+len(stamped))
+		attrs = append(attrs, semantic...)
+		attrs = append(attrs, extra...)
+		attrs = append(attrs, stamped...)
+	}
+
+	line, err := encodeOTLP(timestamp, level, body, attrs)
+	if err != nil {
+		// Never lose a record because it could not be encoded.
+		logger.Printf("[ERROR] failed to encode log record as OTLP/JSON: %v", err)
+		return
+	}
+
+	line = append(line, '\n')
+	if _, err := output.Write(line); err != nil {
+		logger.Printf("[ERROR] failed to write log record: %v", err)
+	}
+}
+
+// formatTextRecord keeps the historical layout and appends integrity attributes
+// as trailing key=value pairs when they are enabled.
+func formatTextRecord(level LogLevel, body string, attrs []Attr) string {
+	line := "[" + severityText(level) + "] " + body
+	if len(attrs) == 0 {
+		return line
+	}
+
+	var builder strings.Builder
+	builder.WriteString(line)
+	for _, attr := range attrs {
+		builder.WriteString(" ")
+		builder.WriteString(attr.Key)
+		builder.WriteString("=")
+		builder.WriteString(attr.Value)
+	}
+
+	return builder.String()
+}
+
+// emit writes one record and, when the chain window is full, the anchor that
+// closes it. The anchor is written under the same lock so that no other record
+// can slip between the window and its anchor.
+func emit(level LogLevel, attrs Attrs, body string) {
+	emitMu.Lock()
+	defer emitMu.Unlock()
+
+	now := time.Now()
+	writeRecord(now, level, body, attrs, nil)
+
+	if integrity.anchorDue() {
+		anchorAttrs := integrity.anchorAttributes()
+		anchorStamped := integrity.stamp(anchorBody)
+		signatureAttrs, err := integrity.signAnchor(anchorAttrs, anchorStamped)
+		if err != nil {
+			logger.Printf("[ERROR] failed to sign log checkpoint: %v", err)
+			signatureAttrs = []Attr{{
+				Key:   AttrSignatureError,
+				Value: err.Error(),
+			}}
+		}
+		anchorAttrs = append(anchorAttrs, signatureAttrs...)
+		writeRecordWithStamp(now, INFO, anchorBody, Event(EventLogAnchor), anchorAttrs, anchorStamped)
+		integrity.finishAnchor()
+	}
+}
+
+// format renders the body. A call without arguments is taken literally, so that
+// a message containing a percent sign is not mangled by the formatter.
+func format(spec string, v []interface{}) string {
+	if len(v) == 0 {
+		return spec
+	}
+
+	return fmt.Sprintf(spec, v...)
+}
+
 // ProductionWarning is always visible without changing the configured threshold.
 func (l *LoggerType) ProductionWarning(phase, setting string, value interface{}, risk string) {
-	logger.Printf("[WARN] [PRODUCTION-CONFIG] phase=%s setting=%s value=%v risk=%s",
-		phase, setting, value, risk)
+	emit(WARN, Event(EventConfigProductionWarning,
+		Str("airgap.config.phase", phase),
+		Str("airgap.config.setting", setting),
+		Str("airgap.config.value", fmt.Sprintf("%v", value)),
+		Str("airgap.config.risk", risk),
+	), fmt.Sprintf("[PRODUCTION-CONFIG] phase=%s setting=%s value=%v risk=%s",
+		phase, setting, value, risk))
 }
 
 // Quick check to see if we can log in some level
@@ -41,108 +216,90 @@ func (l *LoggerType) CanLog(level LogLevel) bool {
 	return logLevel <= level
 }
 
-// Non-formatted log methods (like log.Print)
-func (l *LoggerType) Trace(msg string) {
+// Non-formatted log methods. Every call carries an attribute list, which must
+// be built with Event so that eventName is always present.
+func (l *LoggerType) Trace(attrs Attrs, msg string) {
 	if logLevel <= TRACE {
-		logger.Print("[TRACE] " + msg)
+		emit(TRACE, attrs, msg)
 	}
 }
 
-// Non-formatted log methods (like log.Print)
-func (l *LoggerType) Debug(msg string) {
+func (l *LoggerType) Debug(attrs Attrs, msg string) {
 	if logLevel <= DEBUG {
-		logger.Print("[DEBUG] " + msg)
+		emit(DEBUG, attrs, msg)
 	}
 }
-func (l *LoggerType) Info(msg string) {
+func (l *LoggerType) Info(attrs Attrs, msg string) {
 	if logLevel <= INFO {
-		logger.Print("[INFO] " + msg)
+		emit(INFO, attrs, msg)
 	}
 }
-func (l *LoggerType) Warn(msg string) {
+func (l *LoggerType) Warn(attrs Attrs, msg string) {
 	if logLevel <= WARN {
-		logger.Print("[WARN] " + msg)
+		emit(WARN, attrs, msg)
 	}
 }
-func (l *LoggerType) Error(v interface{}) {
+func (l *LoggerType) Error(attrs Attrs, v interface{}) {
 	if logLevel <= ERROR {
 		switch val := v.(type) {
 		case error:
-			logger.Print("[ERROR] " + val.Error())
+			emit(ERROR, attrs, val.Error())
 		case string:
-			logger.Print("[ERROR] " + val)
+			emit(ERROR, attrs, val)
 		default:
-			logger.Print("[ERROR] unknown error")
+			emit(ERROR, attrs, "unknown error")
 		}
 	}
 }
-func (l *LoggerType) Fatal(v interface{}) {
+func (l *LoggerType) Fatal(attrs Attrs, v interface{}) {
 	if logLevel <= FATAL {
 		switch val := v.(type) {
 		case error:
-			logger.Print("[FATAL] " + val.Error())
+			emit(FATAL, attrs, val.Error())
 		case string:
-			logger.Print("[FATAL] " + val)
+			emit(FATAL, attrs, val)
 		default:
-			logger.Print("[FATAL] unknown fatal error")
+			emit(FATAL, attrs, "unknown fatal error")
 		}
 		os.Exit(1)
 	}
 }
 
-// Formatted log wrappers (like log.Printf)
-func (l *LoggerType) Tracef(format string, v ...interface{}) {
+// Formatted log wrappers (like log.Printf), with the attribute list first.
+func (l *LoggerType) Tracef(attrs Attrs, spec string, v ...interface{}) {
 	if logLevel <= TRACE {
-		logger.Printf("[TRACE] "+format, v...)
+		emit(TRACE, attrs, format(spec, v))
 	}
 }
-func (l *LoggerType) Debugf(format string, v ...interface{}) {
+func (l *LoggerType) Debugf(attrs Attrs, spec string, v ...interface{}) {
 	if logLevel <= DEBUG {
-		logger.Printf("[DEBUG] "+format, v...)
+		emit(DEBUG, attrs, format(spec, v))
 	}
 }
-func (l *LoggerType) Infof(format string, v ...interface{}) {
+func (l *LoggerType) Infof(attrs Attrs, spec string, v ...interface{}) {
 	if logLevel <= INFO {
-		logger.Printf("[INFO] "+format, v...)
+		emit(INFO, attrs, format(spec, v))
 	}
 }
-func (l *LoggerType) Warnf(format string, v ...interface{}) {
+func (l *LoggerType) Warnf(attrs Attrs, spec string, v ...interface{}) {
 	if logLevel <= WARN {
-		logger.Printf("[WARN] "+format, v...)
+		emit(WARN, attrs, format(spec, v))
 	}
 }
-func (l *LoggerType) Errorf(format string, v ...interface{}) {
+func (l *LoggerType) Errorf(attrs Attrs, spec string, v ...interface{}) {
 	if logLevel <= ERROR {
-		logger.Printf("[ERROR] "+format, v...)
+		emit(ERROR, attrs, format(spec, v))
 	}
 }
-func (l *LoggerType) Fatalf(format string, v ...interface{}) {
+func (l *LoggerType) Fatalf(attrs Attrs, spec string, v ...interface{}) {
 	if logLevel <= FATAL {
-		logger.Printf("[FATAL] "+format, v...)
+		emit(FATAL, attrs, format(spec, v))
 		os.Exit(1)
 	}
 }
 
-// Utility methods
-func (l *LoggerType) Print(str string) {
-	if logLevel <= INFO {
-		logger.Print("[INFO] " + str)
-	}
-}
-func (l *LoggerType) Println(format string, v ...interface{}) {
-	if logLevel <= INFO {
-		logger.Printf("[INFO] "+format, v...)
-	}
-}
-
-func (l *LoggerType) Printf(format string, v ...interface{}) {
-	if logLevel <= INFO {
-		logger.Printf("[INFO] "+format, v...)
-	}
-}
-
-func (l *LoggerType) Panicf(format string, v ...interface{}) {
-	logger.Printf("[PANIC] "+format, v...)
+func (l *LoggerType) Panicf(attrs Attrs, spec string, v ...interface{}) {
+	emit(FATAL, attrs, "[PANIC] "+format(spec, v))
 	os.Exit(1)
 }
 
@@ -196,6 +353,19 @@ func (l *LoggerType) SetLogFile(filename string) error {
 	if err != nil {
 		return err
 	}
+
+	emitMu.Lock()
+	defer emitMu.Unlock()
 	logger.SetOutput(f)
+	output = f
 	return nil
+}
+
+// setOutputForTest redirects both writers. Tests need the raw writer and the
+// standard logger to agree.
+func setOutputForTest(w io.Writer) {
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	logger.SetOutput(w)
+	output = w
 }

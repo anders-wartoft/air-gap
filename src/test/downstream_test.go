@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"sitia.nu/airgap/src/downstream"
+	"sitia.nu/airgap/src/logging"
 )
 
 var Logger = downstream.Logger
@@ -20,7 +21,7 @@ type MockUDP struct {
 }
 
 func (m *MockUDP) Listen(targetIP string, targetPort int, rcvBufSize int, handleUdpMessage func(msg []byte), mtu uint16, stopChan <-chan struct{}, numReceivers int) {
-	Logger.Info("MockUDP Listen called")
+	Logger.Info(logging.Event(logging.EventDiagnostic), "MockUDP Listen called")
 	m.stop = make(chan struct{})
 	go func() {
 		<-stopChan
@@ -30,13 +31,13 @@ func (m *MockUDP) Listen(targetIP string, targetPort int, rcvBufSize int, handle
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, msg := range m.Messages {
-		Logger.Printf("MockUDP delivering message of length %d", len(msg))
+		Logger.Infof(logging.Event(logging.EventUDPReceive, logging.Int("airgap.message.size", int64(len(msg)))), "MockUDP delivering message of length %d", len(msg))
 		handleUdpMessage(msg)
 	}
 }
 
 func (m *MockUDP) SendMessage(msg []byte) error {
-	Logger.Info("MockUDP SendMessage called")
+	Logger.Info(logging.Event(logging.EventDiagnostic), "MockUDP SendMessage called")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Messages = append(m.Messages, msg)
@@ -44,7 +45,7 @@ func (m *MockUDP) SendMessage(msg []byte) error {
 }
 
 func (m *MockUDP) Close() error {
-	Logger.Info("MockUDP Close called")
+	Logger.Info(logging.Event(logging.EventDiagnostic), "MockUDP Close called")
 	close(m.stop)
 	return nil
 }
@@ -65,7 +66,7 @@ type MockKafka struct {
 }
 
 func (m *MockKafka) Write(key, topic string, partition int32, msg []byte) error {
-	Logger.Info("MockKafka Write called")
+	Logger.Info(logging.Event(logging.EventDiagnostic), "MockKafka Write called")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Written = append(m.Written, msg)
@@ -96,7 +97,7 @@ func (m *MockKafka) Flush() {}
 // 	// Run downstream in a goroutine
 // 	stop := make(chan struct{})
 // 	go func() {
-// 		Logger.Info("Starting RunDownstream with mocks")
+// 		Logger.Info(logging.Event(logging.EventDiagnostic), "Starting RunDownstream with mocks")
 // 		downstream.RunDownstream(mockKafka, mockUDP, stop)
 // 		close(stop)
 // 	}()

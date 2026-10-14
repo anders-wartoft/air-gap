@@ -124,7 +124,11 @@ func transformMessageID(id string) string {
 
 	partition += config.partitionStartValue
 	if partition < 0 || partition > 2147483647 {
-		Logger.Fatalf("Partition out of int32 range after partitionStartValue is applied: %d", partition)
+		Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "partitionStartValue"),
+			logging.Decimal("messaging.destination.partition.id", int64(partition)),
+		), "Partition out of int32 range after partitionStartValue is applied: %d", partition)
 		os.Exit(1)
 	}
 	parts[1] = strconv.Itoa(partition)
@@ -139,9 +143,21 @@ func UpdateKafkaStatus(newStatus string) {
 		previousKafkaStatus = kafkaStatus
 		kafkaStatus = newStatus
 		if newStatus == "running" {
-			Logger.Infof("Kafka status restored to running (was: %s)", previousKafkaStatus)
+			Logger.Infof(logging.Event(logging.EventKafkaConnectionRestored,
+				logging.Str("server.address", config.bootstrapServers),
+				logging.Str("airgap.health.status", newStatus),
+				logging.Str("airgap.health.status.previous", previousKafkaStatus),
+				logging.Str("airgap.health.transition", "failed.to.healthy"),
+			), "Kafka status restored to running (was: %s)", previousKafkaStatus)
 		} else {
-			Logger.Errorf("Kafka status changed to error: %s (was: %s)", newStatus, previousKafkaStatus)
+			Logger.Errorf(logging.Event(logging.EventKafkaConnect,
+				logging.Failure(),
+				logging.Str("server.address", config.bootstrapServers),
+				logging.Str("airgap.health.status", newStatus),
+				logging.Str("airgap.health.status.previous", previousKafkaStatus),
+				logging.Str("airgap.health.transition", "healthy.to.failed"),
+				logging.Error("_OTHER"),
+			), "Kafka status changed to error: %s (was: %s)", newStatus, previousKafkaStatus)
 		}
 	}
 	kafkaStatusMu.Unlock()
@@ -162,14 +178,25 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 
 	// Setup logging to file
 	if config.logFileName != "" {
-		Logger.Print("Configuring log to: " + config.logFileName)
+		Logger.Info(logging.Event(logging.EventAppStart,
+			logging.Str("airgap.config.setting", "logFileName"),
+			logging.Str("file.path", config.logFileName),
+		), "Configuring log to: "+config.logFileName)
 		if !wait {
 			if err := Logger.SetLogFile(config.logFileName); err != nil {
-				Logger.Fatal(err)
+				Logger.Fatal(logging.Event(logging.EventAppFailure,
+					logging.Failure(),
+					logging.Str("file.path", config.logFileName),
+					logging.ErrorType(err),
+				), err)
 			}
 		}
-		Logger.Printf("Upstream version: %s, build number: %s", version.GitVersion, BuildNumber)
-		Logger.Print("Log to file started up")
+		Logger.Infof(logging.Event(logging.EventAppStart,
+			logging.Str("airgap.build.number", BuildNumber),
+		), "Upstream version: %s, build number: %s", version.GitVersion, BuildNumber)
+		Logger.Info(logging.Event(logging.EventAppStart,
+			logging.Str("file.path", config.logFileName),
+		), "Log to file started up")
 	}
 
 	// Stats logger
@@ -235,7 +262,17 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 				}
 				if Logger.CanLog(logging.INFO) {
 					b, _ := json.Marshal(stats)
-					Logger.Info("STATISTICS: " + string(b))
+					Logger.Info(logging.Event(logging.EventStatsReport,
+						logging.Str("airgap.instance.id", config.id),
+						logging.Int("airgap.stats.interval_seconds", int64(config.logStatistics)),
+						logging.Int("airgap.message.received", recv),
+						logging.Int("airgap.message.sent", msgsSent),
+						logging.Int("airgap.message.dropped", msgsDropped),
+						logging.Int("airgap.message.filtered", filtered),
+						logging.Int("airgap.fragment.sent", sent),
+						logging.Str("airgap.transport.status", transportStatus),
+						logging.Str("airgap.kafka.status", kafkaStatus),
+					), "STATISTICS: "+string(b))
 				}
 			}
 		}()
@@ -245,37 +282,67 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 	if config.payloadSize == 0 {
 		mtuValue, err := mtu.GetMTU(config.nic, fmt.Sprintf("%s:%d", config.targetIP, config.targetPort))
 		if err != nil {
-			Logger.Fatal(err)
+			Logger.Fatal(logging.Event(logging.EventAppFailure,
+				logging.Failure(),
+				logging.Str("airgap.network.interface", config.nic),
+				logging.Str("server.address", config.targetIP),
+				logging.Int("server.port", int64(config.targetPort)),
+				logging.ErrorType(err),
+			), err)
 		}
 		config.payloadSize = uint16(mtuValue) - protocol.HEADER_SIZE
 		if config.payloadSize < 256 {
-			Logger.Fatalf("Calculated payloadSize is too small: %d", config.payloadSize)
+			Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.config.setting", "payloadSize"),
+				logging.Int("airgap.config.value", int64(config.payloadSize)),
+			), "Calculated payloadSize is too small: %d", config.payloadSize)
 		}
 		if config.payloadSize > 65507 {
 			config.payloadSize = 65507 - protocol.HEADER_SIZE
-			Logger.Printf("Calculated payloadSize is too large, setting to max UDP size: %d", config.payloadSize)
+			Logger.Infof(logging.Event(logging.EventConfigApplied,
+				logging.Str("airgap.config.setting", "payloadSize"),
+				logging.Int("airgap.config.value", int64(config.payloadSize)),
+			), "Calculated payloadSize is too large, setting to max UDP size: %d", config.payloadSize)
 		}
 	}
-	Logger.Printf("payloadSize: %d\n", config.payloadSize)
+	Logger.Infof(logging.Event(logging.EventConfigApplied,
+		logging.Str("airgap.config.setting", "payloadSize"),
+		logging.Int("airgap.config.value", int64(config.payloadSize)),
+	), "payloadSize: %d\n", config.payloadSize)
 
 	// Send startup status message
 	messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 		fmt.Appendf(nil, "%s Upstream %s starting up...", protocol.GetTimestamp(), config.id), config.payloadSize)
 	transportErr := udpClient.SendMessage(messages[0])
 	if transportErr != nil {
-		Logger.Errorf("Failed sending startup message (will continue): %v", transportErr)
+		Logger.Errorf(logging.Event(logging.EventTransportSend,
+			logging.Failure(),
+			logging.Str("airgap.transport.kind", config.transport),
+			logging.Str("airgap.message.id", "STATUS"),
+			logging.ErrorType(transportErr),
+		), "Failed sending startup message (will continue): %v", transportErr)
 	}
 
 	// Encryption
 	if config.encryption {
-		Logger.Printf("Creating initial key with public key file: %s", config.publicKeyFile)
+		Logger.Infof(logging.Event(logging.EventCryptoKeyExchange,
+			logging.Str("file.path", config.publicKeyFile),
+		), "Creating initial key with public key file: %s", config.publicKeyFile)
 		if adapter, ok := udpClient.(*UDPAdapter); ok {
 			sendNewKey(adapter.conn)
 		} else {
-			Logger.Error("udpClient is not of type *UDPAdapter")
+			Logger.Error(logging.Event(logging.EventCryptoKeyExchange,
+				logging.Failure(),
+				logging.Str("airgap.transport.kind", config.transport),
+				logging.Str("error.type", "transport.not.udp"),
+			), "udpClient is not of type *UDPAdapter")
 		}
 	} else {
-		Logger.Printf("No encryption will be used.")
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "encryption"),
+			logging.Bool("airgap.config.value", false),
+		), "No encryption will be used.")
 	}
 
 	var timeFrom time.Time
@@ -286,20 +353,39 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 		var err error
 		timeFrom, err = time.Parse(time.RFC3339, config.from)
 		if err != nil {
-			Logger.Fatalf("Invalid from time format: %v", err)
+			Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.config.setting", "from"),
+				logging.Str("airgap.config.value", config.from),
+				logging.ErrorType(err),
+			), "Invalid from time format: %v", err)
 		}
 	}
 
 	// ----- Kafka handler -----
-	Logger.Debug("Setting up Kafka handler")
+	Logger.Debug(logging.Event(logging.EventAppStart,
+		logging.Str("messaging.destination.name", config.topic),
+	), "Setting up Kafka handler")
 
 	// ----- Source: Kafka or Random or a mock object for unit testing -----
-	Logger.Printf("Reading from %s %s", config.source, config.bootstrapServers)
+	Logger.Infof(logging.Event(logging.EventKafkaConnect,
+		logging.Str("airgap.kafka.source", config.source),
+		logging.Str("server.address", config.bootstrapServers),
+		logging.Str("messaging.destination.name", config.topic),
+	), "Reading from %s %s", config.source, config.bootstrapServers)
 	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
-		Logger.Print("Using TLS for Kafka")
+		Logger.Info(logging.Event(logging.EventTLSHandshake,
+			logging.Str("airgap.tls.role", "kafka.client"),
+			logging.Str("file.path", config.caFile),
+		), "Using TLS for Kafka")
 		err := kafkaClient.SetTLS(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
 		if err != nil {
-			Logger.Panicf("Failed to configure TLS: %v", err)
+			Logger.Panicf(logging.Event(logging.EventTLSHandshake,
+				logging.Failure(),
+				logging.Str("airgap.tls.role", "kafka.client"),
+				logging.Str("file.path", config.caFile),
+				logging.ErrorType(err),
+			), "Failed to configure TLS: %v", err)
 		}
 	}
 
@@ -314,14 +400,24 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 			}
 			for name, offset := range thread {
 				group := fmt.Sprintf("%s-%s", config.groupID, name)
-				Logger.Printf("Kafka thread: %s offset %d", name, offset)
+				Logger.Infof(logging.Event(logging.EventKafkaConsume,
+					logging.Str("airgap.kafka.consumer.name", name),
+					logging.Int("messaging.kafka.offset", int64(offset)),
+					logging.Str("messaging.consumer.group.name", group),
+					logging.Str("messaging.destination.name", config.topic),
+				), "Kafka thread: %s offset %d", name, offset)
 				callbackHandler := func(id string, key []byte, t time.Time, received []byte) bool {
 					if bucket != nil {
 						bucket.Take()
 					}
 					return kafkaHandlerWithContext(ctx, timeFrom, udpClient, id, key, t, received)
 				}
-				Logger.Debugf("Starting Kafka read: %s offset %d", name, offset)
+				Logger.Debugf(logging.Event(logging.EventKafkaConsume,
+					logging.Str("airgap.kafka.consumer.name", name),
+					logging.Int("messaging.kafka.offset", int64(offset)),
+					logging.Str("messaging.consumer.group.name", group),
+					logging.Str("server.address", config.bootstrapServers),
+				), "Starting Kafka read: %s offset %d", name, offset)
 				kafkaClient.Read(ctx, name, offset,
 					config.bootstrapServers, config.topic, group, config.from,
 					callbackHandler)
@@ -338,12 +434,21 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 	atomic.AddInt64(&totalReceived, 1)
 
 	if Logger.CanLog(logging.DEBUG) {
-		Logger.Debugf("kafkaHandler called for id=%s, time=%s", id, t.Format(time.RFC3339))
+		Logger.Debugf(logging.Event(logging.EventKafkaConsume,
+			logging.Str("airgap.message.id", id),
+			logging.Str("airgap.message.timestamp", t.Format(time.RFC3339)),
+			logging.Int("airgap.message.size", int64(len(received))),
+		), "kafkaHandler called for id=%s, time=%s", id, t.Format(time.RFC3339))
 	}
 	// Discard old messages, before "from"
 	if t.Before(timeFrom) {
 		if Logger.CanLog(logging.DEBUG) {
-			Logger.Debugf("Discarding old message: %s time %s before from %s", id, t.Format(time.RFC3339), timeFrom.Format(time.RFC3339))
+			Logger.Debugf(logging.Event(logging.EventMessageFilter,
+				logging.Str("airgap.message.id", id),
+				logging.Str("airgap.filter.reason", "before.from"),
+				logging.Str("airgap.message.timestamp", t.Format(time.RFC3339)),
+				logging.Str("airgap.filter.from", timeFrom.Format(time.RFC3339)),
+			), "Discarding old message: %s time %s before from %s", id, t.Format(time.RFC3339), timeFrom.Format(time.RFC3339))
 		}
 		return keepRunning
 	}
@@ -352,7 +457,12 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 	if config.inputFilter != nil {
 		shouldFilter, err := config.inputFilter.ShouldFilterOut(received)
 		if err != nil {
-			Logger.Errorf("Error applying input filter: %v", err)
+			Logger.Errorf(logging.Event(logging.EventMessageFilter,
+				logging.Failure(),
+				logging.Str("airgap.filter.kind", "input"),
+				logging.Str("airgap.message.id", id),
+				logging.ErrorType(err),
+			), "Error applying input filter: %v", err)
 			// Check if it's a timeout error
 			if strings.Contains(err.Error(), "timeout") {
 				atomic.AddInt64(&filterTimeouts, 1)
@@ -363,7 +473,12 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 			atomic.AddInt64(&filteredEvents, 1)
 			atomic.AddInt64(&totalFiltered, 1)
 			if Logger.CanLog(logging.DEBUG) {
-				Logger.Debugf("Input filter cleared payload for message: %s (sending with empty payload to preserve sequence)", id)
+				Logger.Debugf(logging.Event(logging.EventMessageFilter,
+					logging.Str("airgap.filter.kind", "input"),
+					logging.Str("airgap.filter.action", "clear.payload"),
+					logging.Str("airgap.message.id", id),
+					logging.Int("airgap.message.size", int64(len(received))),
+				), "Input filter cleared payload for message: %s (sending with empty payload to preserve sequence)", id)
 			}
 			received = []byte{} // Clear payload but still send so gap-detector sees the offset
 		} else {
@@ -379,7 +494,12 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 			if offset, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
 				if !config.filter.Check(offset) {
 					if Logger.CanLog(logging.DEBUG) {
-						Logger.Debugf("Filtered out message: %s", id)
+						Logger.Debugf(logging.Event(logging.EventMessageFilter,
+							logging.Str("airgap.filter.kind", "deliver"),
+							logging.Str("airgap.filter.action", "drop"),
+							logging.Str("airgap.message.id", id),
+							logging.Int("messaging.kafka.offset", offset),
+						), "Filtered out message: %s", id)
 					}
 					return keepRunning
 				}
@@ -393,7 +513,13 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 	if config.compressWhenLengthExceeds > 0 && len(received) > config.compressWhenLengthExceeds {
 		compressed, err := protocol.CompressGzip(received)
 		if err != nil {
-			Logger.Errorf("Error compressing data: %s", err)
+			Logger.Errorf(logging.Event(logging.EventProtocolEncode,
+				logging.Failure(),
+				logging.Str("airgap.compression.algorithm", "gzip"),
+				logging.Str("airgap.message.id", id),
+				logging.Int("airgap.message.size", int64(len(received))),
+				logging.ErrorType(err),
+			), "Error compressing data: %s", err)
 		} else {
 			isCompressed = true
 			received = compressed
@@ -422,11 +548,20 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 		messages = protocol.FormatMessage(messageType, id, received, config.payloadSize)
 	}
 	if err != nil {
-		Logger.Error(err)
+		Logger.Error(logging.Event(logging.EventCryptoEncrypt,
+			logging.Failure(),
+			logging.Str("airgap.message.id", id),
+			logging.Int("airgap.message.size", int64(len(received))),
+			logging.ErrorType(err),
+		), err)
 	}
 
 	if Logger.CanLog(logging.DEBUG) {
-		Logger.Debugf("sending %d %s messages for id=%s", len(messages), config.transport, id)
+		Logger.Debugf(logging.Event(logging.EventProtocolEncode,
+			logging.Str("airgap.message.id", id),
+			logging.Int("airgap.message.count", int64(len(messages))),
+			logging.Str("airgap.transport.kind", config.transport),
+		), "sending %d %s messages for id=%s", len(messages), config.transport, id)
 	}
 
 	// Send with retry logic - prevents message loss if receiver is temporarily unavailable
@@ -456,7 +591,12 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 			if transportStatus != "running" {
 				previousTransportStatus = transportStatus
 				transportStatus = "running"
-				Logger.Infof("Transport status restored to running (was: %s)", previousTransportStatus)
+				Logger.Infof(logging.Event(logging.EventTransportConnectionRestored,
+					logging.Str("airgap.transport.kind", config.transport),
+					logging.Str("airgap.health.status", transportStatus),
+					logging.Str("airgap.health.status.previous", previousTransportStatus),
+					logging.Str("airgap.health.transition", "failed.to.healthy"),
+				), "Transport status restored to running (was: %s)", previousTransportStatus)
 			}
 			transportStatusMu.Unlock()
 
@@ -464,9 +604,17 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 			if hadFailure {
 				// For UDP, transient errors don't guarantee delivery - log with caution
 				if config.transport == "udp" {
-					Logger.Warnf("Message id=%s sent after %d attempt(s) - UDP delivery is not guaranteed (receiver may be down)", id, attempt)
+					Logger.Warnf(logging.Event(logging.EventTransportSendRestored,
+						logging.Str("airgap.transport.kind", config.transport),
+						logging.Str("airgap.message.id", id),
+						logging.Int("airgap.retry.attempt", int64(attempt)),
+					), "Message id=%s sent after %d attempt(s) - UDP delivery is not guaranteed (receiver may be down)", id, attempt)
 				} else {
-					Logger.Infof("Message id=%s successfully sent after %d attempt(s)", id, attempt)
+					Logger.Infof(logging.Event(logging.EventTransportSendRestored,
+						logging.Str("airgap.transport.kind", config.transport),
+						logging.Str("airgap.message.id", id),
+						logging.Int("airgap.retry.attempt", int64(attempt)),
+					), "Message id=%s successfully sent after %d attempt(s)", id, attempt)
 				}
 			}
 			return keepRunning
@@ -478,25 +626,34 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 		if maxRetries == 0 {
 			retryLimitStr = "∞"
 		}
+		retryAttrs := logging.Event(logging.EventTransportSend,
+			logging.Failure(),
+			logging.Str("airgap.transport.kind", config.transport),
+			logging.Str("airgap.message.id", id),
+			logging.Int("airgap.retry.attempt", int64(attempt)),
+			logging.Str("airgap.retry.limit", retryLimitStr),
+			logging.Int("airgap.retry.interval_ms", int64(retryIntervalMs)),
+			logging.ErrorType(transportErr),
+		)
 		if config.transport == "tcp" {
 			// Use configurable error level for TCP retry messages
 			switch config.tcpRetryErrorLevel {
 			case "DEBUG":
-				Logger.Debugf("Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
+				Logger.Debugf(retryAttrs, "Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
 					fmt.Sprintf("%d", attempt), retryLimitStr, id, transportErr, retryIntervalMs)
 			case "INFO":
-				Logger.Infof("Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
+				Logger.Infof(retryAttrs, "Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
 					fmt.Sprintf("%d", attempt), retryLimitStr, id, transportErr, retryIntervalMs)
 			case "ERROR":
-				Logger.Errorf("Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
+				Logger.Errorf(retryAttrs, "Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
 					fmt.Sprintf("%d", attempt), retryLimitStr, id, transportErr, retryIntervalMs)
 			default: // WARN
-				Logger.Warnf("Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
+				Logger.Warnf(retryAttrs, "Send attempt %s/%s failed for id=%s: %v, retrying in %dms",
 					fmt.Sprintf("%d", attempt), retryLimitStr, id, transportErr, retryIntervalMs)
 			}
 		} else {
 			if Logger.CanLog(logging.DEBUG) && attempt <= 3 {
-				Logger.Debugf("Send attempt %d/%s failed for id=%s: %v, retrying in %dms",
+				Logger.Debugf(retryAttrs, "Send attempt %d/%s failed for id=%s: %v, retrying in %dms",
 					attempt, retryLimitStr, id, transportErr, retryIntervalMs)
 			}
 		}
@@ -513,7 +670,14 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 	if transportStatus != newStatus {
 		previousTransportStatus = transportStatus
 		transportStatus = newStatus
-		Logger.Errorf("Transport status changed to error: %s (was: %s)", newStatus, previousTransportStatus)
+		Logger.Errorf(logging.Event(logging.EventTransportConnect,
+			logging.Failure(),
+			logging.Str("airgap.transport.kind", config.transport),
+			logging.Str("airgap.health.status", newStatus),
+			logging.Str("airgap.health.status.previous", previousTransportStatus),
+			logging.Str("airgap.health.transition", "healthy.to.failed"),
+			logging.Error("_OTHER"),
+		), "Transport status changed to error: %s (was: %s)", newStatus, previousTransportStatus)
 	} else if transportStatus != "running" {
 		transportStatus = newStatus
 	}
@@ -525,7 +689,14 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 
 	// Return false to prevent this message from being marked as consumed
 	// The message will be reprocessed when the receiver comes back up
-	Logger.Errorf("Failed to send message id=%s after %d retries (%dms): %v. Message will be retried.",
+	Logger.Errorf(logging.Event(logging.EventTransportSend,
+		logging.Failure(),
+		logging.Str("airgap.transport.kind", config.transport),
+		logging.Str("airgap.message.id", id),
+		logging.Int("airgap.retry.count", int64(maxRetries)),
+		logging.Int("airgap.retry.elapsed_ms", int64(maxRetries*retryIntervalMs)),
+		logging.ErrorType(transportErr),
+	), "Failed to send message id=%s after %d retries (%dms): %v. Message will be retried.",
 		id, maxRetries, maxRetries*retryIntervalMs, transportErr)
 	return false
 }
@@ -533,13 +704,19 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 func Main(build string) {
 	if handled, err := pinnedtls.GenerateCommand(os.Args[1:], "client", os.Stdout); handled {
 		if err != nil {
-			Logger.Fatal(err)
+			Logger.Fatal(logging.Event(logging.EventAppFailure,
+				logging.Failure(),
+				logging.Str("airgap.command", "pinned-tls-generate"),
+				logging.ErrorType(err),
+			), err)
 		}
 		return
 	}
 	BuildNumber = build
-	Logger.Printf("Upstream version: %s starting up...", version.GitVersion)
-	Logger.Printf("Build number: %s", BuildNumber)
+	Logger.Infof(logging.Event(logging.EventAppStart), "Upstream version: %s starting up...", version.GitVersion)
+	Logger.Infof(logging.Event(logging.EventAppStart,
+		logging.Str("airgap.build.number", BuildNumber),
+	), "Build number: %s", BuildNumber)
 
 	var fileName string
 	var overrideArgs []string
@@ -550,7 +727,11 @@ func Main(build string) {
 		} else if fileName == "" {
 			fileName = arg
 		} else {
-			Logger.Fatal("Too many non-dashed command line parameters. Only one property file allowed.")
+			Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.config.setting", "propertyFile"),
+				logging.Str("airgap.config.value", arg),
+			), "Too many non-dashed command line parameters. Only one property file allowed.")
 		}
 	}
 
@@ -569,14 +750,23 @@ func Main(build string) {
 		if !strings.HasPrefix(fileName, "/") {
 			fullPath = absPath + "/" + fileName
 		}
-		Logger.Fatalf("Error reading configuration file %s: %v", fullPath, err)
+		Logger.Fatalf(logging.Event(logging.EventConfigLoad,
+			logging.Failure(),
+			logging.Str("file.path", fullPath),
+			logging.ErrorType(err),
+		), "Error reading configuration file %s: %v", fullPath, err)
 	}
 	conf = overrideConfiguration(conf)
 	conf = parseCommandLineOverrides(overrideArgs, conf)
 	resolved := conf
 	if conf.tcpTLSAuthMode == "pinned" {
 		if err := pinnedtls.ValidateReloadFile(fileName); err != nil {
-			Logger.Fatal(err)
+			Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.tls.auth_mode", "pinned"),
+				logging.Str("file.path", fileName),
+				logging.ErrorType(err),
+			), err)
 		}
 	}
 	conf = checkConfiguration(conf)
@@ -584,9 +774,16 @@ func Main(build string) {
 
 	// Setup logging to file
 	if config.logFileName != "" {
-		Logger.Print("Configuring log to: " + config.logFileName)
-		Logger.Printf("Downstream version: %s", BuildNumber)
-		Logger.Print("Log to file started up")
+		Logger.Info(logging.Event(logging.EventAppStart,
+			logging.Str("airgap.config.setting", "logFileName"),
+			logging.Str("file.path", config.logFileName),
+		), "Configuring log to: "+config.logFileName)
+		Logger.Infof(logging.Event(logging.EventAppStart,
+			logging.Str("airgap.build.number", BuildNumber),
+		), "Downstream version: %s", BuildNumber)
+		Logger.Info(logging.Event(logging.EventAppStart,
+			logging.Str("file.path", config.logFileName),
+		), "Log to file started up")
 	}
 
 	// Log config
@@ -598,41 +795,75 @@ func Main(build string) {
 
 	switch config.transport {
 	case "tcp":
-		Logger.Printf("Creating TCP transport to %s", address)
+		Logger.Infof(logging.Event(logging.EventTransportConnect,
+			logging.Str("airgap.transport.kind", "tcp"),
+			logging.Str("server.address", config.targetIP),
+			logging.Int("server.port", int64(config.targetPort)),
+		), "Creating TCP transport to %s", address)
 		var tcpTLSConfig *tls.Config
 		if config.tcpTLSEnabled {
-			Logger.Printf("Building TLS configuration for TCP transport")
+			Logger.Info(logging.Event(logging.EventTLSHandshake,
+				logging.Str("airgap.tls.role", "client"),
+				logging.Str("server.address", address),
+			), "Building TLS configuration for TCP transport")
 			var err error
 			tcpTLSConfig, err = config.BuildTLSConfig()
 			if err != nil {
-				Logger.Fatalf("Error building TCP TLS configuration: %v", err)
+				Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+					logging.Failure(),
+					logging.Str("airgap.config.setting", "tcpTLS"),
+					logging.Str("server.address", address),
+					logging.ErrorType(err),
+				), "Error building TCP TLS configuration: %v", err)
 			}
-			Logger.Printf("TCP TLS configured (mTLS=%t, cipherSuites=%q)", config.tcpTLSCertFile != "", config.tcpTLSCipherSuites)
+			Logger.Infof(logging.Event(logging.EventTLSHandshake,
+				logging.Str("airgap.tls.role", "client"),
+				logging.Str("server.address", address),
+				logging.Bool("airgap.tls.mutual", config.tcpTLSCertFile != ""),
+				logging.Str("airgap.tls.cipher_suites", config.tcpTLSCipherSuites),
+			), "TCP TLS configured (mTLS=%t, cipherSuites=%q)", config.tcpTLSCertFile != "", config.tcpTLSCipherSuites)
 		}
 		var manager *pinnedtls.Manager
 		if config.tcpTLSAuthMode == "pinned" {
+			pinAttrs := logging.Event(logging.EventTLSPinReload,
+				logging.Str("airgap.tls.role", "client"),
+				logging.Str("file.path", config.tcpTLSTrustedKeysDir),
+			)
 			snapshot, err := pinnedtls.Prepare(config.tcpTLSCertFile, config.tcpTLSKeyFile, config.tcpTLSTrustedKeysDir, false)
 			if err != nil {
-				Logger.Fatal(err)
+				Logger.Fatal(pinAttrs.Merge(logging.Err(err)), err)
 			}
 			var pending bool
 			snapshot, pending, err = pinnedtls.RestorePendingClient(config.tcpTLSTrustedKeysDir, snapshot)
 			if err != nil {
-				Logger.Fatal(err)
+				Logger.Fatal(pinAttrs.Merge(logging.Err(err)), err)
 			}
 			if pending {
 				if !config.tcpTLSRotationEnabled {
-					Logger.Fatal("Pending client rotation requires tcpTLSRotationEnabled=true; reconcile recovery state before disabling exchange")
+					Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+						logging.Failure(),
+						logging.Str("airgap.config.setting", "tcpTLSRotationEnabled"),
+						logging.Bool("airgap.config.value", config.tcpTLSRotationEnabled),
+						logging.Str("file.path", config.tcpTLSTrustedKeysDir),
+					), "Pending client rotation requires tcpTLSRotationEnabled=true; reconcile recovery state before disabling exchange")
 				}
-				Logger.Warn("Pinned rotation recovery: retained old identity; SIGHUP retries configured replacement")
+				Logger.Warn(logging.Event(logging.EventTLSPinRotate,
+					logging.Str("airgap.tls.role", "client"),
+					logging.Str("airgap.tls.rotation.state", "pending"),
+					logging.Str("file.path", config.tcpTLSTrustedKeysDir),
+				), "Pinned rotation recovery: retained old identity; SIGHUP retries configured replacement")
 			}
 			manager, err = pinnedtls.NewManager(snapshot)
 			if err != nil {
-				Logger.Fatal(err)
+				Logger.Fatal(pinAttrs.Merge(logging.Err(err)), err)
 			}
 			tcpTLSConfig = manager.Config()
 			manager.StartAging(config.tcpTLSPinIdleSeconds, func(fingerprints []string) {
-				Logger.Infof("Pinned TLS idle aging: role=server purged=%v; disk unchanged, SIGHUP restores pins", fingerprints)
+				Logger.Infof(logging.Event(logging.EventTLSPinAging,
+					logging.Str("airgap.tls.role", "server"),
+					logging.Int("airgap.tls.pin.purged", int64(len(fingerprints))),
+					logging.Int("airgap.tls.pin.idle_seconds", int64(config.tcpTLSPinIdleSeconds)),
+				), "Pinned TLS idle aging: role=server purged=%v; disk unchanged, SIGHUP restores pins", fingerprints)
 			})
 		}
 		adapter, errTCP := newTCPAdapter(address, tcpTLSConfig, manager)
@@ -640,7 +871,11 @@ func Main(build string) {
 			if manager != nil {
 				manager.StopAging()
 			}
-			Logger.Fatalf("Error creating TCP adapter: %v", errTCP)
+			Logger.Fatalf(logging.Event(logging.EventTCPConnection,
+				logging.Failure(),
+				logging.Str("server.address", address),
+				logging.ErrorType(errTCP),
+			), "Error creating TCP adapter: %v", errTCP)
 		}
 		if config.tcpTLSEnabled {
 			adapter.pinned = config.tcpTLSAuthMode == "pinned"
@@ -655,14 +890,28 @@ func Main(build string) {
 		}
 		transportAdapter = adapter
 	case "udp":
-		Logger.Printf("Creating UDP transport to %s", address)
+		Logger.Infof(logging.Event(logging.EventTransportConnect,
+			logging.Str("airgap.transport.kind", "udp"),
+			logging.Str("server.address", config.targetIP),
+			logging.Int("server.port", int64(config.targetPort)),
+			logging.Str("airgap.network.interface", config.nic),
+		), "Creating UDP transport to %s", address)
 		adapter, errUDP := NewUDPAdapter(address, config.nic)
 		if errUDP != nil {
-			Logger.Fatalf("Error creating UDP adapter: %v", errUDP)
+			Logger.Fatalf(logging.Event(logging.EventUDPBind,
+				logging.Failure(),
+				logging.Str("server.address", address),
+				logging.Str("airgap.network.interface", config.nic),
+				logging.ErrorType(errUDP),
+			), "Error creating UDP adapter: %v", errUDP)
 		}
 		transportAdapter = adapter
 	default:
-		Logger.Fatalf("Unknown transport: %s", config.transport)
+		Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "transport"),
+			logging.Str("airgap.config.value", config.transport),
+		), "Unknown transport: %s", config.transport)
 	}
 
 	// Choose Kafka adapter
@@ -673,7 +922,11 @@ func Main(build string) {
 	case "random":
 		kafkaAdapter = &RandomKafkaAdapter{}
 	default:
-		Logger.Fatalf("Unknown source: %s", config.source)
+		Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "source"),
+			logging.Str("airgap.config.value", config.source),
+		), "Unknown source: %s", config.source)
 	}
 
 	// Run upstream
@@ -690,7 +943,10 @@ func Main(build string) {
 	for {
 		select {
 		case <-sigterm:
-			Logger.Printf("Received SIGTERM, shutting down")
+			Logger.Info(logging.Event(logging.EventAppShutdown,
+				logging.Str("airgap.signal", "SIGTERM"),
+				logging.Str("airgap.instance.id", config.id),
+			), "Received SIGTERM, shutting down")
 			cancelRun()
 			<-done
 			reloadWorkers.Wait()
@@ -709,11 +965,21 @@ func Main(build string) {
 				defer reloadWorkers.Done()
 				reloadMu.Lock()
 				defer reloadMu.Unlock()
-				Logger.Printf("SIGHUP received: reopening logs with name %s and reloading TLS certificates", config.logFileName)
+				Logger.Infof(logging.Event(logging.EventAppReload,
+					logging.Str("airgap.signal", "SIGHUP"),
+					logging.Str("file.path", config.logFileName),
+				), "SIGHUP received: reopening logs with name %s and reloading TLS certificates", config.logFileName)
 				if config.logFileName != "" {
-					Logger.Printf("Reopening logs for logrotate. New name: %s", config.logFileName)
+					Logger.Infof(logging.Event(logging.EventAppReload,
+						logging.Str("airgap.signal", "SIGHUP"),
+						logging.Str("file.path", config.logFileName),
+					), "Reopening logs for logrotate. New name: %s", config.logFileName)
 					if err := Logger.SetLogFile(config.logFileName); err != nil {
-						Logger.Errorf("Failed reopening log file: %v", err)
+						Logger.Errorf(logging.Event(logging.EventAppReload,
+							logging.Failure(),
+							logging.Str("file.path", config.logFileName),
+							logging.ErrorType(err),
+						), "Failed reopening log file: %v", err)
 					}
 				}
 				if tcpAdapter, ok := transportAdapter.(*TCPAdapter); ok {
@@ -724,10 +990,17 @@ func Main(build string) {
 						err = tcpAdapter.ReloadTLSConfig()
 					}
 					if err != nil {
-						Logger.Errorf("TLS certificate reload failed: %v", err)
+						Logger.Errorf(logging.Event(logging.EventTLSCertReload,
+							logging.Failure(),
+							logging.Bool("airgap.tls.pinned", tcpAdapter.pinned),
+							logging.Str("file.path", fileName),
+							logging.ErrorType(err),
+						), "TLS certificate reload failed: %v", err)
 					}
 				}
-				Logger.Printf("SIGHUP handling completed")
+				Logger.Info(logging.Event(logging.EventAppReload,
+					logging.Str("airgap.signal", "SIGHUP"),
+				), "SIGHUP handling completed")
 			}()
 		}
 	}

@@ -72,12 +72,19 @@ func filterJsonFilterByPartitionRange(jsonFilter JsonFilter, partitionStartValue
 	for _, result := range jsonFilter.Results {
 		if isPartitionInConfiguredRange(result.Partition, partitionStartValue, partitionStopValue) {
 			if !hasUsableGaps(jsonFilter.Type, result) {
-				Logger.Debugf("Skipping partition %d due to empty gaps for filter type %s", result.Partition, jsonFilter.Type)
+				Logger.Debugf(logging.Event(logging.EventResendRequest,
+					logging.Decimal("messaging.destination.partition.id", int64(result.Partition)),
+					logging.Str("airgap.resend.filter.type", jsonFilter.Type),
+				), "Skipping partition %d due to empty gaps for filter type %s", result.Partition, jsonFilter.Type)
 				continue
 			}
 			filtered = append(filtered, result)
 		} else {
-			Logger.Debugf("Skipping partition %d due to configured range start=%d stop=%d",
+			Logger.Debugf(logging.Event(logging.EventResendRequest,
+				logging.Decimal("messaging.destination.partition.id", int64(result.Partition)),
+				logging.Int("airgap.partition.start", int64(partitionStartValue)),
+				logging.Int("airgap.partition.stop", int64(partitionStopValue)),
+			), "Skipping partition %d due to configured range start=%d stop=%d",
 				result.Partition, partitionStartValue, partitionStopValue)
 		}
 	}
@@ -151,7 +158,13 @@ func parseFile(fileName string, config TransferConfiguration) (JsonFilter, error
 				},
 			},
 		}
-		Logger.Infof("Using manual resend configuration: topic=%s, partition=%d, from_offset=%d, to_offset=%d",
+		Logger.Infof(logging.Event(logging.EventResendRequest,
+			logging.Str("airgap.resend.filter.type", "manual"),
+			logging.Str("messaging.destination.name", config.topic),
+			logging.Decimal("messaging.destination.partition.id", int64(config.partition)),
+			logging.Int("airgap.resend.offset.from", config.offsetFrom),
+			logging.Int("airgap.resend.offset.to", config.offsetTo),
+		), "Using manual resend configuration: topic=%s, partition=%d, from_offset=%d, to_offset=%d",
 			config.topic, config.partition, config.offsetFrom, config.offsetTo)
 		return jsonFilter, nil
 	}
@@ -167,7 +180,13 @@ func parseFile(fileName string, config TransferConfiguration) (JsonFilter, error
 				},
 			},
 		}
-		Logger.Infof("Using manual resend configuration: topic=%s, partition=%d, from_offset=%d, to_offset=%d",
+		Logger.Infof(logging.Event(logging.EventResendRequest,
+			logging.Str("airgap.resend.filter.type", "time-range"),
+			logging.Str("messaging.destination.name", config.topic),
+			logging.Decimal("messaging.destination.partition.id", int64(config.partition)),
+			logging.Str("airgap.resend.time.from", config.from),
+			logging.Str("airgap.resend.time.to", config.to),
+		), "Using manual resend configuration: topic=%s, partition=%d, from_offset=%d, to_offset=%d",
 			config.topic, config.partition, config.offsetFrom, config.offsetTo)
 		return jsonFilter, nil
 	}
@@ -186,13 +205,22 @@ func getLatestOffsets(kafkaClient KafkaClient, jsonFilter JsonFilter, bootstrapS
 		lastOffset, err := kafkaClient.GetLastOffset(bootstrapServers, result.Topic, upstreamPartition)
 		if err != nil {
 			if result.Partition != -1 {
-				Logger.Fatalf("Failed to get latest offset for topic %s partition %d: %v. If partition is not found, it may be due to the topic not existing or no messages being produced.",
+				Logger.Fatalf(logging.Event(logging.EventKafkaOffset,
+					logging.Str("messaging.destination.name", result.Topic),
+					logging.Decimal("messaging.destination.partition.id", int64(upstreamPartition)),
+				).Merge(logging.Err(err)),
+					"Failed to get latest offset for topic %s partition %d: %v. If partition is not found, it may be due to the topic not existing or no messages being produced.",
 					result.Topic, upstreamPartition, err)
 			}
 			continue
 		}
 		jsonFilter.Results[i].LastOffset = lastOffset
-		Logger.Debugf("Topic %s downstream partition %d (upstream partition %d) latest offset: %d",
+		Logger.Debugf(logging.Event(logging.EventKafkaOffset,
+			logging.Str("messaging.destination.name", result.Topic),
+			logging.Decimal("messaging.destination.partition.id", int64(upstreamPartition)),
+			logging.Int("airgap.partition.downstream", int64(result.Partition)),
+			logging.Int("messaging.kafka.offset", lastOffset),
+		), "Topic %s downstream partition %d (upstream partition %d) latest offset: %d",
 			result.Topic, result.Partition, upstreamPartition, lastOffset)
 	}
 	return jsonFilter, nil
@@ -202,12 +230,20 @@ func isLast(jsonFilter JsonFilter, topic string, partition int, offset int64) bo
 	// Is this the last message to be sent for the given topic and partition?
 	for _, g := range jsonFilter.Results {
 		if g.Topic == topic && g.Partition == partition {
-			Logger.Tracef("Last offset for topic %s partition %d is %d, current offset %d",
+			Logger.Tracef(logging.Event(logging.EventKafkaOffset,
+				logging.Str("messaging.destination.name", topic),
+				logging.Decimal("messaging.destination.partition.id", int64(partition)),
+				logging.Int("airgap.resend.offset.last", g.LastOffset),
+				logging.Int("messaging.kafka.offset", offset),
+			), "Last offset for topic %s partition %d is %d, current offset %d",
 				topic, partition, g.LastOffset, offset)
 			return offset >= g.LastOffset
 		}
 	}
-	Logger.Trace("Did not find topic/partition in filter when checking for last message")
+	Logger.Trace(logging.Event(logging.EventMessageFilter,
+		logging.Str("messaging.destination.name", topic),
+		logging.Decimal("messaging.destination.partition.id", int64(partition)),
+	), "Did not find topic/partition in filter when checking for last message")
 	return false
 }
 
@@ -236,12 +272,23 @@ func filter(jsonFilter JsonFilter, topic string, partition int, offset int64) bo
 				for _, gap := range g.Gaps {
 					if len(gap) > 1 { // [min, max]
 						if offset >= gap[0] && offset <= gap[1] {
-							Logger.Debugf("Offset %d is within gap [%d,%d]", offset, gap[0], gap[1])
+							Logger.Debugf(logging.Event(logging.EventMessageFilter,
+								logging.Str("messaging.destination.name", topic),
+								logging.Decimal("messaging.destination.partition.id", int64(partition)),
+								logging.Int("messaging.kafka.offset", offset),
+								logging.Int("airgap.gap.from", gap[0]),
+								logging.Int("airgap.gap.to", gap[1]),
+							), "Offset %d is within gap [%d,%d]", offset, gap[0], gap[1])
 							return true
 						}
 					} else if len(gap) == 1 { // [exact]
 						if offset == gap[0] {
-							Logger.Debugf("Offset %d is equal to gap [%d]", offset, gap[0])
+							Logger.Debugf(logging.Event(logging.EventMessageFilter,
+								logging.Str("messaging.destination.name", topic),
+								logging.Decimal("messaging.destination.partition.id", int64(partition)),
+								logging.Int("messaging.kafka.offset", offset),
+								logging.Int("airgap.gap.from", gap[0]),
+							), "Offset %d is equal to gap [%d]", offset, gap[0])
 							return true
 						}
 					}
@@ -255,7 +302,14 @@ func filter(jsonFilter JsonFilter, topic string, partition int, offset int64) bo
 			return false
 		}
 		if jsonFilter.Results[0].Topic == topic && jsonFilter.Results[0].Partition == partition {
-			Logger.Debugf("Manual mode: checking if offset %d is between from_offset %d and to_offset %d", offset, jsonFilter.Results[0].Gaps[0][0], jsonFilter.Results[0].Gaps[0][1])
+			Logger.Debugf(logging.Event(logging.EventMessageFilter,
+				logging.Str("airgap.resend.filter.type", "manual"),
+				logging.Str("messaging.destination.name", topic),
+				logging.Decimal("messaging.destination.partition.id", int64(partition)),
+				logging.Int("messaging.kafka.offset", offset),
+				logging.Int("airgap.resend.offset.from", jsonFilter.Results[0].Gaps[0][0]),
+				logging.Int("airgap.resend.offset.to", jsonFilter.Results[0].Gaps[0][1]),
+			), "Manual mode: checking if offset %d is between from_offset %d and to_offset %d", offset, jsonFilter.Results[0].Gaps[0][0], jsonFilter.Results[0].Gaps[0][1])
 			return offset >= jsonFilter.Results[0].Gaps[0][0] && (offset <= jsonFilter.Results[0].Gaps[0][1] || jsonFilter.Results[0].Gaps[0][1] == -1)
 		}
 	case "time-range":
@@ -285,35 +339,54 @@ func RunResend(kafkaClient KafkaClient, udpClient UDPClient, config TransferConf
 func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient, config TransferConfiguration, done chan<- struct{}) {
 	// Start time for statistics
 	timeStart = time.Now().Unix()
-	Logger.Debugf("RunResend starting at: %s", time.Now().Format(time.RFC3339))
+	Logger.Debugf(logging.Event(logging.EventResendReplay),
+		"RunResend starting at: %s", time.Now().Format(time.RFC3339))
 
 	// Read from the beginning of time (this parameter is used by the kafka adapter)
 	// Format: "1970-01-01T00:00:00Z"
 	fromTime, err := time.Parse(time.RFC3339, config.from)
 	if err != nil {
-		Logger.Fatalf("Invalid from time format: %v", err)
+		Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+			logging.Str("airgap.config.setting", "from"),
+			logging.Str("airgap.config.value", config.from),
+		).Merge(logging.Err(err)), "Invalid from time format: %v", err)
 	}
-	Logger.Debugf("From time is set to: %s", fromTime.Format(time.RFC3339))
+	Logger.Debugf(logging.Event(logging.EventConfigApplied,
+		logging.Str("airgap.config.setting", "from"),
+		logging.Str("airgap.config.value", fromTime.Format(time.RFC3339)),
+	), "From time is set to: %s", fromTime.Format(time.RFC3339))
 	// If no config.to is set, use now:
 	toTime := time.Now()
 	if config.to != "" {
 		toTime, err = time.Parse(time.RFC3339, config.to)
 		if err != nil {
-			Logger.Fatalf("Invalid to time format: %v", err)
+			Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+				logging.Str("airgap.config.setting", "to"),
+				logging.Str("airgap.config.value", config.to),
+			).Merge(logging.Err(err)), "Invalid to time format: %v", err)
 		}
 		if toTime.Before(fromTime) {
-			Logger.Fatalf("The 'to' time must be after the 'from' time.")
+			Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.config.setting", "to"),
+				logging.Str("airgap.config.value", config.to),
+			), "The 'to' time must be after the 'from' time.")
 		}
-		Logger.Debugf("To time is set to: %s", toTime.Format(time.RFC3339))
+		Logger.Debugf(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "to"),
+			logging.Str("airgap.config.value", toTime.Format(time.RFC3339)),
+		), "To time is set to: %s", toTime.Format(time.RFC3339))
 	}
 
 	// Send startup status message
-	Logger.Debug("Sending startup status message")
+	Logger.Debug(logging.Event(logging.EventAppStart),
+		"Sending startup status message")
 	messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 		fmt.Appendf(nil, "%s %s starting up with resendFileName: %s", protocol.GetTimestamp(), config.id, config.resendFileName), config.payloadSize)
 	if len(messages) > 0 {
 		if err := udpClient.SendMessage(messages[0]); err != nil {
-			Logger.Errorf("Failed sending startup message: %v", err)
+			Logger.Errorf(logging.Event(logging.EventMessageDeliver).Merge(logging.Err(err)),
+				"Failed sending startup message: %v", err)
 		}
 	}
 
@@ -322,40 +395,64 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 	// Read filter file and enrich with latest offsets
 	jsonFilter, err = parseFile(config.resendFileName, config)
 	if err != nil {
-		Logger.Fatalf("Failed parsing filter file: %v", err)
+		Logger.Fatalf(logging.Event(logging.EventResendFileRead,
+			logging.Str("file.path", config.resendFileName),
+		).Merge(logging.Err(err)), "Failed parsing filter file: %v", err)
 		return
 	}
 
 	// TLS for kafka if needed
 	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
-		Logger.Print("Using TLS for Kafka")
+		Logger.Info(logging.Event(logging.EventTLSHandshake,
+			logging.Str("server.address", config.bootstrapServers),
+			logging.Str("file.path", config.certFile),
+		), "Using TLS for Kafka")
 		err := kafkaClient.SetTLS(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
 		if err != nil {
-			Logger.Panicf("Failed to configure TLS: %v", err)
+			Logger.Panicf(logging.Event(logging.EventTLSHandshake,
+				logging.Str("server.address", config.bootstrapServers),
+				logging.Str("file.path", config.certFile),
+			).Merge(logging.Err(err)), "Failed to configure TLS: %v", err)
 		}
 	}
 
 	jsonFilter = filterJsonFilterByPartitionRange(jsonFilter, config.partitionStartValue, config.partitionStopValue)
 	if len(jsonFilter.Results) == 0 {
-		Logger.Warnf("No resend bundle partitions match configured range start=%d stop=%d",
+		Logger.Warnf(logging.Event(logging.EventResendRequest,
+			logging.Int("airgap.partition.start", int64(config.partitionStartValue)),
+			logging.Int("airgap.partition.stop", int64(config.partitionStopValue)),
+		), "No resend bundle partitions match configured range start=%d stop=%d",
 			config.partitionStartValue, config.partitionStopValue)
 	}
 	jsonFilter, err = getLatestOffsets(kafkaClient, jsonFilter, config.bootstrapServers, config.partitionStartValue)
 	if err != nil {
-		Logger.Fatalf("Failed applying partitionStartValue mapping for resend: %v", err)
+		Logger.Fatalf(logging.Event(logging.EventResendRequest,
+			logging.Int("airgap.partition.start", int64(config.partitionStartValue)),
+		).Merge(logging.Err(err)), "Failed applying partitionStartValue mapping for resend: %v", err)
 	}
-	Logger.Tracef("Resend filter content length: %d", len(jsonFilter.Results))
+	Logger.Tracef(logging.Event(logging.EventResendFileRead,
+		logging.Str("file.path", config.resendFileName),
+		logging.Int("airgap.resend.result.count", int64(len(jsonFilter.Results))),
+	), "Resend filter content length: %d", len(jsonFilter.Results))
 
 	// Encryption setup (unchanged)
 	if config.encryption {
-		Logger.Printf("Creating initial key with public key file: %s", config.publicKeyFile)
+		Logger.Infof(logging.Event(logging.EventCryptoKeyLoad,
+			logging.Str("file.path", config.publicKeyFile),
+		), "Creating initial key with public key file: %s", config.publicKeyFile)
 		if adapter, ok := udpClient.(*UDPAdapter); ok {
 			sendNewKey(adapter.conn, &config)
 		} else {
-			Logger.Error("udpClient is not of type *UDPAdapter")
+			Logger.Error(logging.Event(logging.EventCryptoKeyExchange,
+				logging.Failure(),
+				logging.Str("error.type", "unexpected.adapter.type"),
+			), "udpClient is not of type *UDPAdapter")
 		}
 	} else {
-		Logger.Printf("No encryption will be used.")
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "encryption"),
+			logging.Str("airgap.config.value", "false"),
+		), "No encryption will be used.")
 	}
 	// Context that will be cancelled when all partitions are done
 	// ctx, cancel := context.WithCancel(context.Background())
@@ -376,7 +473,9 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 			}
 		}
 		if allDone {
-			Logger.Info("All partitions reached their last offsets — cancelling Kafka readers.")
+			Logger.Info(logging.Event(logging.EventResendReplay,
+				logging.Int("airgap.resend.result.count", int64(len(jsonFilter.Results))),
+			), "All partitions reached their last offsets — cancelling Kafka readers.")
 			// cancel readers; they'll return and wg will be unblocked
 			//			cancel()
 		}
@@ -412,17 +511,29 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 			parts[1] = strconv.Itoa(downstreamPartition)
 			sendID = strings.Join(parts, "_")
 		}
-		Logger.Tracef("kafkaHandler called for id=%s, topic=%s, upstreamPartition=%d, downstreamPartition=%d, offset=%d, time=%s", id, topic, upstreamPartition, downstreamPartition, offset, t.Format(time.RFC3339))
+		Logger.Tracef(logging.Event(logging.EventKafkaConsume,
+			logging.Str("airgap.message.id", id),
+			logging.Str("messaging.destination.name", topic),
+			logging.Decimal("messaging.destination.partition.id", int64(upstreamPartition)),
+			logging.Int("airgap.partition.downstream", int64(downstreamPartition)),
+			logging.Int("messaging.kafka.offset", offset),
+		), "kafkaHandler called for id=%s, topic=%s, upstreamPartition=%d, downstreamPartition=%d, offset=%d, time=%s", id, topic, upstreamPartition, downstreamPartition, offset, t.Format(time.RFC3339))
 
 		// Discard old messages, before "from"
 		if t.Before(fromTime) {
-			Logger.Tracef("Discarding old message: %s time %s before from %s", id, t.Format(time.RFC3339), fromTime.Format(time.RFC3339))
+			Logger.Tracef(logging.Event(logging.EventMessageFilter,
+				logging.Str("airgap.message.id", id),
+				logging.Str("airgap.filter.reason", "before.from"),
+			), "Discarding old message: %s time %s before from %s", id, t.Format(time.RFC3339), fromTime.Format(time.RFC3339))
 			return keepRunning
 		}
 
 		// Discard messages after "to"
 		if t.After(toTime) {
-			Logger.Tracef("Discarding message: %s time %s after to %s", id, t.Format(time.RFC3339), toTime.Format(time.RFC3339))
+			Logger.Tracef(logging.Event(logging.EventMessageFilter,
+				logging.Str("airgap.message.id", id),
+				logging.Str("airgap.filter.reason", "after.to"),
+			), "Discarding message: %s time %s after to %s", id, t.Format(time.RFC3339), toTime.Format(time.RFC3339))
 			markFinished(downstreamPartition)
 			// return false to indicate consumer can stop this claim (adapter may honor it)
 			return false
@@ -449,13 +560,22 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 		if config.inputFilter != nil {
 			shouldFilter, err := config.inputFilter.ShouldFilterOut(received)
 			if err != nil {
-				Logger.Errorf("Error applying input filter: %v", err)
+				Logger.Errorf(logging.Event(logging.EventMessageFilter,
+					logging.Str("airgap.message.id", sendID),
+				).Merge(logging.Err(err)), "Error applying input filter: %v", err)
 				if strings.Contains(err.Error(), "timeout") {
-					Logger.Warnf("Input filter timeout for id=%s", sendID)
+					Logger.Warnf(logging.Event(logging.EventMessageFilter,
+						logging.Failure(),
+						logging.Str("airgap.message.id", sendID),
+						logging.Str("error.type", "timeout"),
+					), "Input filter timeout for id=%s", sendID)
 				}
 				// On error, fail open (don't filter)
 			} else if shouldFilter {
-				Logger.Debugf("Input filter cleared payload for message: %s (sending with empty payload to preserve sequence)", sendID)
+				Logger.Debugf(logging.Event(logging.EventMessageFilter,
+					logging.Str("airgap.message.id", sendID),
+					logging.Str("airgap.filter.action", "clear.payload"),
+				), "Input filter cleared payload for message: %s (sending with empty payload to preserve sequence)", sendID)
 				received = []byte{}
 			}
 		}
@@ -465,7 +585,10 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 		if config.compressWhenLengthExceeds > 0 && len(received) > config.compressWhenLengthExceeds {
 			compressed, err := protocol.CompressGzip(received)
 			if err != nil {
-				Logger.Errorf("Error compressing data: %s", err)
+				Logger.Errorf(logging.Event(logging.EventProtocolEncode,
+					logging.Str("airgap.message.id", sendID),
+					logging.Str("airgap.compression.algorithm", "gzip"),
+				).Merge(logging.Err(err)), "Error compressing data: %s", err)
 			} else {
 				isCompressed = true
 				received = compressed
@@ -494,7 +617,9 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 			messages = protocol.FormatMessage(messageType, sendID, received, config.payloadSize)
 		}
 		if err != nil {
-			Logger.Error(err)
+			Logger.Error(logging.Event(logging.EventCryptoEncrypt,
+				logging.Str("airgap.message.id", sendID),
+			).Merge(logging.Err(err)), err)
 		}
 
 		// EPS limiter: if config.eps > 0, limit sending rate
@@ -520,7 +645,10 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 			limiterMu.Unlock()
 		}
 		if uerr := udpClient.SendMessages(messages); uerr != nil {
-			Logger.Errorf("UDP send error: %v", uerr)
+			Logger.Errorf(logging.Event(logging.EventMessageDeliver,
+				logging.Str("airgap.message.id", sendID),
+				logging.Int("airgap.message.count", int64(len(messages))),
+			).Merge(logging.Err(uerr)), "UDP send error: %v", uerr)
 		} else {
 			atomic.AddInt64(&sentEvents, int64(len(messages)))
 			atomic.AddInt64(&totalSent, int64(len(messages)))
@@ -536,8 +664,14 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 		return keepRunning
 	}
 
-	Logger.Debugf("Got %d results from resend filter", len(jsonFilter.Results))
-	Logger.Debugf("Resend filter content: %+v", jsonFilter)
+	Logger.Debugf(logging.Event(logging.EventResendFileRead,
+		logging.Str("file.path", config.resendFileName),
+		logging.Int("airgap.resend.result.count", int64(len(jsonFilter.Results))),
+	), "Got %d results from resend filter", len(jsonFilter.Results))
+	Logger.Debugf(logging.Event(logging.EventResendFileRead,
+		logging.Str("file.path", config.resendFileName),
+		logging.Str("airgap.resend.filter.type", jsonFilter.Type),
+	), "Resend filter content: %+v", jsonFilter)
 
 	// Start one kafka reader goroutine per GapResult (partition)
 	for _, r := range jsonFilter.Results {
@@ -546,7 +680,10 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 			defer wg.Done()
 			upstreamPartition, mapErr := mapDownstreamToUpstreamPartition(res.Partition, config.partitionStartValue)
 			if mapErr != nil {
-				Logger.Errorf("Invalid partition mapping for topic %s downstream partition %d: %v", res.Topic, res.Partition, mapErr)
+				Logger.Errorf(logging.Event(logging.EventResendReplay,
+					logging.Str("messaging.destination.name", res.Topic),
+					logging.Int("airgap.partition.downstream", int64(res.Partition)),
+				).Merge(logging.Err(mapErr)), "Invalid partition mapping for topic %s downstream partition %d: %v", res.Topic, res.Partition, mapErr)
 				return
 			}
 			// name per partition + timestamp
@@ -555,9 +692,19 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 
 			// The adapter's Read must accept ctx and return eventually (ReadFromKafkaWithContext does).
 			// We call Read with "from" as configured earlier; adapters should internally honor ctx.
-			Logger.Debugf("Starting Kafka read for downstream partition %d (upstream partition %d) with name %s with bootstrapServers: %s", res.Partition, upstreamPartition, name, config.bootstrapServers)
+			Logger.Debugf(logging.Event(logging.EventKafkaConsume,
+				logging.Str("server.address", config.bootstrapServers),
+				logging.Str("messaging.destination.name", res.Topic),
+				logging.Decimal("messaging.destination.partition.id", int64(upstreamPartition)),
+				logging.Int("airgap.partition.downstream", int64(res.Partition)),
+				logging.Str("messaging.consumer.group.name", name),
+			), "Starting Kafka read for downstream partition %d (upstream partition %d) with name %s with bootstrapServers: %s", res.Partition, upstreamPartition, name, config.bootstrapServers)
 			fromOffset := getStartOffsetForResult(jsonFilter.Type, res)
-			Logger.Debugf("Using start offset %d for downstream partition %d", fromOffset, res.Partition)
+			Logger.Debugf(logging.Event(logging.EventKafkaOffset,
+				logging.Str("messaging.destination.name", res.Topic),
+				logging.Int("airgap.partition.downstream", int64(res.Partition)),
+				logging.Int("messaging.kafka.offset", fromOffset),
+			), "Using start offset %d for downstream partition %d", fromOffset, res.Partition)
 			kafkaClient.ReadToEndPartition(upstreamPartition, ctx, config.bootstrapServers, res.Topic, name, fromOffset,
 				kafkaHandler)
 			// // If we exit the read loop without having marked finished, do it now.
@@ -565,13 +712,19 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 			// 	markFinished(res.Partition)
 			// }
 			// When Read returns, it means the consumer was stopped (ctx cancelled or adapter finished).
-			Logger.Debugf("Kafka reader for downstream partition %d (upstream partition %d) returned", res.Partition, upstreamPartition)
+			Logger.Debugf(logging.Event(logging.EventKafkaConsume,
+				logging.Str("messaging.destination.name", res.Topic),
+				logging.Decimal("messaging.destination.partition.id", int64(upstreamPartition)),
+				logging.Int("airgap.partition.downstream", int64(res.Partition)),
+			), "Kafka reader for downstream partition %d (upstream partition %d) returned", res.Partition, upstreamPartition)
 		}(r)
 	}
 
 	// Wait for all readers to finish (cancel() will cause them to return)
 	wg.Wait()
-	Logger.Info("RunResend completed: all kafka readers finished")
+	Logger.Info(logging.Event(logging.EventResendReplay,
+		logging.Int("airgap.message.count", atomic.LoadInt64(&totalSent)),
+	), "RunResend completed: all kafka readers finished")
 
 	// Signal completion
 	if done != nil {
@@ -585,8 +738,11 @@ func Main(build string) {
 
 func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 	BuildNumber = build
-	Logger.Printf("Resend version: %s starting up...", version.GitVersion)
-	Logger.Printf("Build number: %s", BuildNumber)
+	Logger.Infof(logging.Event(logging.EventAppStart),
+		"Resend version: %s starting up...", version.GitVersion)
+	Logger.Infof(logging.Event(logging.EventAppStart,
+		logging.Str("airgap.build.number", BuildNumber),
+	), "Build number: %s", BuildNumber)
 
 	var fileName string
 	var overrideArgs []string
@@ -597,7 +753,11 @@ func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 		} else if fileName == "" {
 			fileName = arg
 		} else {
-			Logger.Fatalf("Too many non-dashed command line parameters. Only one property file allowed.")
+			Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.config.source", "command-line"),
+				logging.Str("airgap.config.value", arg),
+			), "Too many non-dashed command line parameters. Only one property file allowed.")
 		}
 	}
 
@@ -613,14 +773,22 @@ func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 	// Make sure we have everything we need in the config
 	config = checkConfiguration(config)
 	if err != nil {
-		Logger.Fatalf("Error reading configuration file %s: %v", fileName, err)
+		Logger.Fatalf(logging.Event(logging.EventConfigLoad,
+			logging.Str("file.path", fileName),
+		).Merge(logging.Err(err)), "Error reading configuration file %s: %v", fileName, err)
 	}
 
 	// Set the log file name
 	if config.logFileName != "" {
-		Logger.Print("Configuring log to: " + config.logFileName)
-		Logger.Printf("resend version: %s", version.GitVersion)
-		Logger.Print("Log to file started up")
+		Logger.Info(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "logFileName"),
+			logging.Str("file.path", config.logFileName),
+		), "Configuring log to: "+config.logFileName)
+		Logger.Infof(logging.Event(logging.EventAppStart),
+			"resend version: %s", version.GitVersion)
+		Logger.Info(logging.Event(logging.EventAppStart,
+			logging.Str("file.path", config.logFileName),
+		), "Log to file started up")
 	}
 
 	// Now log the complete configuration to stdout or file
@@ -663,7 +831,12 @@ func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 				}
 				if Logger.CanLog(logging.INFO) {
 					b, _ := json.Marshal(stats)
-					Logger.Info("STATISTICS: " + string(b))
+					Logger.Info(logging.Event(logging.EventStatsReport,
+						logging.Int("airgap.message.count", sent),
+						logging.Int("airgap.message.received", recv),
+						logging.Int("airgap.message.total.sent", totalSnt),
+						logging.Int("airgap.message.total.received", totalRecv),
+					), "STATISTICS: "+string(b))
 				}
 			}
 		}()
@@ -673,11 +846,17 @@ func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 	if config.payloadSize == 0 {
 		mtuValue, err := mtu.GetMTU(config.nic, fmt.Sprintf("%s:%d", config.targetIP, config.targetPort))
 		if err != nil {
-			Logger.Fatal(err)
+			Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+				logging.Str("airgap.config.setting", "payloadSize"),
+				logging.Str("airgap.network.interface", config.nic),
+			).Merge(logging.Err(err)), err)
 		}
 		config.payloadSize = uint16(mtuValue) - protocol.HEADER_SIZE
 	}
-	Logger.Printf("payloadSize read from MTU: %d\n", config.payloadSize)
+	Logger.Infof(logging.Event(logging.EventConfigApplied,
+		logging.Str("airgap.config.setting", "payloadSize"),
+		logging.Int("airgap.config.value", int64(config.payloadSize)),
+	), "payloadSize read from MTU: %d\n", config.payloadSize)
 
 	// Signals
 	hup := make(chan os.Signal, 1)
@@ -689,7 +868,10 @@ func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 	address := fmt.Sprintf("%s:%d", config.targetIP, config.targetPort)
 	udpAdapter, err := NewUDPAdapter(address, config.nic)
 	if err != nil {
-		Logger.Fatalf("Error creating UDP: %v", err)
+		Logger.Fatalf(logging.Event(logging.EventUDPBind,
+			logging.Str("server.address", address),
+			logging.Str("airgap.network.interface", config.nic),
+		).Merge(logging.Err(err)), "Error creating UDP: %v", err)
 	}
 
 	// Choose Kafka adapter
@@ -719,16 +901,23 @@ func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 			}
 			if Logger.CanLog(logging.INFO) {
 				b, _ := json.Marshal(stats)
-				Logger.Info("STATISTICS: " + string(b))
+				Logger.Info(logging.Event(logging.EventStatsReport,
+					logging.Int("airgap.message.count", sent),
+					logging.Int("airgap.message.received", recv),
+					logging.Int("airgap.message.total.sent", atomic.LoadInt64(&totalSent)),
+					logging.Int("airgap.message.total.received", atomic.LoadInt64(&totalReceived)),
+				), "STATISTICS: "+string(b))
 			}
-			Logger.Info("Resend process finished. Exiting...")
+			Logger.Info(logging.Event(logging.EventAppStop), "Resend process finished. Exiting...")
 			messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 				fmt.Appendf(nil, "%s %s finished", protocol.GetTimestamp(), config.id), config.payloadSize)
 			udpAdapter.SendMessage(messages[0])
 			udpAdapter.Close()
 			return
 		case <-sigterm:
-			Logger.Printf("Received SIGTERM, shutting down")
+			Logger.Info(logging.Event(logging.EventAppShutdown,
+				logging.Str("airgap.shutdown.reason", "sigterm"),
+			), "Received SIGTERM, shutting down")
 			cancelRun()
 			<-done
 			messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
@@ -737,10 +926,16 @@ func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 			udpAdapter.Close()
 			return
 		case <-hup:
-			Logger.Printf("SIGHUP received: reopening logs")
+			Logger.Info(logging.Event(logging.EventConfigApplied,
+				logging.Str("airgap.config.setting", "logFileName"),
+				logging.Str("file.path", config.logFileName),
+			), "SIGHUP received: reopening logs")
 			if config.logFileName != "" {
 				if err := Logger.SetLogFile(config.logFileName); err != nil {
-					Logger.Errorf("Failed reopening log file: %v", err)
+					Logger.Errorf(logging.Event(logging.EventConfigApplied,
+						logging.Str("airgap.config.setting", "logFileName"),
+						logging.Str("file.path", config.logFileName),
+					).Merge(logging.Err(err)), "Failed reopening log file: %v", err)
 				}
 			}
 		}

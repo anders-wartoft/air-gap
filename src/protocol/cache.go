@@ -4,6 +4,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"sitia.nu/airgap/src/logging"
 )
 
 // Time each cache entry should live
@@ -49,7 +51,12 @@ func (m *MessageCache) AddPartAndSnapshot(id string, messageId uint16, maxMessag
 		if len(m.entries) >= m.maxEntries {
 			// Cache is full; drop the fragment rather than growing without bound.
 			// This protects against memory exhaustion from flooding with unique IDs.
-			Logger.Warnf("Fragment cache full (%d entries), dropping fragment for id: %s", m.maxEntries, id)
+			Logger.Warnf(logging.Event(logging.EventProtocolCache,
+				logging.Failure(),
+				logging.Str("airgap.cache.action", "drop"),
+				logging.Int("airgap.cache.max_entries", int64(m.maxEntries)),
+				logging.Str("airgap.message.id", id),
+			), "Fragment cache full (%d entries), dropping fragment for id: %s", m.maxEntries, id)
 			return MessageCacheEntry{}, false
 		}
 		entry = createMessageCacheEntry()
@@ -160,7 +167,9 @@ func (m *MessageCache) CleanList() {
 	defer m.mu.Unlock()
 
 	start_time := time.Now()
-	Logger.Debugf("Starting cache cleanup task at %v", GetTimestamp())
+	Logger.Debugf(logging.Event(logging.EventProtocolCache,
+		logging.Str("airgap.cache.action", "cleanup.start"),
+	), "Starting cache cleanup task at %v", GetTimestamp())
 	cleaned_up_times := 0
 	for key, entry := range m.entries {
 		if entry.end.Before(time.Now()) {
@@ -168,6 +177,10 @@ func (m *MessageCache) CleanList() {
 			cleaned_up_times++
 		}
 	}
-	Logger.Debugf("Cache cleanup finished after %i seconds. %i items was cleaned", time.Now().UTC().Second()-start_time.UTC().Second(), cleaned_up_times)
+	Logger.Debugf(logging.Event(logging.EventProtocolCache,
+		logging.Str("airgap.cache.action", "cleanup.finish"),
+		logging.Int("airgap.cache.evicted", int64(cleaned_up_times)),
+		logging.Int("airgap.cache.duration_seconds", int64(time.Now().UTC().Second()-start_time.UTC().Second())),
+	), "Cache cleanup finished after %d seconds. %d items was cleaned", time.Now().UTC().Second()-start_time.UTC().Second(), cleaned_up_times)
 
 }

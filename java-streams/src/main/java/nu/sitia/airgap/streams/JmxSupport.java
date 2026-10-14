@@ -1,5 +1,9 @@
 package nu.sitia.airgap.streams;
 
+import nu.sitia.airgap.logging.Attrs;
+import nu.sitia.airgap.logging.Events;
+import nu.sitia.airgap.logging.Log;
+
 import nu.sitia.airgap.gapdetector.GapDetector;
 import nu.sitia.airgap.streams.PartitionDedupApp.DedupAndGapProcessor;
 
@@ -57,7 +61,7 @@ public class JmxSupport {
                 GapDetector gd = gapDetectors.get(base);
                 if (gd == null) throw new AttributeNotFoundException(attribute);
                 String result = gd.getAllCompactGaps().toString();
-                LOG.debug("Gaps for {}: {}", base, result);
+                Log.debug(LOG, Attrs.event(Events.STATS_REPORT), "Gaps for {}: {}", base, result);
                 return result;
             }
             if (attribute.endsWith("_mem")) {
@@ -292,7 +296,7 @@ public class JmxSupport {
     public static synchronized void registerProcessorMBean(DedupAndGapProcessor processor) {
         int partition = processor.getPartition();
         if (partition == -1) {
-            LOG.info("Skipping registration of GapDetectors MBean for uninitialized partition (-1)");
+            Log.info(LOG, Attrs.event(Events.STATS_REPORT), "Skipping registration of GapDetectors MBean for uninitialized partition (-1)");
             return;
         }
         try {
@@ -306,7 +310,7 @@ public class JmxSupport {
             }
             GapDetectorsDynamicMBean mbean = new GapDetectorsDynamicMBean(processor);
             mbs.registerMBean(mbean, name);
-            LOG.debug("Registered GapDetectors MBean for partition {} as {}", partition, name);
+            Log.debug(LOG, Attrs.event(Events.STATS_REPORT), "Registered GapDetectors MBean for partition {} as {}", partition, name);
         } catch (Exception e) {
             e.printStackTrace();
         }

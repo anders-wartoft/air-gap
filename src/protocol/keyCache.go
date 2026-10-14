@@ -4,6 +4,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"sitia.nu/airgap/src/logging"
 )
 
 // Time each cache entry should live
@@ -81,7 +83,10 @@ func (m *KeyCache) CleanList() {
 
 	for key, entry := range m.entries {
 		if entry.end.Before(time.Now()) {
-			Logger.Debugf("%v Removing cache item: %v", GetTimestamp(), key)
+			Logger.Debugf(logging.Event(logging.EventCryptoKeyLoad,
+				logging.Str("airgap.cache.key", key),
+				logging.Str("airgap.cache.action", "evict"),
+			), "%v Removing cache item: %v", GetTimestamp(), key)
 			delete(m.entries, key)
 		}
 	}

@@ -66,7 +66,12 @@ func NewUDPAdapterLinux(addr string) *UDPAdapterLinux {
 // Listen starts multiple sockets for SO_REUSEPORT
 func (u *UDPAdapterLinux) Listen(ip string, port int, rcvBufSize int, handler func([]byte), stopChan <-chan struct{}) {
 	addrStr := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
-	Logger.Printf("UDP listener starting on %s with %d workers (MTU=%d)", addrStr, u.numReceivers, u.mtu)
+	Logger.Infof(logging.Event(logging.EventUDPBind,
+		logging.Str("server.address", ip),
+		logging.Int("server.port", int64(port)),
+		logging.Int("airgap.udp.workers", int64(u.numReceivers)),
+		logging.Int("airgap.udp.mtu", int64(u.mtu)),
+	), "UDP listener starting on %s with %d workers (MTU=%d)", addrStr, u.numReceivers, u.mtu)
 
 	packetChan := make(chan []byte, u.channelBufferSize)
 
@@ -110,7 +115,12 @@ func (u *UDPAdapterLinux) Listen(ip string, port int, rcvBufSize int, handler fu
 
 		conn, err := lc.ListenPacket(context.Background(), "udp", addrStr)
 		if err != nil {
-			Logger.Fatalf("Failed to listen on %s: %v", addrStr, err)
+			Logger.Fatalf(logging.Event(logging.EventUDPBind,
+				logging.Failure(),
+				logging.Str("server.address", ip),
+				logging.Int("server.port", int64(port)),
+				logging.ErrorType(err),
+			), "Failed to listen on %s: %v", addrStr, err)
 		}
 		udpConn := conn.(*net.UDPConn)
 		u.conns = append(u.conns, udpConn)
@@ -175,7 +185,11 @@ func (u *UDPAdapterLinux) Listen(ip string, port int, rcvBufSize int, handler fu
 						if u.closed.Load() {
 							return
 						}
-						Logger.Errorf("UDP read error: %v", err)
+						Logger.Errorf(logging.Event(logging.EventUDPReceive,
+							logging.Failure(),
+							logging.Str("server.address", addrStr),
+							logging.ErrorType(err),
+						), "UDP read error: %v", err)
 						continue
 					}
 					buf := make([]byte, n)
@@ -208,7 +222,11 @@ func (u *UDPAdapterLinux) Listen(ip string, port int, rcvBufSize int, handler fu
 	select {
 	case <-done:
 	case <-timeout:
-		Logger.Warnf("UDPAdapter shutdown timeout reached, some messages may be lost")
+		Logger.Warn(logging.Event(logging.EventAppShutdown,
+			logging.Failure(),
+			logging.Str("server.address", addrStr),
+			logging.Str("airgap.shutdown.reason", "worker.timeout"),
+		), "UDPAdapter shutdown timeout reached, some messages may be lost")
 		<-done
 	}
 	close(packetChan)

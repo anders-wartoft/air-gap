@@ -2,6 +2,17 @@
 
 ## 0.1.14-SNAPSHOT
 
+### OpenTelemetry Log Output and Log Integrity
+
+- **New `logFormat` option** for all Go binaries. `logFormat=otel` writes OpenTelemetry Logs as OTLP/JSON, one record per line, in the same shape as the OpenTelemetry Collector file exporter, so a Collector `filelog` receiver can read it without a custom parser. `logFormat=text` remains the default and is unchanged. `service.name` is derived from the binary name and `service.instance.id` from the `id` option, falling back to the hostname.
+- Dedup packages include an optional `/etc/airgap/log4j2-otel.xml` layout producing the same OTLP/JSON envelope. The existing `/etc/airgap/log4j2.xml` PatternLayout remains the default.
+- **New `hash` option** hashes the payload of every log record and records the digest as the `airgap.log.hash` attribute. Supported algorithms are `SHA256`, `SHA384`, `SHA512`, `SHA3-256`, `SHA3-384` and `SHA3-512`, with `none` as the default. Only the record body is hashed, not the timestamp or severity, so that a Collector rewriting metadata does not invalidate the digest.
+- **New `hash-chain` option** binds each record to its predecessor and writes an anchor record every N records. Because an anchor is itself hashed and chained, it transitively commits to every record in its window, which means the forthcoming signing support only has to sign anchors rather than every record. Attribute names for signatures are reserved but not yet emitted.
+- Sequence numbers are unique and monotonic for the lifetime of a process. When the chain is configured after startup, the first chained record carries `airgap.log.chain.restart`, so a verifier can distinguish a declared restart from records having been removed.
+- All three options can also be set through the usual environment variables, for example `AIRGAP_UPSTREAM_LOG_FORMAT`, `AIRGAP_UPSTREAM_LOG_HASH` and `AIRGAP_UPSTREAM_LOG_HASH_CHAIN`.
+- Known limitations: records written before the configuration file is read are not stamped, and direct writes to the exposed `StdLogger` writer bypass the chain. Sarama is routed through the application logger in OTel mode. These details are documented in [Logging.md](doc/Logging.md), together with the chain formula and a standalone verification script.
+- Routing every log method through a single formatting path made them recognisable printf wrappers to `go vet`, which surfaced twelve pre-existing format-string defects in `upstream`, `downstream`, `resend`, `protocol` and `kafka`, such as `%i` verbs, missing verbs and arguments passed to a format string with no placeholder. All twelve are fixed; they previously produced mangled log output.
+
 ### Dedup Restart Safety
 
 - Dedup no longer exits while Kafka Streams is legitimately rebalancing or restoring local state. `FAIL_FAST_STARTUP_TIMEOUT_MS` now controls periodic startup diagnostics instead of imposing a fatal startup deadline.

@@ -8,6 +8,7 @@ import (
 
 	"github.com/IBM/sarama"
 	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/udp"
 )
 
@@ -50,7 +51,11 @@ func (k *KafkaAdapter) GetLastOffset(servers, topic string, partition int) (int6
 	defer client.Close()
 
 	if partition < 0 || partition > 2147483647 {
-		Logger.Errorf("Partition out of int32 range: %d", partition)
+		Logger.Errorf(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "partition"),
+			logging.Decimal("messaging.destination.partition.id", int64(partition)),
+		), "Partition out of int32 range: %d", partition)
 		os.Exit(1)
 	}
 	offset, err := client.GetOffset(topic, int32(partition), sarama.OffsetNewest)

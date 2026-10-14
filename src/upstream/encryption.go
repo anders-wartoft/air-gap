@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/protocol"
 	"sitia.nu/airgap/src/udp"
 )
@@ -20,7 +21,11 @@ func createNewKey() []byte {
 	key := make([]byte, 32)
 	_, err := rand.Read(key)
 	if err != nil {
-		Logger.Panicf("Error generating key: %v", err)
+		Logger.Panicf(logging.Event(logging.EventCryptoKeyLoad,
+			logging.Failure(),
+			logging.Str("airgap.crypto.key.kind", "symmetric"),
+			logging.ErrorType(err),
+		), "Error generating key: %v", err)
 	}
 	return key
 }
@@ -29,7 +34,12 @@ func createNewKey() []byte {
 func readPublicKey(fileName string) *rsa.PublicKey {
 	file, err := os.Open(fileName)
 	if err != nil {
-		Logger.Fatalf("Can't read public key from file %s, %v", fileName, err)
+		Logger.Fatalf(logging.Event(logging.EventCryptoKeyLoad,
+			logging.Failure(),
+			logging.Str("airgap.crypto.key.kind", "public"),
+			logging.Str("file.path", fileName),
+			logging.ErrorType(err),
+		), "Can't read public key from file %s, %v", fileName, err)
 	}
 	defer file.Close()
 
@@ -44,18 +54,38 @@ func readPublicKey(fileName string) *rsa.PublicKey {
 
 	block, _ := pem.Decode([]byte(builder.String()))
 	if block == nil {
-		Logger.Fatal("failed to parse PEM block containing the public key")
+		Logger.Fatal(logging.Event(logging.EventCryptoKeyLoad,
+			logging.Failure(),
+			logging.Str("airgap.crypto.key.kind", "public"),
+			logging.Str("file.path", fileName),
+			logging.Str("error.type", "pem.decode"),
+		), "failed to parse PEM block containing the public key")
 	}
-	Logger.Printf("block type %s", block.Type)
+	Logger.Infof(logging.Event(logging.EventCryptoKeyLoad,
+		logging.Str("airgap.crypto.key.kind", "public"),
+		logging.Str("file.path", fileName),
+		logging.Str("airgap.crypto.pem.block_type", block.Type),
+	), "block type %s", block.Type)
 
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		Logger.Fatalf("failed to parse DER encoded certificate: " + err.Error())
+		Logger.Fatalf(logging.Event(logging.EventCryptoKeyLoad,
+			logging.Failure(),
+			logging.Str("airgap.crypto.key.kind", "public"),
+			logging.Str("file.path", fileName),
+			logging.Str("error.type", "x509.parse"),
+			logging.ErrorType(err),
+		), "failed to parse DER encoded certificate: %v", err)
 	}
 
 	pubKey, ok := cert.PublicKey.(*rsa.PublicKey)
 	if !ok {
-		Logger.Fatal("public key is not of type *rsa.PublicKey")
+		Logger.Fatal(logging.Event(logging.EventCryptoKeyLoad,
+			logging.Failure(),
+			logging.Str("airgap.crypto.key.kind", "public"),
+			logging.Str("file.path", fileName),
+			logging.Str("error.type", "key.not.rsa"),
+		), "public key is not of type *rsa.PublicKey")
 	}
 	return pubKey
 }
@@ -86,7 +116,12 @@ func generateNewKey() []byte {
 	encryptedKey, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, config.publicKey, toEncrypt, nil)
 
 	if err != nil {
-		Logger.Panicf("Error encrypting key: %v", err)
+		Logger.Panicf(logging.Event(logging.EventCryptoEncrypt,
+			logging.Failure(),
+			logging.Str("airgap.crypto.key.kind", "symmetric"),
+			logging.Str("file.path", config.publicKeyFile),
+			logging.ErrorType(err),
+		), "Error encrypting key: %v", err)
 	}
 
 	// encryptedKey now contains the encrypted key
@@ -102,12 +137,20 @@ func sendNewKey(conn *udp.UDPConn) {
 	toSend := []byte(guard)
 	toSend = append(toSend, byteKey...)
 
-	Logger.Printf("Sending key exchange message...")
+	Logger.Info(logging.Event(logging.EventCryptoKeyExchange,
+		logging.Str("airgap.message.id", guard),
+		logging.Int("airgap.message.size", int64(len(toSend))),
+	), "Sending key exchange message...")
 	messages := protocol.FormatMessage(protocol.TYPE_KEY_EXCHANGE, "KEY_UPDATE#", toSend, config.payloadSize)
 	if conn != nil {
 		udpErr := conn.SendMessages(messages)
 		if udpErr != nil {
-			Logger.Errorf("Error sending encryption key (will continue): %v", udpErr)
+			Logger.Errorf(logging.Event(logging.EventCryptoKeyExchange,
+				logging.Failure(),
+				logging.Str("airgap.message.id", guard),
+				logging.Int("airgap.message.count", int64(len(messages))),
+				logging.ErrorType(udpErr),
+			), "Error sending encryption key (will continue): %v", udpErr)
 		}
 	}
 	// Now, we should be using the new key too

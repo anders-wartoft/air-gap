@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"sitia.nu/airgap/src/internal/pinnedtls"
+	"sitia.nu/airgap/src/logging"
 )
 
 func (c TransferConfiguration) validateTLSMode() error {
@@ -54,10 +55,20 @@ func (t *TCPAdapter) reloadPinned(candidate TransferConfiguration) error {
 	}
 	result, disconnectErr := t.pinManager.Activate(snapshot)
 	t.trustedDir = candidate.tcpTLSTrustedKeysDir
-	Logger.Infof("Pinned TLS reload: peers=%d keys=%d added=%v removed=%v disconnected=%d",
+	Logger.Infof(logging.Event(logging.EventTLSPinReload,
+		logging.Str("file.path", candidate.tcpTLSTrustedKeysDir),
+		logging.Int("airgap.tls.pin.peers", int64(result.Peers)),
+		logging.Int("airgap.tls.pin.keys", int64(result.Keys)),
+		logging.Int("airgap.tls.pin.added", int64(len(result.Added))),
+		logging.Int("airgap.tls.pin.removed", int64(len(result.Removed))),
+		logging.Int("airgap.tls.pin.disconnected", int64(result.Disconnected)),
+	), "Pinned TLS reload: peers=%d keys=%d added=%v removed=%v disconnected=%d",
 		result.Peers, result.Keys, result.Added, result.Removed, result.Disconnected)
 	if disconnectErr != nil {
-		Logger.Errorf("Pinned TLS revocation disconnect: %v", disconnectErr)
+		Logger.Errorf(logging.Event(logging.EventTLSPinReload,
+			logging.Str("file.path", candidate.tcpTLSTrustedKeysDir),
+		).Merge(logging.Err(disconnectErr)),
+			"Pinned TLS revocation disconnect: %v", disconnectErr)
 	}
 	return nil
 }

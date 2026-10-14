@@ -385,6 +385,13 @@ services:
       AIRGAP_UPSTREAM_NIC: ${UPSTREAM_A_NIC:-eth0}
       AIRGAP_UPSTREAM_TARGET_IP: ${UPSTREAM_A_TARGET_IP:-downstream}
       AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS: ${UPSTREAM_A_BOOTSTRAP:-kafka-upstream:9092,kafka-upstream-2:8092}
+      AIRGAP_UPSTREAM_LOG_FORMAT: ${UPSTREAM_LOG_FORMAT:-}
+      AIRGAP_UPSTREAM_LOG_HASH: ${UPSTREAM_LOG_HASH:-}
+      AIRGAP_UPSTREAM_LOG_HASH_CHAIN: ${UPSTREAM_LOG_HASH_CHAIN:-}
+      AIRGAP_UPSTREAM_LOG_SIGNING_CERT: ${UPSTREAM_LOG_SIGNING_CERT:-}
+      AIRGAP_UPSTREAM_LOG_SIGNING_KEY: ${UPSTREAM_LOG_SIGNING_KEY:-}
+      AIRGAP_UPSTREAM_LOG_SIGNER_ID: ${UPSTREAM_LOG_SIGNER_ID:-}
+      AIRGAP_UPSTREAM_LOG_SIGNING_EKU: ${UPSTREAM_LOG_SIGNING_EKU:-}
     command: ["upstream"]
     # Safety net for other restart causes; the downstream-race one above is
     # now prevented at startup.
@@ -438,6 +445,13 @@ services:
       AIRGAP_CONFIG: ${DOWNSTREAM_CONFIG:-/airgap/config/downstream-docker.properties}
       AIRGAP_DOWNSTREAM_NIC: ${DOWNSTREAM_NIC:-eth0}
       AIRGAP_DOWNSTREAM_BOOTSTRAP_SERVERS: ${DOWNSTREAM_BOOTSTRAP:-kafka-downstream:9092,kafka-downstream-2:8092}
+      AIRGAP_DOWNSTREAM_LOG_FORMAT: ${DOWNSTREAM_LOG_FORMAT:-}
+      AIRGAP_DOWNSTREAM_LOG_HASH: ${DOWNSTREAM_LOG_HASH:-}
+      AIRGAP_DOWNSTREAM_LOG_HASH_CHAIN: ${DOWNSTREAM_LOG_HASH_CHAIN:-}
+      AIRGAP_DOWNSTREAM_LOG_SIGNING_CERT: ${DOWNSTREAM_LOG_SIGNING_CERT:-}
+      AIRGAP_DOWNSTREAM_LOG_SIGNING_KEY: ${DOWNSTREAM_LOG_SIGNING_KEY:-}
+      AIRGAP_DOWNSTREAM_LOG_SIGNER_ID: ${DOWNSTREAM_LOG_SIGNER_ID:-}
+      AIRGAP_DOWNSTREAM_LOG_SIGNING_EKU: ${DOWNSTREAM_LOG_SIGNING_EKU:-}
       # Holds this container's actual binary launch back by N seconds while
       # the rest of the stack (incl. upstream-a) starts normally. Used by
       # TC-20 to recreate "downstream starts late" and prove upstream
@@ -464,6 +478,7 @@ services:
     environment:
       BOOTSTRAP_SERVERS: ${DEDUP_BOOTSTRAP:-kafka-downstream:9092,kafka-downstream-2:8092}
       STATE_DIR_CONFIG: /tmp/dedup-state
+      DEDUP_LOG_CONFIG: ${DEDUP_LOG_CONFIG:-/airgap/config/testcases/log4j2.xml}
     volumes:
       - ../../java-streams/target:/airgap/dedup-jar:ro
       - ../../config:/airgap/config:ro
@@ -481,7 +496,7 @@ services:
         fi
         mkdir -p "$$STATE_DIR_CONFIG"
         echo "[dedup] jar=$$JAR state=$$STATE_DIR_CONFIG bootstrap=$$BOOTSTRAP_SERVERS raw=$${RAW_TOPICS-} clean=$${CLEAN_TOPIC-} gap=$${GAP_TOPIC-}"
-        exec java -Dlog4j.configurationFile=/airgap/config/testcases/log4j2.xml -jar "$$JAR"
+        exec java -Dlog4j.configurationFile="$$DEDUP_LOG_CONFIG" -jar "$$JAR"
 
   # ==========================================================================
   # One-shot: dump gap descriptors from the downstream Kafka to /airgap/tmp.
@@ -507,6 +522,7 @@ services:
     environment:
       AIRGAP_CONFIG: ${CREATE_CONFIG:-/airgap/config/create.properties}
       AIRGAP_CREATE_BOOTSTRAP_SERVERS: ${CREATE_BOOTSTRAP:-kafka-downstream:9092,kafka-downstream-2:8092}
+      AIRGAP_CREATE_LOG_FORMAT: ${CREATE_LOG_FORMAT:-}
     command: ["create"]
     restart: "no"
 
@@ -536,6 +552,7 @@ services:
       AIRGAP_RESEND_NIC: ${RESEND_NIC:-eth0}
       AIRGAP_RESEND_TARGET_IP: ${RESEND_TARGET_IP:-downstream}
       AIRGAP_RESEND_BOOTSTRAP_SERVERS: ${RESEND_BOOTSTRAP:-kafka-upstream:9092,kafka-upstream-2:8092}
+      AIRGAP_RESEND_LOG_FORMAT: ${RESEND_LOG_FORMAT:-}
     command: ["resend"]
     restart: "no"
 

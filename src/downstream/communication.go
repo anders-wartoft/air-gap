@@ -26,7 +26,10 @@ func sendMessage(messageType uint8, id string, topic string, message []byte) {
 	// If topic is "" then the configuration prohibits sending messages
 	if topic == "" {
 		if Logger.CanLog(logging.DEBUG) {
-			Logger.Debugf("Not sending message %s since topic name is empty", string(message))
+			Logger.Debugf(logging.Event(logging.EventMessageDeliver,
+				logging.Str("airgap.message.id", id),
+				logging.Int("airgap.message.size", int64(len(message))),
+			), "Not sending message %s since topic name is empty", string(message))
 		}
 		return
 	}
@@ -39,20 +42,32 @@ func sendMessage(messageType uint8, id string, topic string, message []byte) {
 		messageKey = id
 	}
 	if Logger.CanLog(logging.DEBUG) {
-		Logger.Debugf("id: %s", id)
+		deliver := logging.Event(logging.EventMessageDeliver,
+			logging.Str("messaging.destination.name", topic),
+			logging.Str("airgap.message.id", messageKey),
+			logging.Int("airgap.message.size", int64(len(message))),
+		)
+		Logger.Debugf(deliver, "id: %s", id)
 		// Print the first 40 bytes of the message, add ... if truncated
 		preview := string(message)
 		var limit = 60
 		if len(message) > limit {
 			preview = string(message[:limit]) + "..."
 		}
-		Logger.Debugf("%s Sending cleartext message to %s: '%s' on topic: %s", config.id, config.target, preview, topic)
+		Logger.Debugf(deliver.With(
+			logging.Str("airgap.instance.id", config.id),
+			logging.Str("airgap.target", config.target),
+		), "%s Sending cleartext message to %s: '%s' on topic: %s", config.id, config.target, preview, topic)
 	}
 	// If this is an error message, prepend a timestamp
 	var toSend []byte = message
 	if protocol.IsMessageType(messageType, protocol.TYPE_ERROR) || protocol.IsMessageType(messageType, protocol.TYPE_STATUS) {
 		toSend = fmt.Appendf(nil, "%s %s %s", protocol.GetTimestamp(), config.id, string(message))
-		Logger.Print(string(toSend))
+		Logger.Info(logging.Event(logging.EventMessageDeliver,
+			logging.Str("messaging.destination.name", topic),
+			logging.Str("airgap.message.id", messageKey),
+			logging.Str("airgap.instance.id", config.id),
+		), string(toSend))
 	}
 
 	// Send the data to Kafka
@@ -73,7 +88,9 @@ func readNewKey(message []byte) string {
 	// our public key
 	// The message can look like this:
 	// KEY_UPDATE#(here comes binary data)
-	Logger.Debug("Message length is " + strconv.Itoa(len(message)))
+	Logger.Debug(logging.Event(logging.EventCryptoKeyLoad,
+		logging.Int("airgap.message.size", int64(len(message))),
+	), "Message length is "+strconv.Itoa(len(message)))
 	if len(message) < 11 {
 		return fmt.Sprintf("Message length for the new key is %d, but it must be more than 11", len(message))
 	}
@@ -87,7 +104,10 @@ func readNewKey(message []byte) string {
 	// KEY_UPDATE# as the first 11 bytes
 	//	Logger.Debug("Checking " + fmt.Sprint(len(config.keyInfos)) + " keys for new symmetric key")
 	for i := range config.keyInfos {
-		Logger.Debug("Checking key " + fmt.Sprint(i))
+		Logger.Debug(logging.Event(logging.EventCryptoKeyLoad,
+			logging.Int("airgap.crypto.key.index", int64(i)),
+			logging.Str("file.path", config.keyInfos[i].privateKeyFilename),
+		), "Checking key "+fmt.Sprint(i))
 		privateKey := config.keyInfos[i].privateKey
 		decrypted, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, payload, nil)
 		if err == nil {
@@ -100,7 +120,11 @@ func readNewKey(message []byte) string {
 			}
 		}
 	}
-	Logger.Errorf("Couldn't decrypt the new symmetric key with any of the %v private keys loaded with %s", len(config.keyInfos), config.privateKeyGlob)
+	Logger.Errorf(logging.Event(logging.EventCryptoDecrypt,
+		logging.Failure(),
+		logging.Str("file.path", config.privateKeyGlob),
+		logging.Int("airgap.crypto.key.count", int64(len(config.keyInfos))),
+	), "Couldn't decrypt the new symmetric key with any of the %v private keys loaded with %s", len(config.keyInfos), config.privateKeyGlob)
 	sendMessage(protocol.TYPE_ERROR, "", config.topic, fmt.Appendf(nil, "Can't decrypt the new symmetric key. Tried all %v private keys\n", len(config.keyInfos)))
 	return "ERROR: No key found that can decrypt the new symmetric key"
 }
@@ -134,7 +158,9 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 			}
 		}
 		if !found {
-			Logger.Printf("Removing private key from memory: %s", config.keyInfos[j].privateKeyFilename)
+			Logger.Infof(logging.Event(logging.EventCryptoKeyPurge,
+				logging.Str("file.path", config.keyInfos[j].privateKeyFilename),
+			), "Removing private key from memory: %s", config.keyInfos[j].privateKeyFilename)
 			purgeIndices = append(purgeIndices, j)
 		}
 	}
@@ -213,7 +239,10 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 }
 
 func connectToKafka(config TransferConfiguration) {
-	Logger.Printf("Connecting to %s\n", config.bootstrapServers)
+	Logger.Infof(logging.Event(logging.EventKafkaConnect,
+		logging.Str("server.address", config.bootstrapServers),
+		logging.Str("messaging.kafka.client.id", config.clientID),
+	), "Connecting to %s\n", config.bootstrapServers)
 
 	kafka.ConfigureSaramaLogger()
 
@@ -223,10 +252,16 @@ func connectToKafka(config TransferConfiguration) {
 	conf.Producer.Partitioner = sarama.NewManualPartitioner
 	// Check if we have TLS to Kafka
 	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
-		Logger.Print("Using TLS for Kafka")
+		Logger.Info(logging.Event(logging.EventKafkaConnect,
+			logging.Str("server.address", config.bootstrapServers),
+			logging.Str("file.path", config.certFile),
+		), "Using TLS for Kafka")
 		tlsConfig, err := kafka.SetTLSConfigParameters(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
 		if err != nil {
-			Logger.Panicf("Error setting TLS config parameters: %v", err)
+			Logger.Panicf(logging.Event(logging.EventTLSHandshake,
+				logging.Str("file.path", config.certFile),
+			).Merge(logging.Err(err)),
+				"Error setting TLS config parameters: %v", err)
 		}
 		conf.Net.TLS.Enable = true
 		conf.Net.TLS.Config = tlsConfig
@@ -238,7 +273,10 @@ func connectToKafka(config TransferConfiguration) {
 	conf.ClientID = config.clientID
 	producer, err := sarama.NewAsyncProducer(strings.Split(config.bootstrapServers, ","), conf)
 	if err != nil {
-		Logger.Panicf("Error creating producer: %v\n", err)
+		Logger.Panicf(logging.Event(logging.EventKafkaConnect,
+			logging.Str("server.address", config.bootstrapServers),
+		).Merge(logging.Err(err)),
+			"Error creating producer: %v\n", err)
 	}
 	go func() {
 		for producerErr := range producer.Errors() {
@@ -260,9 +298,17 @@ func connectToKafka(config TransferConfiguration) {
 			}
 
 			if producerErr != nil {
-				Logger.Errorf("Failed to send message: topic=%s partition=%d key=%s error=%v", topic, partition, key, producerErr.Err)
+				Logger.Errorf(logging.Event(logging.EventKafkaProduce,
+					logging.Failure(),
+					logging.Str("messaging.destination.name", topic),
+					logging.Decimal("messaging.destination.partition.id", int64(partition)),
+					logging.Str("airgap.message.id", key),
+					logging.ErrorType(producerErr.Err),
+				), "Failed to send message: topic=%s partition=%d key=%s error=%v", topic, partition, key, producerErr.Err)
 			} else {
-				Logger.Errorf("Failed to send message: unknown producer error")
+				Logger.Errorf(logging.Event(logging.EventKafkaProduce,
+					logging.Failure(),
+				), "Failed to send message: unknown producer error")
 			}
 		}
 	}()
@@ -273,18 +319,32 @@ func connectToKafka(config TransferConfiguration) {
 				valueBytes, err := msg.Value.Encode()
 				keyBytes, _ := msg.Key.Encode()
 				if err != nil {
-					Logger.Debugf("Error encoding message value: %v", err)
+					Logger.Debugf(logging.Event(logging.EventProtocolEncode).Merge(logging.Err(err)),
+						"Error encoding message value: %v", err)
 				} else {
 					if len(valueBytes) > 120 {
-						Logger.Debugf("Message sent: key=%s partition=%d %s ...", string(keyBytes), msg.Partition, string(valueBytes[:120]))
+						Logger.Debugf(logging.Event(logging.EventKafkaProduce,
+							logging.Str("messaging.destination.name", msg.Topic),
+							logging.Decimal("messaging.destination.partition.id", int64(msg.Partition)),
+							logging.Str("airgap.message.id", string(keyBytes)),
+							logging.Int("airgap.message.size", int64(len(valueBytes))),
+						), "Message sent: key=%s partition=%d %s ...", string(keyBytes), msg.Partition, string(valueBytes[:120]))
 					} else {
-						Logger.Debugf("Message sent: key=%s partition=%d %s", string(keyBytes), msg.Partition, string(valueBytes))
+						Logger.Debugf(logging.Event(logging.EventKafkaProduce,
+							logging.Str("messaging.destination.name", msg.Topic),
+							logging.Decimal("messaging.destination.partition.id", int64(msg.Partition)),
+							logging.Str("airgap.message.id", string(keyBytes)),
+							logging.Int("airgap.message.size", int64(len(valueBytes))),
+						), "Message sent: key=%s partition=%d %s", string(keyBytes), msg.Partition, string(valueBytes))
 					}
 				}
 			}
 		}
 	}()
-	Logger.Printf("Connected to Kafka. Creating startup message...\n")
+	Logger.Infof(logging.Event(logging.EventKafkaConnect,
+		logging.Str("server.address", config.bootstrapServers),
+		logging.Int("airgap.kafka.batch.size", int64(config.batchSize)),
+	), "Connected to Kafka. Creating startup message...\n")
 	kafka.SetProducer(producer, config.batchSize)
 	// Set error callback to report Kafka errors to status
 	kafka.SetErrorCallback(UpdateKafkaStatus)

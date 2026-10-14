@@ -1,6 +1,10 @@
 
 package nu.sitia.airgap.gapdetector;
 
+import nu.sitia.airgap.logging.Attrs;
+import nu.sitia.airgap.logging.Events;
+import nu.sitia.airgap.logging.Log;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
 import org.slf4j.Logger;
@@ -184,7 +188,11 @@ public class GapDetector implements java.io.Serializable {
      */
     public int check(long number, Consumer<WindowView> onPurge) throws OutOfMemoryError {
         if (number > lastReceived) {
-            LOG.debug("[GapDetector] New lastReceived for topic {}: {} (was {})", topicName, number, lastReceived);
+            Log.debug(LOG, Attrs.event(Events.GAP_DETECTED)
+                    .with("messaging.destination.name", topicName)
+                    .with("messaging.kafka.offset", number)
+                    .with("airgap.gap.previous_last_received", lastReceived),
+                    "[GapDetector] New lastReceived for topic {}: {} (was {})", topicName, number, lastReceived);
             lastReceived = number;
         }
 
@@ -193,7 +201,11 @@ public class GapDetector implements java.io.Serializable {
             // special case: If the number is less than the lowest known offset,
             // then we deliver it as unseen, but do not create a new window
             if (!windows.isEmpty() && number < windows.getFirst().minOffset) {
-                LOG.debug("[GapDetector] Offset {} is below current known window range (firstWindowMin={}) for topic {}",
+                Log.debug(LOG, Attrs.event(Events.GAP_DETECTED)
+                        .with("messaging.destination.name", topicName)
+                        .with("messaging.kafka.offset", number)
+                        .with("airgap.gap.window.min", windows.getFirst().minOffset),
+                        "[GapDetector] Offset {} is below current known window range (firstWindowMin={}) for topic {}",
                         number,
                         windows.getFirst().minOffset,
                         topicName);
@@ -204,7 +216,11 @@ public class GapDetector implements java.io.Serializable {
             if (windows.size() >= maxWindows) {
                 Window old = windows.removeFirst();
                 List<List<Long>> purgedWindowGaps = old.findGapsFiltered(minReceived);
-                LOG.debug(
+                Log.debug(LOG, Attrs.event(Events.GAP_REPORT)
+                        .with("messaging.destination.name", topicName)
+                        .with("airgap.gap.window.min", old.minOffset)
+                        .with("airgap.gap.window.max", old.maxOffset)
+                        .with("airgap.gap.range.count", purgedWindowGaps.size()),
                         "[GapDetector] Purging oldest window {}-{} for topic {} (currentWindows={}, maxWindows={}, purgedGapRanges={})",
                         old.minOffset,
                         old.maxOffset,
@@ -226,17 +242,26 @@ public class GapDetector implements java.io.Serializable {
             try {
                 w = new Window(start, end);
                 windows.add(w);
-                LOG.debug("[GapDetector] Created new window {}-{} for topic {} (windowsNow={}, maxWindows={})",
+                Log.debug(LOG, Attrs.event(Events.GAP_DETECTED)
+                        .with("messaging.destination.name", topicName)
+                        .with("airgap.gap.window.min", start)
+                        .with("airgap.gap.window.max", end)
+                        .with("airgap.gap.window.count", windows.size()),
+                        "[GapDetector] Created new window {}-{} for topic {} (windowsNow={}, maxWindows={})",
                         start,
                         end,
                         topicName,
                         windows.size(),
                         maxWindows);
             } catch (OutOfMemoryError oom) {
-                LOG.error("[GapDetector] OutOfMemoryError: Failed to allocate new window for offsets " + start + "-" + end + ": " + oom);
+                Log.error(LOG, Attrs.event(Events.APP_FAILURE)
+                        .with("airgap.gap.window.min", start)
+                        .with("airgap.gap.window.max", end)
+                        .exception(oom), "[GapDetector] OutOfMemoryError: Failed to allocate new window for offsets " + start + "-" + end + ": " + oom);
                 // Prevent further window growth
                 this.maxWindows = windows.size();
-                LOG.error("[GapDetector] Reducing maxWindows to " + this.maxWindows);
+                Log.error(LOG, Attrs.event(Events.APP_FAILURE)
+                        .with("airgap.gap.max_windows", this.maxWindows), "[GapDetector] Reducing maxWindows to " + this.maxWindows);
                 // Retry once (guard against infinite recursion)
                 if (windows.size() == maxWindows) {
                     return check(number, onPurge);
@@ -246,7 +271,12 @@ public class GapDetector implements java.io.Serializable {
         }
 
         boolean alreadyReceived = w.received.contains(number - w.minOffset);
-        LOG.debug("[GapDetector] Marking offset {} as received in window {}-{} (alreadyReceived={})", number, w.minOffset, w.maxOffset, alreadyReceived);
+        Log.debug(LOG, Attrs.event(alreadyReceived ? Events.MESSAGE_FILTER : Events.GAP_CLOSED)
+                .with("messaging.kafka.offset", number)
+                .with("airgap.gap.window.min", w.minOffset)
+                .with("airgap.gap.window.max", w.maxOffset)
+                .with("airgap.message.duplicate", alreadyReceived),
+                "[GapDetector] Marking offset {} as received in window {}-{} (alreadyReceived={})", number, w.minOffset, w.maxOffset, alreadyReceived);
         w.markReceived(number - w.minOffset);
         // Only update minReceived if this number was actually marked as received
         if (!alreadyReceived && number < minReceived) {
@@ -258,7 +288,11 @@ public class GapDetector implements java.io.Serializable {
     private Window findWindow(long number) {
         for (Window w : windows) {
             if (w.contains(number)) {
-                LOG.debug("[GapDetector] Found window {}-{} for offset {}", w.minOffset, w.maxOffset, number);
+                Log.debug(LOG, Attrs.event(Events.GAP_DETECTED)
+                        .with("airgap.gap.window.min", w.minOffset)
+                        .with("airgap.gap.window.max", w.maxOffset)
+                        .with("messaging.kafka.offset", number),
+                        "[GapDetector] Found window {}-{} for offset {}", w.minOffset, w.maxOffset, number);
                 return w;
             }
         }

@@ -45,6 +45,7 @@ go run src/cmd/upstream/main.go config/upstream.properties
 - A short [Installation and Configuration.md](doc/Installation%20and%20Configuration.md) guide is available.
 - More help for setting up encryption to Kafka can be found here: [Kafka-encryption.md](doc/Kafka-encryption.md)
 - See [Monitoring.md](doc/Monitoring.md) on how to monitor the applications for resource usage etc.
+- For OpenTelemetry log output and tamper-evident log hashing, see [Logging.md](doc/Logging.md)
 - To set up reduncancy and/or load balancing, see [Redundancy and Load Balancing.md](doc/Redundancy%20and%20Load%20Balancing.md)
 - There is a [Resend.md](doc/Resend.md) guide that covers how to resend missing information.
 - Finally, frequently asked questions can be found here: [FAQ.md](doc/FAQ.md)
@@ -384,6 +385,9 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | source | AIRGAP_UPSTREAM_SOURCE | random | source of the messages, kafka or random. Use random for testing only |
 | generateNewSymmetricKeyEvery | AIRGAP_UPSTREAM_GENERATE_NEW_SYMMETRIC_KEY_EVERY | | How often should we change the encryption key (symmetric key)? |
 | logFileName | AIRGAP_UPSTREAM_LOG_FILE_NAME | | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
+| logFormat | AIRGAP_UPSTREAM_LOG_FORMAT | text | `text` for the usual one line per record, or `otel` for OpenTelemetry Logs as OTLP/JSON. See [Logging.md](doc/Logging.md) |
+| hash | AIRGAP_UPSTREAM_LOG_HASH | none | Hash the payload of every log record and record the digest as an attribute. `none`, `SHA256`, `SHA384`, `SHA512`, `SHA3-256`, `SHA3-384` or `SHA3-512`. See [Logging.md](doc/Logging.md) |
+| hash-chain | AIRGAP_UPSTREAM_LOG_HASH_CHAIN | 0 | Chain each log record to the one before it and write an anchor record every N records, so that edits and deletions become detectable. `0` disables chaining. See [Logging.md](doc/Logging.md) |
 | sendingThreads | AIRGAP_UPSTREAM_SENDING_THREADS | {"now": 0} | How many times, and when, whould we send each event? |
 | certFile | AIRGAP_UPSTREAM_CERT_FILE | | For TLS to Kafka, add a certificate pem encoded file here |
 | keyFile | AIRGAP_UPSTREAM_KEY_FILE | | The private key for the certFile certificate |
@@ -493,6 +497,9 @@ The property privateKeyFiles should point to one or more private key files that 
 | transport | AIRGAP_DOWNSTREAM_TRANSPORT | udp | Transport protocol to use: udp or tcp. Use tcp when no diode is needed |
 | privateKeyFiles | AIRGAP_DOWNSTREAM_PRIVATE_KEY_FILES | | Glob covering all private key files to load |
 | logFileName | AIRGAP_DOWNSTREAM_LOG_FILE_NAME | | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
+| logFormat | AIRGAP_DOWNSTREAM_LOG_FORMAT | text | `text` for the usual one line per record, or `otel` for OpenTelemetry Logs as OTLP/JSON. See [Logging.md](doc/Logging.md) |
+| hash | AIRGAP_DOWNSTREAM_LOG_HASH | none | Hash the payload of every log record and record the digest as an attribute. `none`, `SHA256`, `SHA384`, `SHA512`, `SHA3-256`, `SHA3-384` or `SHA3-512`. See [Logging.md](doc/Logging.md) |
+| hash-chain | AIRGAP_DOWNSTREAM_LOG_HASH_CHAIN | 0 | Chain each log record to the one before it and write an anchor record every N records, so that edits and deletions become detectable. `0` disables chaining. See [Logging.md](doc/Logging.md) |
 | certFile | AIRGAP_DOWNSTREAM_CERT_FILE | | For TLS to Kafka, add a certificate pem encoded file here |
 | keyFile | AIRGAP_DOWNSTREAM_KEY_FILE | | The private key for the certFile certificate |
 | keyPasswordFile | AIRGAP_UPSTREAM_KEY_PASSWORD_FILE | | Path to a file containing the password to decrypt an encrypted keyFile |

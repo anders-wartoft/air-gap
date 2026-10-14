@@ -6,6 +6,7 @@ import (
 	"net"
 
 	"sitia.nu/airgap/src/internal/pinnedtls"
+	"sitia.nu/airgap/src/logging"
 )
 
 func (c TransferConfiguration) validateTLSMode() error {
@@ -50,7 +51,12 @@ func (t *TCPAdapter) admit(conn net.Conn) error {
 	}
 	peer, err := t.pinManager.Admit(tlsConn)
 	if err == nil {
-		Logger.Infof("Pinned TLS authenticated server peer=%s fingerprint=%s", peer.Peer,
+		Logger.Infof(logging.Event(logging.EventTLSPinVerify,
+			logging.Str("server.address", t.addr),
+			logging.Str("airgap.tls.pin.peer", peer.Peer),
+			logging.Str("airgap.tls.pin.fingerprint",
+				pinnedtls.Fingerprint(tlsConn.ConnectionState().PeerCertificates[0].RawSubjectPublicKeyInfo)),
+		), "Pinned TLS authenticated server peer=%s fingerprint=%s", peer.Peer,
 			pinnedtls.Fingerprint(tlsConn.ConnectionState().PeerCertificates[0].RawSubjectPublicKeyInfo))
 	}
 	return err
@@ -94,7 +100,12 @@ func (t *TCPAdapter) reloadPinned(candidate TransferConfiguration) error {
 		if err := pinnedtls.ClearPendingClient(candidate.tcpTLSTrustedKeysDir); err != nil {
 			return fmt.Errorf("finalize client rotation: %w", err)
 		}
-		Logger.Infof("Pinned rotation accepted id=%s old=%s new=%s", id, oldIdentity, snapshot.Identity())
+		Logger.Infof(logging.Event(logging.EventTLSPinRotate,
+			logging.Str("server.address", t.addr),
+			logging.Str("airgap.tls.rotation.id", id),
+			logging.Str("airgap.tls.identity.old", oldIdentity),
+			logging.Str("airgap.tls.identity.new", snapshot.Identity()),
+		), "Pinned rotation accepted id=%s old=%s new=%s", id, oldIdentity, snapshot.Identity())
 	}
 	result, disconnectErr := t.pinManager.Activate(snapshot)
 	t.tlsConfig = t.pinManager.Config()
@@ -102,15 +113,31 @@ func (t *TCPAdapter) reloadPinned(candidate TransferConfiguration) error {
 	if oldIdentity != t.pinManager.Identity() && t.conn != nil {
 		t.forget(t.conn)
 		if err := t.conn.(*tls.Conn).NetConn().Close(); err != nil {
-			Logger.Errorf("Pinned identity reconnect close: %v", err)
+			Logger.Errorf(logging.Event(logging.EventTLSPinReload,
+				logging.Failure(),
+				logging.Str("server.address", t.addr),
+				logging.ErrorType(err),
+			), "Pinned identity reconnect close: %v", err)
 		}
 		t.conn = nil
 	}
 	t.tlsCertFile, t.tlsKeyFile = candidate.tcpTLSCertFile, candidate.tcpTLSKeyFile
-	Logger.Infof("Pinned TLS reload: peers=%d keys=%d added=%v removed=%v disconnected=%d",
+	Logger.Infof(logging.Event(logging.EventTLSPinReload,
+		logging.Str("server.address", t.addr),
+		logging.Int("airgap.tls.pin.peers", int64(result.Peers)),
+		logging.Int("airgap.tls.pin.keys", int64(result.Keys)),
+		logging.Int("airgap.tls.pin.added", int64(len(result.Added))),
+		logging.Int("airgap.tls.pin.removed", int64(len(result.Removed))),
+		logging.Int("airgap.tls.pin.disconnected", int64(result.Disconnected)),
+		logging.Str("file.path", candidate.tcpTLSTrustedKeysDir),
+	), "Pinned TLS reload: peers=%d keys=%d added=%v removed=%v disconnected=%d",
 		result.Peers, result.Keys, result.Added, result.Removed, result.Disconnected)
 	if disconnectErr != nil {
-		Logger.Errorf("Pinned TLS revocation disconnect: %v", disconnectErr)
+		Logger.Errorf(logging.Event(logging.EventTLSPinReload,
+			logging.Failure(),
+			logging.Str("server.address", t.addr),
+			logging.ErrorType(disconnectErr),
+		), "Pinned TLS revocation disconnect: %v", disconnectErr)
 	}
 	return nil
 }

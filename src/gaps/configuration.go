@@ -37,15 +37,28 @@ func defaultConfiguration() GapsConfiguration {
 	}
 }
 
+// configApplied describes a setting that has been read and applied, so a
+// consumer can see which setting changed without parsing the body.
+func configApplied(setting, value string) logging.Attrs {
+	return logging.Event(logging.EventConfigApplied,
+		logging.Str("airgap.config.setting", setting),
+		logging.Str("airgap.config.value", value),
+	)
+}
+
 // readParameters parses the property file and returns the updated configuration.
 func readParameters(fileName string, result GapsConfiguration) (GapsConfiguration, error) {
 	if fileName == "" {
 		return result, nil
 	}
-	Logger.Print("Reading configuration from file " + fileName)
+	Logger.Info(logging.Event(logging.EventConfigLoad,
+		logging.Str("file.path", fileName),
+	), "Reading configuration from file "+fileName)
 	file, err := os.Open(fileName)
 	if err != nil {
-		Logger.Fatalf("File: %s not found.", fileName)
+		Logger.Fatalf(logging.Event(logging.EventConfigLoad,
+			logging.Str("file.path", fileName),
+		).Merge(logging.Err(err)), "File: %s not found.", fileName)
 		return result, nil
 	}
 	defer file.Close()
@@ -64,6 +77,12 @@ func readParameters(fileName string, result GapsConfiguration) (GapsConfiguratio
 		value := strings.TrimSpace(parts[1])
 
 		switch key {
+		case logging.OptionFormat, logging.OptionHash, logging.OptionHashChain,
+			logging.OptionSigningCertificate, logging.OptionSigningKey,
+			logging.OptionSignerID, logging.OptionSigningEKU:
+			if _, err := logging.ApplyOption(key, value); err != nil {
+				return result, err
+			}
 		case "bootstrapServers":
 			result.bootstrapServers = value
 		case "topic":
@@ -107,6 +126,11 @@ func overrideConfiguration(config GapsConfiguration) GapsConfiguration {
 	if v := os.Getenv(prefix + "LOG_FILE_NAME"); v != "" {
 		config.logFileName = v
 	}
+	if err := logging.ApplyEnvironmentOptions(prefix); err != nil {
+		Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+			logging.Str("airgap.config.source", "environment"),
+		).Merge(logging.Err(err)), "%v", err)
+	}
 	if v := os.Getenv(prefix + "CERT_FILE"); v != "" {
 		config.certFile = v
 	}
@@ -140,7 +164,11 @@ func parseCommandLineOverrides(args []string, config GapsConfiguration) GapsConf
 		}
 		kv := strings.SplitN(arg, "=", 2)
 		if len(kv) != 2 {
-			Logger.Warnf("Ignoring malformed command line override: --%s", arg)
+			Logger.Warnf(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.config.source", "command-line"),
+				logging.Str("airgap.config.value", arg),
+			), "Ignoring malformed command line override: --%s", arg)
 			continue
 		}
 		switch kv[0] {
@@ -160,10 +188,18 @@ func parseCommandLineOverrides(args []string, config GapsConfiguration) GapsConf
 // checkConfiguration validates required fields and sets defaults.
 func checkConfiguration(config GapsConfiguration) GapsConfiguration {
 	if config.bootstrapServers == "" {
-		Logger.Fatal("bootstrapServers is required")
+		Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "bootstrapServers"),
+			logging.Str("error.type", "missing.required"),
+		), "bootstrapServers is required")
 	}
 	if config.topic == "" {
-		Logger.Fatal("topic is required")
+		Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "topic"),
+			logging.Str("error.type", "missing.required"),
+		), "topic is required")
 	}
 	if config.groupID == "" {
 		config.groupID = "gaps-group"
@@ -173,9 +209,10 @@ func checkConfiguration(config GapsConfiguration) GapsConfiguration {
 
 // logConfiguration prints the active configuration.
 func logConfiguration(config GapsConfiguration) {
-	Logger.Printf("bootstrapServers: %s", config.bootstrapServers)
-	Logger.Printf("topic:            %s", config.topic)
-	Logger.Printf("groupID:          %s", config.groupID)
-	Logger.Printf("mode:             %s", config.mode)
-	Logger.Printf("logLevel:         %s", config.logLevel)
+	Logger.Infof(configApplied("bootstrapServers", config.bootstrapServers),
+		"bootstrapServers: %s", config.bootstrapServers)
+	Logger.Infof(configApplied("topic", config.topic), "topic:            %s", config.topic)
+	Logger.Infof(configApplied("groupID", config.groupID), "groupID:          %s", config.groupID)
+	Logger.Infof(configApplied("mode", config.mode), "mode:             %s", config.mode)
+	Logger.Infof(configApplied("logLevel", config.logLevel), "logLevel:         %s", config.logLevel)
 }

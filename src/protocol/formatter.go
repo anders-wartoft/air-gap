@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"time"
+
+	"sitia.nu/airgap/src/logging"
 )
 
 // ISO 8601 timestamp
@@ -27,7 +29,10 @@ func NrMessages(mtu uint16, id string, message []byte) uint16 {
 	var nrMsgs = 1 + int32(len(message))/int32(payloadLength)
 	if nrMsgs != int32(uint16(nrMsgs)) {
 		// This message will not be delivered.
-		Logger.Error("This message will not be delivered. Max 65535 parts are allowed for each message.")
+		Logger.Error(logging.Event(logging.EventProtocolEncode,
+			logging.Failure(),
+			logging.Str("airgap.protocol.limit", "65535 parts"),
+		), "This message will not be delivered. Max 65535 parts are allowed for each message.")
 	}
 	return (uint16)(nrMsgs)
 }
@@ -137,7 +142,9 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 		var remainingLength int32 = int32(mtu) - 13 - int32(len(id))
 
 		if remainingLength < 0 {
-			Logger.Panicf("Error. The Header is longer than the MTU.")
+			Logger.Panicf(logging.Event(logging.EventProtocolEncode,
+				logging.Failure(),
+			), "Error. The Header is longer than the MTU.")
 		}
 		var payload []byte = []byte{}
 		var checksum string

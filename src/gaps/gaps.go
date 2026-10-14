@@ -17,6 +17,7 @@ import (
 
 	"github.com/RoaringBitmap/roaring"
 	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/version"
 )
 
@@ -217,8 +218,11 @@ func sortWindows(lastEntries map[string]parsedWindow) []parsedWindow {
 
 // Main is the entry point for the gaps display tool.
 func Main(BuildNumber string) {
-	Logger.Printf("Gaps version: %s starting up...", version.GitVersion)
-	Logger.Printf("Build number: %s", BuildNumber)
+	Logger.Infof(logging.Event(logging.EventAppStart),
+		"Gaps version: %s starting up...", version.GitVersion)
+	Logger.Infof(logging.Event(logging.EventAppStart,
+		logging.Str("airgap.build.number", BuildNumber),
+	), "Build number: %s", BuildNumber)
 
 	fileName := ""
 	var overrideArgs []string
@@ -228,7 +232,11 @@ func Main(BuildNumber string) {
 		} else if fileName == "" {
 			fileName = arg
 		} else {
-			Logger.Fatalf("Too many non-dashed command line parameters. Only one property file allowed.")
+			Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.config.source", "command-line"),
+				logging.Str("airgap.config.value", arg),
+			), "Too many non-dashed command line parameters. Only one property file allowed.")
 		}
 	}
 
@@ -236,7 +244,9 @@ func Main(BuildNumber string) {
 	var err error
 	configuration, err = readParameters(fileName, configuration)
 	if err != nil {
-		Logger.Fatalf("Error reading configuration file %s: %v", fileName, err)
+		Logger.Fatalf(logging.Event(logging.EventConfigLoad,
+			logging.Str("file.path", fileName),
+		).Merge(logging.Err(err)), "Error reading configuration file %s: %v", fileName, err)
 	}
 	configuration = overrideConfiguration(configuration)
 	configuration = parseCommandLineOverrides(overrideArgs, configuration)
@@ -245,16 +255,25 @@ func Main(BuildNumber string) {
 
 	if config.logFileName != "" {
 		if err := Logger.SetLogFile(config.logFileName); err != nil {
-			Logger.Fatal(err)
+			Logger.Fatal(logging.Event(logging.EventConfigInvalid,
+				logging.Str("airgap.config.setting", "logFileName"),
+				logging.Str("file.path", config.logFileName),
+			).Merge(logging.Err(err)), err)
 		}
 	}
 	Logger.SetLogLevel(config.logLevel)
 	logConfiguration(config)
 
 	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
-		Logger.Print("Using TLS for Kafka")
+		Logger.Info(logging.Event(logging.EventTLSHandshake,
+			logging.Str("server.address", config.bootstrapServers),
+			logging.Str("file.path", config.certFile),
+		), "Using TLS for Kafka")
 		if _, err := kafka.SetTLSConfigParameters(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile); err != nil {
-			Logger.Panicf("Failed to configure TLS: %v", err)
+			Logger.Panicf(logging.Event(logging.EventTLSHandshake,
+				logging.Str("server.address", config.bootstrapServers),
+				logging.Str("file.path", config.certFile),
+			).Merge(logging.Err(err)), "Failed to configure TLS: %v", err)
 		}
 	}
 
@@ -263,13 +282,21 @@ func Main(BuildNumber string) {
 	lastEntries := make(map[string]parsedWindow)
 
 	// Bootstrap: read all existing messages and print initial state.
-	Logger.Printf("Reading from Kafka %s topic %s", config.bootstrapServers, config.topic)
+	Logger.Infof(logging.Event(logging.EventKafkaConsume,
+		logging.Str("server.address", config.bootstrapServers),
+		logging.Str("messaging.destination.name", config.topic),
+		logging.Str("messaging.consumer.group.name", config.groupID),
+	), "Reading from Kafka %s topic %s", config.bootstrapServers, config.topic)
 	kafkaReader := NewKafkaReader()
 	bootstrapHandler := func(id string, key []byte, t time.Time, received []byte) bool {
 		atomic.AddInt64(&receivedEvents, 1)
 		pw, err := parseGapPayload(key, received)
 		if err != nil {
-			Logger.Errorf("Failed to parse gap message: %v", err)
+			Logger.Errorf(logging.Event(logging.EventGapReport,
+				logging.Str("airgap.message.id", id),
+				logging.Str("messaging.destination.name", config.topic),
+				logging.Str("airgap.gap.phase", "bootstrap"),
+			).Merge(logging.Err(err)), "Failed to parse gap message: %v", err)
 			return true
 		}
 		keyStr := fmt.Sprintf("%s-%d-%d", pw.topic, pw.partition, pw.windowMin)
@@ -277,9 +304,17 @@ func Main(BuildNumber string) {
 		return true
 	}
 	if err := kafkaReader.ReadToEnd(context.Background(), config.bootstrapServers, config.topic, config.groupID, bootstrapHandler); err != nil {
-		Logger.Fatalf("Error reading gap topic: %v", err)
+		Logger.Fatalf(logging.Event(logging.EventKafkaConsume,
+			logging.Str("server.address", config.bootstrapServers),
+			logging.Str("messaging.destination.name", config.topic),
+			logging.Str("messaging.consumer.group.name", config.groupID),
+		).Merge(logging.Err(err)), "Error reading gap topic: %v", err)
 	}
-	Logger.Printf("Read %d gap messages.", receivedEvents)
+	Logger.Infof(logging.Event(logging.EventGapReport,
+		logging.Str("messaging.destination.name", config.topic),
+		logging.Int("airgap.message.count", receivedEvents),
+		logging.Int("airgap.gap.window.count", int64(len(lastEntries))),
+	), "Read %d gap messages.", receivedEvents)
 	if config.mode == "full" {
 		printFull(sortWindows(lastEntries))
 	} else {
@@ -301,7 +336,11 @@ func Main(BuildNumber string) {
 	tailHandler := func(id string, key []byte, t time.Time, received []byte) bool {
 		pw, err := parseGapPayload(key, received)
 		if err != nil {
-			Logger.Errorf("Failed to parse gap message: %v", err)
+			Logger.Errorf(logging.Event(logging.EventGapReport,
+				logging.Str("airgap.message.id", id),
+				logging.Str("messaging.destination.name", config.topic),
+				logging.Str("airgap.gap.phase", "tail"),
+			).Merge(logging.Err(err)), "Failed to parse gap message: %v", err)
 			return true
 		}
 		keyStr := fmt.Sprintf("%s-%d-%d", pw.topic, pw.partition, pw.windowMin)
@@ -319,7 +358,10 @@ func Main(BuildNumber string) {
 	// Start tailing in the background.
 	go func() {
 		if err := kafkaReader.Tail(ctx, config.bootstrapServers, config.topic, tailHandler); err != nil && err != context.Canceled {
-			Logger.Errorf("Tail error: %v", err)
+			Logger.Errorf(logging.Event(logging.EventKafkaConsume,
+				logging.Str("server.address", config.bootstrapServers),
+				logging.Str("messaging.destination.name", config.topic),
+			).Merge(logging.Err(err)), "Tail error: %v", err)
 		}
 	}()
 

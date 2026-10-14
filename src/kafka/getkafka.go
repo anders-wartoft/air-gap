@@ -55,41 +55,43 @@ type TLSConfiguration struct {
 // This should be called once at the start of any function that uses Sarama
 // Also provides a hook to report errors via callback if provided
 func ConfigureSaramaLogger(errorCallback ...func(string)) {
-	saramaLogger := log.New(logging.StdLogger.Writer(), "[SARAMA] ", log.LstdFlags)
-
-	// If an error callback is provided, wrap it to capture certain error patterns
-	if len(errorCallback) > 0 && errorCallback[0] != nil {
-		// Create a custom writer that captures error-like messages
-		originalWriter := logging.StdLogger.Writer()
-		sarama.Logger = log.New(&errorCapturingWriter{
-			originalWriter: originalWriter,
-			errorCallback:  errorCallback[0],
-		}, "[SARAMA] ", log.LstdFlags)
-	} else {
-		sarama.Logger = saramaLogger
+	var callback func(string)
+	if len(errorCallback) > 0 {
+		callback = errorCallback[0]
 	}
+
+	sarama.Logger = log.New(&saramaLogWriter{
+		originalWriter: logging.StdLogger.Writer(),
+		errorCallback:  callback,
+	}, "[SARAMA] ", log.LstdFlags)
 }
 
-// errorCapturingWriter wraps a writer and captures error messages
-type errorCapturingWriter struct {
+// saramaLogWriter preserves the historical direct writer in text mode. In OTel
+// mode it routes Sarama through the application logger so third-party records
+// cannot corrupt an otherwise line-delimited OTLP/JSON stream.
+type saramaLogWriter struct {
 	originalWriter io.Writer
 	errorCallback  func(string)
 }
 
-func (w *errorCapturingWriter) Write(p []byte) (n int, err error) {
+func (w *saramaLogWriter) Write(p []byte) (n int, err error) {
 	msg := string(p)
 
-	// Check for error patterns in Sarama logs
-	if strings.Contains(msg, "leaderless") ||
+	if w.errorCallback != nil && (strings.Contains(msg, "leaderless") ||
 		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "dial tcp") ||
 		strings.Contains(msg, "failed") ||
-		strings.Contains(msg, "error") {
-		// Report the error
+		strings.Contains(msg, "error")) {
 		w.errorCallback("Kafka cluster issue: " + strings.TrimSpace(msg))
 	}
 
-	// Always write to original writer
+	if logging.Logger.GetFormat() == logging.FormatOTel {
+		logging.Logger.Info(logging.Event(logging.EventKafkaClient,
+			logging.Str("airgap.log.source", "sarama"),
+		), strings.TrimSuffix(msg, "\n"))
+		return len(p), nil
+	}
+
 	return w.originalWriter.Write(p)
 }
 
@@ -171,7 +173,10 @@ func ApplyTLSConfig(config *sarama.Config) error {
 	if tlsConfigParameters == nil {
 		return nil
 	}
-	Logger.Println("Enabling TLS configuration for Kafka client")
+	Logger.Info(logging.Event(logging.EventTLSHandshake,
+		logging.Str("airgap.kafka.role", "client"),
+		logging.Str("file.path", tlsConfigParameters.CertFile),
+	), "Enabling TLS configuration for Kafka client")
 	tlsConfig, err := createTLSConfig()
 	if err != nil {
 		return err
@@ -415,9 +420,14 @@ func createTLSConfig() (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to decode PEM block from key file")
 	}
 
-	Logger.Debugf("DEBUG: PEM block type: '%s'", block.Type)
-	Logger.Debugf("DEBUG: PEM Proc-Type header: '%s'", block.Headers["Proc-Type"])
-	Logger.Debugf("DEBUG: keyPasswordFile: [set]")
+	keyAttrs := logging.Event(logging.EventCryptoKeyLoad,
+		logging.Str("file.path", tlsConfigParameters.KeyFile),
+		logging.Str("airgap.crypto.pem.block_type", block.Type),
+		logging.Str("airgap.crypto.pem.proc_type", block.Headers["Proc-Type"]),
+	)
+	Logger.Debugf(keyAttrs, "DEBUG: PEM block type: '%s'", block.Type)
+	Logger.Debugf(keyAttrs, "DEBUG: PEM Proc-Type header: '%s'", block.Headers["Proc-Type"])
+	Logger.Debug(keyAttrs.With(logging.Bool("airgap.crypto.key_password_file.set", true)), "DEBUG: keyPasswordFile: [set]")
 
 	// Check if the key file is encrypted
 	isEncrypted := false
@@ -434,7 +444,10 @@ func createTLSConfig() (*tls.Config, error) {
 
 	// Check if we need to decrypt the key file
 	if tlsConfigParameters.KeyPasswordFile != "" {
-		Logger.Printf("Attempting to decrypt encrypted key file: %s", tlsConfigParameters.KeyFile)
+		Logger.Infof(logging.Event(logging.EventCryptoDecrypt,
+			logging.Str("file.path", tlsConfigParameters.KeyFile),
+			logging.Str("airgap.crypto.stage", "start"),
+		), "Attempting to decrypt encrypted key file: %s", tlsConfigParameters.KeyFile)
 
 		// Read the passphrase from the password file
 		passphrase, err := os.ReadFile(tlsConfigParameters.KeyPasswordFile)
@@ -446,20 +459,36 @@ func createTLSConfig() (*tls.Config, error) {
 		var decryptedPEM []byte
 		switch {
 		case block.Type == "RSA PRIVATE KEY" && block.Headers["Proc-Type"] == "4,ENCRYPTED":
-			Logger.Print("Detected legacy PEM encrypted format (DEK-Info), attempting decryption...")
+			Logger.Info(logging.Event(logging.EventCryptoDecrypt,
+				logging.Str("file.path", tlsConfigParameters.KeyFile),
+				logging.Str("airgap.crypto.key_format", "pem.legacy"),
+				logging.Str("airgap.crypto.stage", "detected"),
+			), "Detected legacy PEM encrypted format (DEK-Info), attempting decryption...")
 			decryptedDER, derr := decryptLegacyPEM(block, passphraseBytes)
 			if derr != nil {
 				return nil, fmt.Errorf("failed to decrypt legacy PEM key: %w", derr)
 			}
-			Logger.Print("Successfully decrypted key using legacy PEM format")
+			Logger.Info(logging.Event(logging.EventCryptoDecrypt,
+				logging.Str("file.path", tlsConfigParameters.KeyFile),
+				logging.Str("airgap.crypto.key_format", "pem.legacy"),
+				logging.Str("airgap.crypto.stage", "complete"),
+			), "Successfully decrypted key using legacy PEM format")
 			decryptedPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: decryptedDER})
 		case block.Type == "ENCRYPTED PRIVATE KEY":
-			Logger.Print("Detected PKCS#8 encrypted format, attempting decryption...")
+			Logger.Info(logging.Event(logging.EventCryptoDecrypt,
+				logging.Str("file.path", tlsConfigParameters.KeyFile),
+				logging.Str("airgap.crypto.key_format", "pkcs8"),
+				logging.Str("airgap.crypto.stage", "detected"),
+			), "Detected PKCS#8 encrypted format, attempting decryption...")
 			decryptedDER, derr := decryptPKCS8EncryptedKey(block, passphraseBytes)
 			if derr != nil {
 				return nil, fmt.Errorf("failed to decrypt PKCS#8 key: %w", derr)
 			}
-			Logger.Print("Successfully decrypted key using PKCS#8 format")
+			Logger.Info(logging.Event(logging.EventCryptoDecrypt,
+				logging.Str("file.path", tlsConfigParameters.KeyFile),
+				logging.Str("airgap.crypto.key_format", "pkcs8"),
+				logging.Str("airgap.crypto.stage", "complete"),
+			), "Successfully decrypted key using PKCS#8 format")
 			decryptedPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: decryptedDER})
 		default:
 			return nil, fmt.Errorf("unsupported encrypted key format: %s", block.Type)
@@ -503,7 +532,14 @@ func createTLSConfig() (*tls.Config, error) {
 // ReadFromKafkaWithContext allows external context cancellation (for SIGHUP reloads)
 // errorCallback is optional and will be called with error messages if provided
 func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds int, brokers string, topics string, group string, timestamp string, callbackFunction func(string, []byte, time.Time, []byte) bool, errorCallback ...func(string)) {
-	Logger.Print("Starting a new Sarama consumer (WithContext): " + name + " with offset: " + fmt.Sprintf("%d", offsetSeconds))
+	Logger.Info(logging.Event(logging.EventKafkaConsume,
+		logging.Str("airgap.kafka.consumer.name", name),
+		logging.Str("server.address", brokers),
+		logging.Str("messaging.destination.name", topics),
+		logging.Str("messaging.consumer.group.name", group),
+		logging.Int("airgap.kafka.offset_seconds", int64(offsetSeconds)),
+		logging.Str("airgap.kafka.stage", "starting"),
+	), "Starting a new Sarama consumer (WithContext): "+name+" with offset: "+fmt.Sprintf("%d", offsetSeconds))
 
 	// Configure Sarama logger with error callback to capture metadata issues
 	ConfigureSaramaLogger(errorCallback...)
@@ -517,7 +553,11 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 
 	version, err := sarama.ParseKafkaVersion(version)
 	if err != nil {
-		Logger.Panicf("Error parsing Kafka version: %v", err)
+		Logger.Panicf(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "kafkaVersion"),
+			logging.ErrorType(err),
+		), "Error parsing Kafka version: %v", err)
 	}
 
 	config := sarama.NewConfig()
@@ -525,11 +565,19 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 	config.ClientID = name
 
 	if tlsConfigParameters != nil {
-		Logger.Println("Enabling TLS configuration for Kafka consumer")
+		Logger.Info(logging.Event(logging.EventTLSHandshake,
+			logging.Str("airgap.kafka.role", "consumer"),
+			logging.Str("airgap.kafka.consumer.name", name),
+			logging.Str("file.path", tlsConfigParameters.CertFile),
+		), "Enabling TLS configuration for Kafka consumer")
 		tlsConfig, err := createTLSConfig()
 		config.Net.TLS.Enable = true
 		if err != nil {
-			Logger.Panicf("Error creating TLS config: %v", err)
+			Logger.Panicf(logging.Event(logging.EventTLSHandshake,
+				logging.Failure(),
+				logging.Str("airgap.kafka.role", "consumer"),
+				logging.ErrorType(err),
+			), "Error creating TLS config: %v", err)
 		}
 		config.Net.TLS.Enable = true
 		config.Net.TLS.Config = tlsConfig
@@ -539,7 +587,12 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 	if timestamp != "" {
 		t, err := time.Parse("2006-01-02T15:04:05-07:00", timestamp)
 		if err != nil {
-			Logger.Panicf("Error parsing from time: %v", err)
+			Logger.Panicf(logging.Event(logging.EventConfigInvalid,
+				logging.Failure(),
+				logging.Str("airgap.config.setting", "timestamp"),
+				logging.Str("airgap.config.value", timestamp),
+				logging.ErrorType(err),
+			), "Error parsing from time: %v", err)
 		}
 		from = t
 	} else {
@@ -555,7 +608,11 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 	case "range":
 		config.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategyRange()}
 	default:
-		Logger.Panicf("Unrecognized consumer group partition assignor: %s", assignor)
+		Logger.Panicf(logging.Event(logging.EventConfigInvalid,
+			logging.Failure(),
+			logging.Str("airgap.config.setting", "assignor"),
+			logging.Str("airgap.config.value", assignor),
+		), "Unrecognized consumer group partition assignor: %s", assignor)
 	}
 
 	if oldest {
@@ -573,7 +630,14 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 	client, err := sarama.NewConsumerGroup(strings.Split(brokers, ","), group, config)
 	if err != nil {
 		errMsg := fmt.Sprintf("Error creating consumer group client: %v", err)
-		Logger.Errorf("%s. Retrying in 5 seconds...", errMsg)
+		Logger.Errorf(logging.Event(logging.EventKafkaConnect,
+			logging.Failure(),
+			logging.Str("server.address", brokers),
+			logging.Str("messaging.consumer.group.name", group),
+			logging.Str("airgap.kafka.consumer.name", name),
+			logging.ErrorType(err),
+			logging.Int("airgap.retry.delay_seconds", 5),
+		), "%s. Retrying in 5 seconds...", errMsg)
 		reportError(errMsg)
 		// Sleep and continue - will try again in the consumer loop
 		// This allows the consumer to retry if Kafka cluster is temporarily unavailable
@@ -581,7 +645,14 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 		// Retry once more
 		client, err = sarama.NewConsumerGroup(strings.Split(brokers, ","), group, config)
 		if err != nil {
-			Logger.Panicf("Error creating consumer group client after retry: %v", err)
+			Logger.Panicf(logging.Event(logging.EventKafkaConnect,
+				logging.Failure(),
+				logging.Str("server.address", brokers),
+				logging.Str("messaging.consumer.group.name", group),
+				logging.Str("airgap.kafka.consumer.name", name),
+				logging.ErrorType(err),
+				logging.Bool("airgap.retry.exhausted", true),
+			), "Error creating consumer group client after retry: %v", err)
 		}
 	}
 
@@ -599,7 +670,16 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 				// Log error and retry instead of panicking
 				retryCount++
 				errMsg := fmt.Sprintf("Error from consumer (attempt %d): %v", retryCount, err)
-				Logger.Errorf("%s. Will retry in 5 seconds...", errMsg)
+				Logger.Errorf(logging.Event(logging.EventKafkaConsume,
+					logging.Failure(),
+					logging.Str("server.address", brokers),
+					logging.Str("messaging.destination.name", topics),
+					logging.Str("messaging.consumer.group.name", group),
+					logging.Str("airgap.kafka.consumer.name", name),
+					logging.Int("airgap.retry.count", int64(retryCount)),
+					logging.Int("airgap.retry.delay_seconds", 5),
+					logging.ErrorType(err),
+				), "%s. Will retry in 5 seconds...", errMsg)
 				reportError(errMsg)
 
 				// Sleep before retrying to avoid busy-wait loop
@@ -623,7 +703,12 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 	}()
 
 	<-consumer.ready
-	Logger.Println("Sarama consumer (WithContext) " + name + " up and running!...")
+	Logger.Infof(logging.Event(logging.EventAppReady,
+		logging.Str("airgap.kafka.consumer.name", name),
+		logging.Str("server.address", brokers),
+		logging.Str("messaging.destination.name", topics),
+		logging.Str("messaging.consumer.group.name", group),
+	), "Sarama consumer (WithContext) %s up and running!...", name)
 
 	// Track if we've reported an error recently to avoid spam
 	var lastErrorTime time.Time
@@ -642,7 +727,11 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 				// If we had an error but it's been more than 30 seconds, try to clear it
 				if lastErrorMsg != "" && time.Since(lastErrorTime) > 30*time.Second {
 					// Assume error has resolved if no new errors in last 30 seconds
-					Logger.Infof("Kafka cluster appears to have recovered")
+					Logger.Info(logging.Event(logging.EventKafkaConnectionRestored,
+						logging.Str("server.address", brokers),
+						logging.Str("airgap.kafka.consumer.name", name),
+						logging.Str("airgap.health.transition", "failed.to.healthy"),
+					), "Kafka cluster appears to have recovered")
 					reportError("running")
 					lastErrorMsg = ""
 				}
@@ -650,7 +739,13 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 				if err != nil {
 					errMsg := fmt.Sprintf("Kafka error: %v", err)
 					if errMsg != lastErrorMsg {
-						Logger.Errorf("%s", errMsg)
+						Logger.Errorf(logging.Event(logging.EventKafkaConsume,
+							logging.Failure(),
+							logging.Str("server.address", brokers),
+							logging.Str("airgap.kafka.consumer.name", name),
+							logging.Str("airgap.health.transition", "healthy.to.failed"),
+							logging.ErrorType(err),
+						), "%s", errMsg)
 						reportError(errMsg)
 						lastErrorMsg = errMsg
 						lastErrorTime = time.Now()
@@ -666,10 +761,17 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 	for {
 		select {
 		case <-ctx.Done():
-			Logger.Println("terminating: context cancelled (WithContext)")
+			Logger.Info(logging.Event(logging.EventAppShutdown,
+				logging.Str("airgap.kafka.consumer.name", name),
+				logging.Str("airgap.shutdown.reason", "context.cancelled"),
+			), "terminating: context cancelled (WithContext)")
 			wg.Wait()
 			if err = client.Close(); err != nil {
-				Logger.Panicf("Error closing client: %v", err)
+				Logger.Panicf(logging.Event(logging.EventAppShutdown,
+					logging.Failure(),
+					logging.Str("airgap.kafka.consumer.name", name),
+					logging.ErrorType(err),
+				), "Error closing client: %v", err)
 			}
 			return
 		case <-sigusr1:
@@ -716,13 +818,26 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 		select {
 		case message, ok := <-claim.Messages():
 			if !ok {
-				Logger.Printf("message channel was closed")
+				Logger.Info(logging.Event(logging.EventKafkaConsume,
+					logging.Str("airgap.kafka.consumer.name", consumer.name),
+					logging.Str("messaging.destination.name", claim.Topic()),
+					logging.Decimal("messaging.destination.partition.id", int64(claim.Partition())),
+					logging.Str("airgap.kafka.stage", "claim.closed"),
+				), "message channel was closed")
 				return nil
 			}
 			sleepTime := time.Until(message.Timestamp.Add(-consumer.delay))
 			if sleepTime > 0 {
-				Logger.Debug("Consumer.delay: " + consumer.delay.String())
-				Logger.Debug("Delaying message delivery on thread: " + consumer.name + " for " + sleepTime.String())
+				delayAttrs := logging.Event(logging.EventMessageDeliver,
+					logging.Str("airgap.kafka.consumer.name", consumer.name),
+					logging.Str("messaging.destination.name", message.Topic),
+					logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
+					logging.Int("messaging.kafka.offset", message.Offset),
+					logging.Int("airgap.delay.configured_ms", consumer.delay.Milliseconds()),
+					logging.Int("airgap.delay.sleep_ms", sleepTime.Milliseconds()),
+				)
+				Logger.Debug(delayAttrs, "Consumer.delay: "+consumer.delay.String())
+				Logger.Debug(delayAttrs, "Delaying message delivery on thread: "+consumer.name+" for "+sleepTime.String())
 				time.Sleep(sleepTime)
 			}
 			// Debug output the first 80 characters of the message. If the message is truncated, show ...
@@ -733,7 +848,14 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 			} else {
 				payload = string(message.Value[0:maxLen]) + "..."
 			}
-			Logger.Debugf("Message on thread %s: topic=%s partition=%d offset=%d timestamp=%s key=%s value=%s",
+			Logger.Debugf(logging.Event(logging.EventKafkaConsume,
+				logging.Str("airgap.kafka.consumer.name", consumer.name),
+				logging.Str("messaging.destination.name", message.Topic),
+				logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
+				logging.Int("messaging.kafka.offset", message.Offset),
+				logging.Str("messaging.kafka.message.key", string(message.Key)),
+				logging.Int("airgap.message.size", int64(len(message.Value))),
+			), "Message on thread %s: topic=%s partition=%d offset=%d timestamp=%s key=%s value=%s",
 				consumer.name, message.Topic, message.Partition, message.Offset, message.Timestamp.String(),
 				string(message.Key), payload)
 
@@ -747,7 +869,14 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 			if keepRunning {
 				session.MarkMessage(message, "")
 			} else {
-				Logger.Debugf("Message id=%s not marked as consumed, will be retried", id)
+				Logger.Debugf(logging.Event(logging.EventKafkaCommit,
+					logging.Failure(),
+					logging.Str("airgap.kafka.consumer.name", consumer.name),
+					logging.Str("messaging.destination.name", message.Topic),
+					logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
+					logging.Int("messaging.kafka.offset", message.Offset),
+					logging.Str("airgap.message.id", id),
+				), "Message id=%s not marked as consumed, will be retried", id)
 			}
 		case <-session.Context().Done():
 			return nil
@@ -771,7 +900,13 @@ func ReadToEnd(ctx context.Context, brokers string, topic string, group string,
 func ReadToEndPartition(partition int, ctx context.Context, brokers string, topic string, group string, fromOffset int64,
 	callbackFunction func(string, []byte, time.Time, []byte) bool) error {
 
-	Logger.Printf("Starting ReadToEnd for topic %s and partition %d", topic, partition)
+	Logger.Infof(logging.Event(logging.EventResendReplay,
+		logging.Str("server.address", brokers),
+		logging.Str("messaging.destination.name", topic),
+		logging.Decimal("messaging.destination.partition.id", int64(partition)),
+		logging.Int("messaging.kafka.offset", fromOffset),
+		logging.Str("airgap.kafka.stage", "starting"),
+	), "Starting ReadToEnd for topic %s and partition %d", topic, partition)
 
 	ConfigureSaramaLogger()
 
@@ -784,7 +919,11 @@ func ReadToEndPartition(partition int, ctx context.Context, brokers string, topi
 	config.Version = version
 	config.ClientID = "readtoend"
 	if tlsConfigParameters != nil {
-		Logger.Println("Enabling TLS configuration for Kafka consumer")
+		Logger.Info(logging.Event(logging.EventTLSHandshake,
+			logging.Str("airgap.kafka.role", "consumer"),
+			logging.Str("messaging.destination.name", topic),
+			logging.Str("file.path", tlsConfigParameters.CertFile),
+		), "Enabling TLS configuration for Kafka consumer")
 		tlsConfig, err := createTLSConfig()
 		if err != nil {
 			return err
@@ -845,11 +984,24 @@ func ReadToEndPartition(partition int, ctx context.Context, brokers string, topi
 			startOffset = oldestOffset
 		}
 		if startOffset >= newestOffset {
-			Logger.Debugf("Partition %d has no new messages (startOffset=%d, latest=%d) — skipping", partition, startOffset, newestOffset)
+			Logger.Debugf(logging.Event(logging.EventResendReplay,
+				logging.Str("messaging.destination.name", topic),
+				logging.Decimal("messaging.destination.partition.id", int64(partition)),
+				logging.Int("airgap.kafka.offset.start", startOffset),
+				logging.Int("airgap.kafka.offset.newest", newestOffset),
+				logging.Str("airgap.kafka.stage", "skipped.empty"),
+			), "Partition %d has no new messages (startOffset=%d, latest=%d) — skipping", partition, startOffset, newestOffset)
 			continue
 		}
 
-		Logger.Debugf("Reading partition %d from offset %d to %d (oldest=%d)",
+		Logger.Debugf(logging.Event(logging.EventResendReplay,
+			logging.Str("messaging.destination.name", topic),
+			logging.Decimal("messaging.destination.partition.id", int64(partition)),
+			logging.Int("airgap.kafka.offset.start", startOffset),
+			logging.Int("airgap.kafka.offset.end", newestOffset-1),
+			logging.Int("airgap.kafka.offset.oldest", oldestOffset),
+			logging.Str("airgap.kafka.stage", "reading"),
+		), "Reading partition %d from offset %d to %d (oldest=%d)",
 			partition, startOffset, newestOffset-1, oldestOffset)
 
 		pc, err := consumer.ConsumePartition(topic, partition, startOffset)
@@ -868,13 +1020,22 @@ func ReadToEndPartition(partition int, ctx context.Context, brokers string, topi
 		for {
 			select {
 			case <-ctx.Done():
-				Logger.Debugf("Context cancelled during ReadToEnd")
+				Logger.Debug(logging.Event(logging.EventResendReplay,
+					logging.Failure(),
+					logging.Str("messaging.destination.name", topic),
+					logging.Decimal("messaging.destination.partition.id", int64(partition)),
+					logging.Str("airgap.kafka.stage", "cancelled"),
+				), "Context cancelled during ReadToEnd")
 				pc.Close()
 				return ctx.Err()
 
 			case message, ok := <-pc.Messages():
 				if !ok {
-					Logger.Debugf("Partition consumer closed for partition %d", partition)
+					Logger.Debugf(logging.Event(logging.EventResendReplay,
+						logging.Str("messaging.destination.name", topic),
+						logging.Decimal("messaging.destination.partition.id", int64(partition)),
+						logging.Str("airgap.kafka.stage", "partition.closed"),
+					), "Partition consumer closed for partition %d", partition)
 					pc.Close()
 					break partitionLoop
 				}
@@ -892,7 +1053,12 @@ func ReadToEndPartition(partition int, ctx context.Context, brokers string, topi
 				callbackFunction(id, message.Key, message.Timestamp, message.Value)
 
 				if message.Offset >= expectedFinalOffset {
-					Logger.Debugf("Reached end of partition %d at offset %d", partition, message.Offset)
+					Logger.Debugf(logging.Event(logging.EventResendReplay,
+						logging.Str("messaging.destination.name", topic),
+						logging.Decimal("messaging.destination.partition.id", int64(partition)),
+						logging.Int("messaging.kafka.offset", message.Offset),
+						logging.Str("airgap.kafka.stage", "partition.complete"),
+					), "Reached end of partition %d at offset %d", partition, message.Offset)
 					pc.AsyncClose()
 					// Drain until closed
 					for range pc.Messages() {
@@ -901,7 +1067,12 @@ func ReadToEndPartition(partition int, ctx context.Context, brokers string, topi
 				}
 
 			case <-stallTimer.C:
-				Logger.Debugf("No progress for %v on partition %d, assuming done",
+				Logger.Debugf(logging.Event(logging.EventResendReplay,
+					logging.Str("messaging.destination.name", topic),
+					logging.Decimal("messaging.destination.partition.id", int64(partition)),
+					logging.Int("airgap.kafka.stall_timeout_ms", stallTimeout.Milliseconds()),
+					logging.Str("airgap.kafka.stage", "partition.stalled"),
+				), "No progress for %v on partition %d, assuming done",
 					stallTimeout, partition)
 				pc.AsyncClose()
 				for range pc.Messages() {
@@ -919,6 +1090,9 @@ func ReadToEndPartition(partition int, ctx context.Context, brokers string, topi
 		pc.Close()
 	}
 
-	Logger.Debugf("ReadToEnd finished for topic %s", topic)
+	Logger.Debugf(logging.Event(logging.EventResendReplay,
+		logging.Str("messaging.destination.name", topic),
+		logging.Str("airgap.kafka.stage", "complete"),
+	), "ReadToEnd finished for topic %s", topic)
 	return nil
 }

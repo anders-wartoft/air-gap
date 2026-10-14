@@ -119,7 +119,8 @@ printed on its own line at the very end (`total runtime: Xm YYs (Zs)`).
   `TC_RUNNER`, `LG_PRODUCER_CONFIG`, or `AUTO_EXIT_SERVICE`, so there's no auto-exit
   path and running it would hang the chain. Chain-safe testcases listed
   as "**Chain run**" below are: **TC-1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-  11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27**. The others still work with `./run-testcase.sh N` directly
+  11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+  29**. The others still work with `./run-testcase.sh N` directly
   for the manual procedure. Note: TC-16 SKIPs by deliberate design, not
   because it's unimplemented — see its section below for why a
   performance benchmark can't have a meaningful automated chain variant.
@@ -4707,3 +4708,307 @@ Sweep scheduling is one second; deterministic unit tests verify the exact
 policy boundary rather than asserting real-time scheduler precision.
 Permanent removal/revocation and optional explicit expiry remain different
 policies; aging never deletes public entry files or journals.
+
+---
+
+## TC-28 — Optional OTLP/JSON logs with create/resend recovery
+
+Verify REQ-52 on the real upstream, downstream, dedup, create, and resend
+binaries while exercising a complete operational red thread rather than merely
+starting each process.
+
+* Covers: REQ-52
+* Implemented in: 0.1.14-SNAPSHOT
+* Runner: `./run-testcase.sh 28` (adds `dedup`; invokes `create` and `resend`
+  as one-shot Compose runs)
+
+### Setup and format selection
+
+TC-28 reuses TC-14's Kafka, LogGenerator, downstream, create, and resend
+configuration. Its dedicated files are:
+
+* [testcases/28.env](../env/testcases/28.env) — selects OTel format for all
+  five applications and wires the post-drain and verification scripts;
+* [upstream-airgap-28-docker.properties](../../config/testcases/upstream-airgap-28-docker.properties)
+  — a deterministic delivery filter described below;
+* [dedup-28-docker.env](../../config/testcases/dedup-28-docker.env) — fast
+  five-second gap reports and a stable `INSTANCE_ID`;
+* [log4j2-otel.xml](../../config/log4j2-otel.xml) — dedup's optional
+  OTLP/JSON console layout. The normal PatternLayout remains the default in
+  every other testcase.
+
+The Go applications use their normal application-specific `LOG_FORMAT`
+environment overrides. Dedup uses the optional OTel Log4j configuration. No
+Collector or OTLP network exporter is started: TC-28 validates the records
+written by the applications.
+
+### Deterministic filtered gap
+
+LogGenerator writes exactly 100 `TEST_N` events across five upstream Kafka
+partitions, yielding offsets 0 through 19 per partition.
+
+The upstream delivery filter includes positions 1 through 9 in a repeating
+ten-position cycle and excludes position 10:
+
+```properties
+deliverFilter=1,2,3,4,5,6,7,8,9,11,12,13,14,15,16,17,18,19,21,22,23,24,25,26,27,28,29
+```
+
+With the filter's zero-based Kafka-offset mapping this deliberately drops
+offsets 0 and 10 from every partition, while forwarding later offsets. Dedup
+can therefore conclusively detect all ten gaps. This differs from TC-14's
+odd/even filter: TC-28 never drops the finite stream's tail, so the expected
+final result can be strict 100 received, 0 missing, 0 duplicate rather than a
+tail-gap tolerance.
+
+### Automated procedure
+
+1. Start both Kafka clusters, upstream, downstream, dedup, LogGenerator
+   producer, and LogGenerator sink.
+2. Wait for dedup to reach its running state, then produce exactly 100 events.
+3. Let the initial flow drain and query the downstream clean Kafka topic.
+   [tc28-resend.sh](../env/tc28-resend.sh) requires it to contain between 1
+   and 99 events, proving the filter made the first transfer incomplete before
+   recovery began.
+4. Run the real `create` binary on the downstream side with `--limit=all`,
+   writing `tmp/tc28/downstream/resend-28-all.json`. Capture create's complete
+   process log for REQ-52 validation.
+5. Copy that bundle explicitly to
+   `tmp/tc28/upstream/resend-28-all.json` and byte-compare source and
+   destination. Create and resend do not consume the same path; this models
+   the operational transfer from the downstream machine to the upstream
+   machine.
+6. Run the real `resend` binary on the upstream side against the copied file.
+   It reads original payloads from upstream Kafka and sends them through the
+   existing UDP downstream and dedup path. Capture resend's complete process
+   log.
+7. Wait for propagation, stop the LogGenerator sink, and require its normal
+   verdict to report exactly 100 unique events, 0 missing, and 0 duplicates.
+8. [verify-tc28.sh](../env/verify-tc28.sh) independently consumes the
+   downstream clean Kafka topic from the beginning and requires exactly 100
+   records. It also requires dedup's final confirmed missing total to be zero
+   and at least one negative `delta_missing`, proving resend closed a real
+   detected gap.
+9. Capture upstream, downstream, and dedup container logs and validate those
+   plus the create and resend logs with
+   [verify_otlp.py](../env/lib/verify_otlp.py).
+
+### OTLP/JSON assertions
+
+For every in-scope application, the verifier requires at least one application
+record and checks every OTLP/JSON record it finds:
+
+* valid UTF-8 JSON contained on one physical line;
+* exactly one `resourceLogs`, `scopeLogs`, and `logRecords` object;
+* no non-OTLP siblings in the envelope;
+* the expected `service.name`, a non-empty `service.version`, a non-empty
+  `service.instance.id`, and a non-empty instrumentation scope;
+* positive decimal-string `timeUnixNano` and `observedTimeUnixNano`;
+* exact TRACE/DEBUG/INFO/WARN/ERROR/FATAL text-to-number mapping;
+* a `body.stringValue`;
+* unique attribute keys and correct `stringValue`, decimal-string `intValue`,
+  or `boolValue` type representation;
+* no signature attributes, because TC-28 leaves the optional signing
+  configuration disabled.
+
+### Semantic attribute assertions
+
+REQ-52.09 requires a consumer to understand a record without parsing its body,
+so the verifier additionally requires, for every record of every in-scope
+application:
+
+* a non-empty LogRecord `eventName` field matching the hierarchical form
+  `domain.action`, for example `kafka.connect`;
+* no `eventName`, `event.result`, `error.message`, or `service.version`
+  attribute in the LogRecord attributes array;
+* a non-empty string `error.type` on failures and no `error.type` on ordinary
+  successful events;
+* `.exception` EventNames with string `exception.type` or
+  `exception.message`, and string `exception.stacktrace` when present.
+
+Because every record must already carry an event name for those checks to pass,
+what remains to prove is that the names are meaningful. Each application must
+therefore emit at least one event in each domain it actually works in:
+
+| Application | Required event name prefixes |
+|---|---|
+| upstream | `app.lifecycle.`, `kafka.`, `transport.` |
+| downstream | `app.lifecycle.`, `kafka.`, `udp.` |
+| dedup | `app.lifecycle.`, `kafka.` |
+| create | `create.` |
+| resend | `kafka.` |
+
+This is what distinguishes a genuine conversion from one that satisfies the
+letter of the requirement by stamping every record with the same placeholder
+name.
+
+Text bootstrap diagnostics before format activation and launcher/Compose output
+are permitted by REQ-52.02. A timestamped plain-text application record after
+the first OTLP record fails the test. This catches third-party Kafka client
+logging accidentally bypassing the selected application format.
+
+### Expected result
+
+```text
+Clean Kafka topic before resend: 1..99 events (intentionally incomplete)
+create exports all detected gaps: exit 0
+Explicit downstream-to-upstream bundle copy: byte-identical
+resend replays copied bundle: exit 0
+sent      : 100
+received  : 100 unique
+duplicates: 0
+missing   : 0
+Clean Kafka topic after resend: 100 events
+Dedup gap-closing reports: > 0
+Dedup final confirmed gaps: 0
+upstream/downstream/dedup/create/resend REQ-52 OTLP/JSON: verified
+```
+
+### What it proves
+
+OTLP/JSON is an optional encoding for every in-scope application and does not
+change the existing transfer, filtering, gap export, explicit resend-file
+copy, replay, or deduplication behavior. The existing text format remains the
+default and is covered separately by the REQ-52 Go unit tests.
+
+---
+
+## TC-29 — Version 1 signature verification
+
+Verify that dedicated Ed25519 signing certificates produce independently
+verifiable Version 1 log checkpoints for both sides of a successful transfer,
+and that tampering, missing records, a modified signature, or the wrong public
+key are rejected.
+
+* Covers: REQ-52.10
+* Implemented in: 0.1.14-SNAPSHOT
+* Runner: `./run-testcase.sh 29`
+
+### Setup
+
+TC-29 reuses TC-3's unencrypted upstream/downstream path and Kafka topics. It
+uses the 100-event LogGenerator producer from TC-14 and TC-3's Kafka sink:
+
+```text
+LG producer (100 events)
+  -> kafka-upstream[transfer]
+  -> upstream
+  -> UDP
+  -> downstream
+  -> kafka-downstream[transfer]
+  -> LG sink
+```
+
+[testcases/29.env](../env/testcases/29.env) selects OTLP/JSON on upstream and
+downstream and configures:
+
+```properties
+hash=SHA256
+hash-chain=10
+log-signing-cert=/airgap/certs/tmp/tc29/signer.crt
+log-signing-key=/airgap/certs/tmp/tc29/signer.key
+log-signer-id=urn:airgap:test:tc29
+log-signing-eku=1.3.6.1.4.1.55555.29.1
+```
+
+Before Compose starts, [tc29-generate-certificate.sh](../env/tc29-generate-certificate.sh)
+uses the Go standard library to create:
+
+* a fresh self-signed Ed25519 certificate and PKCS#8 private key;
+* `digitalSignature` key usage;
+* the dedicated test log-signing EKU `1.3.6.1.4.1.55555.29.1`;
+* URI SAN `urn:airgap:test:tc29`;
+* the corresponding public-key PEM; and
+* a second unrelated certificate used only for the wrong-key negative test.
+
+One generated signing key is deliberately shared by the two test containers so
+both sides can be checked against the same known public key. Production
+machines should have separate signing keys.
+
+### Version 1 window interpretation
+
+Version 1 writes an additional signed anchor after each ten ordinary records.
+Consequently, “verify the signature on event 10” means:
+
+1. retrieve the first completed window of ten ordinary records;
+2. retrieve the immediately following anchor;
+3. verify the anchor signature that closes those ten records.
+
+The exported verification window therefore contains eleven OTLP records. The
+test requires `airgap.log.chain.length=10`, ten ordinary records, and exactly
+one final signed anchor. It does not incorrectly treat the tenth ordinary
+record as the Version 1 anchor.
+
+### Automated procedure
+
+1. Generate the dedicated signing certificate, private key, public key, and
+   unrelated negative-test certificate before starting any container.
+2. Start both Kafka clusters, upstream, downstream, the LogGenerator producer,
+   and the LogGenerator sink.
+3. Transfer exactly 100 `TEST_N` events and require the ordinary testcase
+   verdict to report 100 unique events, zero missing, and zero duplicates.
+4. Capture complete upstream and downstream container logs.
+5. For each side, locate the first anchor carrying
+   `airgap.log.signature`, then select every record with the same
+   `airgap.log.run.id` and `airgap.log.window.id`.
+6. Independently reconstruct every SHA-256 payload hash and chain link, require
+   continuous sequence numbers, and reconstruct the Version 1 checkpoint
+   statement without calling the production logging package.
+7. Parse the generated certificate and require:
+   * an Ed25519 public key;
+   * `digitalSignature` key usage;
+   * the configured log-signing EKU;
+   * matching certificate serial;
+   * a signer ID matching the certificate's sole URI SAN; and
+   * an `airgap.log.key.id` equal to the SHA-256 fingerprint of the
+     certificate's DER SubjectPublicKeyInfo.
+8. Verify the anchor's Ed25519 signature with that public key.
+9. Increase the first ordinary record's hexadecimal `airgap.log.hash` value by
+   exactly one and require verification to fail.
+10. Repeat the complete positive and tampered-hash checks for downstream.
+
+[verify-tc29.sh](../env/verify-tc29.sh) also performs these vital negative
+cases for both sides:
+
+* verify with an unrelated public key and require failure;
+* remove the first record from the signed window and require failure, proving
+  sequence completeness is checked rather than silently skipping records; and
+* flip one bit in the Base64-decoded signature and require failure, proving
+  that a structurally valid but modified signature is rejected.
+
+The independent certificate generator and verifier are implemented in
+[tc29_integrity.go](../env/lib/tc29_integrity.go). They use only the Go
+standard library and do not reuse production hash-chain or signing functions.
+
+### Expected result
+
+```text
+sent      : 100
+received  : 100 unique
+duplicates: 0
+missing   : 0
+
+upstream Version 1 checkpoint: verified
+upstream signed window shape: 10 ordinary records plus one anchor
+upstream wrong public key: rejected
+upstream record 1 hash increased by one: rejected
+upstream missing record: rejected
+upstream modified signature: rejected
+
+downstream Version 1 checkpoint: verified
+downstream signed window shape: 10 ordinary records plus one anchor
+downstream wrong public key: rejected
+downstream record 1 hash increased by one: rejected
+downstream missing record: rejected
+downstream modified signature: rejected
+```
+
+### What it proves
+
+For both upstream and downstream, a completed Version 1 window can be verified
+from exported OTLP/JSON records and the independently obtained signing
+certificate. The key fingerprint identifies the exact public key, and changes
+to a record hash, window completeness, signature, or verification key cannot
+produce a successful result. The separate 100-event LogGenerator verdict
+proves that enabling hashing and signing does not change successful
+end-to-end delivery.

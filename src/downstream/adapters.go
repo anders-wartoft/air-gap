@@ -16,6 +16,7 @@ import (
 
 	"sitia.nu/airgap/src/internal/pinnedtls"
 	"sitia.nu/airgap/src/kafka"
+	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/udp"
 )
 
@@ -201,27 +202,39 @@ func NewTCPAdapter(config TransferConfiguration) *TCPAdapter {
 	}
 
 	if config.tcpTLSCertFile != "" {
+		tlsBase := logging.Event(logging.EventTLSPinVerify,
+			logging.Str("file.path", config.tcpTLSCertFile),
+			logging.Str("airgap.tls.trusted.dir", config.tcpTLSTrustedKeysDir),
+		)
 		if adapter.pinned {
 			if err := pinnedtls.ValidateRotationStore(config.tcpTLSTrustedKeysDir); err != nil {
-				Logger.Fatal(err)
+				Logger.Fatal(tlsBase.Merge(logging.Err(err)), err)
 			}
 			snapshot, err := pinnedtls.Prepare(config.tcpTLSCertFile, config.tcpTLSKeyFile, config.tcpTLSTrustedKeysDir, true)
 			if err != nil {
-				Logger.Fatal(err)
+				Logger.Fatal(tlsBase.Merge(logging.Err(err)), err)
 			}
 			adapter.pinManager, err = pinnedtls.NewManager(snapshot)
 			if err != nil {
-				Logger.Fatal(err)
+				Logger.Fatal(tlsBase.Merge(logging.Err(err)), err)
 			}
 			adapter.tlsConfig = adapter.pinManager.ServerConfig()
 			adapter.pinManager.StartAging(config.tcpTLSPinIdleSeconds, func(fingerprints []string) {
-				Logger.Infof("Pinned TLS idle aging: role=client purged=%v; disk unchanged, SIGHUP restores pins", fingerprints)
+				Logger.Infof(logging.Event(logging.EventTLSPinAging,
+					logging.Str("airgap.tls.pin.role", "client"),
+					logging.Int("airgap.tls.pin.purged", int64(len(fingerprints))),
+					logging.Int("airgap.tls.pin.idle.seconds", int64(config.tcpTLSPinIdleSeconds)),
+				), "Pinned TLS idle aging: role=client purged=%v; disk unchanged, SIGHUP restores pins", fingerprints)
 			})
 			return adapter
 		}
 		tlsCfg, err := config.BuildTLSConfig()
 		if err != nil {
-			Logger.Fatalf("Error building TCP TLS configuration: %v", err)
+			Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+				logging.Str("airgap.config.setting", "tcpTLSCertFile"),
+				logging.Str("airgap.config.value", config.tcpTLSCertFile),
+			).Merge(logging.Err(err)),
+				"Error building TCP TLS configuration: %v", err)
 		}
 		// Store cert files for hot-reload on SIGHUP
 		adapter.certFile = config.tcpTLSCertFile
@@ -236,13 +249,21 @@ func NewTCPAdapter(config TransferConfiguration) *TCPAdapter {
 		}
 		tlsCfg.Certificates = nil
 		adapter.tlsConfig = tlsCfg
-		Logger.Printf("TCP TLS configured: clientAuth=%s", config.tcpTLSClientAuth)
+		Logger.Infof(logging.Event(logging.EventConfigApplied,
+			logging.Str("airgap.config.setting", "tcpTLSClientAuth"),
+			logging.Str("airgap.config.value", config.tcpTLSClientAuth),
+			logging.Str("file.path", config.tcpTLSCertFile),
+		), "TCP TLS configured: clientAuth=%s", config.tcpTLSClientAuth)
 	}
 
 	if config.tcpTLSClientCNRegex != "" {
 		re, err := regexp.Compile(config.tcpTLSClientCNRegex)
 		if err != nil {
-			Logger.Fatalf("Invalid tcpTLSClientCNRegex %q: %v", config.tcpTLSClientCNRegex, err)
+			Logger.Fatalf(logging.Event(logging.EventConfigInvalid,
+				logging.Str("airgap.config.setting", "tcpTLSClientCNRegex"),
+				logging.Str("airgap.config.value", config.tcpTLSClientCNRegex),
+			).Merge(logging.Err(err)),
+				"Invalid tcpTLSClientCNRegex %q: %v", config.tcpTLSClientCNRegex, err)
 		}
 		adapter.clientCNRegex = re
 	}
@@ -273,20 +294,28 @@ func (t *TCPAdapter) Listen(
 	_ int, // numReceivers unused for TCP
 ) {
 	addr := fmt.Sprintf("%s:%d", ip, port)
+	listenAttrs := logging.Event(logging.EventTCPListen,
+		logging.Str("server.address", ip),
+		logging.Int("server.port", int64(port)),
+	)
 	var listener net.Listener
 	var err error
 	if t.tlsConfig != nil {
 		listener, err = tls.Listen("tcp", addr, t.tlsConfig)
 		if err != nil {
-			Logger.Fatalf("Failed to listen on TLS TCP %s: %v", addr, err)
+			Logger.Fatalf(listenAttrs.With(logging.Bool("airgap.tls.enabled", true)).Merge(logging.Err(err)),
+				"Failed to listen on TLS TCP %s: %v", addr, err)
 		}
-		Logger.Infof("TLS TCP listener started on %s", addr)
+		Logger.Infof(listenAttrs.With(logging.Bool("airgap.tls.enabled", true)),
+			"TLS TCP listener started on %s", addr)
 	} else {
 		listener, err = net.Listen("tcp", addr)
 		if err != nil {
-			Logger.Fatalf("Failed to listen on TCP %s: %v", addr, err)
+			Logger.Fatalf(listenAttrs.With(logging.Bool("airgap.tls.enabled", false)).Merge(logging.Err(err)),
+				"Failed to listen on TCP %s: %v", addr, err)
 		}
-		Logger.Infof("TCP listener started on %s", addr)
+		Logger.Infof(listenAttrs.With(logging.Bool("airgap.tls.enabled", false)),
+			"TCP listener started on %s", addr)
 	}
 
 	t.listener = listener
@@ -321,7 +350,11 @@ func (t *TCPAdapter) Listen(
 				if t.isClosed() {
 					return
 				}
-				Logger.Warnf("Error accepting TCP connection: %v", err)
+				Logger.Warnf(logging.Event(logging.EventTCPAccept,
+					logging.Failure(),
+					logging.Str("server.address", addr),
+					logging.ErrorType(err),
+				), "Error accepting TCP connection: %v", err)
 				continue
 			}
 			select {
@@ -335,7 +368,11 @@ func (t *TCPAdapter) Listen(
 			if t.activeConns.Add(1) > int64(t.maxConnections) {
 				t.activeConns.Add(-1)
 				conn.Close()
-				Logger.Warnf("Max TCP connections (%d) reached, rejecting connection from %s", t.maxConnections, conn.RemoteAddr())
+				Logger.Warnf(logging.Event(logging.EventTCPAccept,
+					logging.Failure(),
+					logging.Str("client.address", conn.RemoteAddr().String()),
+					logging.Int("airgap.tcp.connections.max", int64(t.maxConnections)),
+				), "Max TCP connections (%d) reached, rejecting connection from %s", t.maxConnections, conn.RemoteAddr())
 				continue
 			}
 			t.closeMutex.Lock()
@@ -350,7 +387,10 @@ func (t *TCPAdapter) Listen(
 			}
 			t.connections[conn] = struct{}{}
 			t.closeMutex.Unlock()
-			Logger.Debugf("[TLS downstream] Accepted TCP connection from %s (active: %d)", conn.RemoteAddr(), t.activeConns.Load())
+			Logger.Debugf(logging.Event(logging.EventTCPAccept,
+				logging.Str("client.address", conn.RemoteAddr().String()),
+				logging.Int("airgap.tcp.connections.active", t.activeConns.Load()),
+			), "[TLS downstream] Accepted TCP connection from %s (active: %d)", conn.RemoteAddr(), t.activeConns.Load())
 			t.wg.Add(1)
 			go t.handleConnection(conn, callback, stopChan)
 		}
@@ -389,26 +429,38 @@ func (t *TCPAdapter) ReloadTLSCert() error {
 		return fmt.Errorf("[TLS downstream] certificate reload failed: %w", err)
 	}
 	t.certPtr.Store(&cert)
-	Logger.Infof("[TLS downstream] Server certificate reloaded from %s", t.certFile)
+	Logger.Infof(logging.Event(logging.EventTLSCertReload,
+		logging.Str("file.path", t.certFile),
+	), "[TLS downstream] Server certificate reloaded from %s", t.certFile)
 	return nil
 }
 
 // logTLSHandshakeError logs a TLS handshake failure with a human-readable hint.
 func logTLSHandshakeError(remoteAddr string, err error) {
 	msg := err.Error()
+	base := logging.Event(logging.EventTLSHandshake,
+		logging.Failure(),
+		logging.Str("client.address", remoteAddr),
+		logging.Error("_OTHER"),
+	)
 	switch {
 	case strings.Contains(msg, "RSA key larger than"):
-		Logger.Errorf("[TLS downstream] Handshake failed from %s: client certificate has an oversized RSA key — regenerate with a 2048- or 4096-bit key (%s)", remoteAddr, msg)
+		Logger.Errorf(base.With(logging.Str("error.type", "certificate.key.oversized")),
+			"[TLS downstream] Handshake failed from %s: client certificate has an oversized RSA key — regenerate with a 2048- or 4096-bit key (%s)", remoteAddr, msg)
 	case strings.Contains(msg, "certificate has expired") || strings.Contains(msg, "certificate is not yet valid"):
-		Logger.Errorf("[TLS downstream] Handshake failed from %s: certificate validity period error — check system clock and certificate dates (%s)", remoteAddr, msg)
+		Logger.Errorf(base.With(logging.Str("error.type", "certificate.validity")),
+			"[TLS downstream] Handshake failed from %s: certificate validity period error — check system clock and certificate dates (%s)", remoteAddr, msg)
 	case strings.Contains(msg, "certificate signed by unknown authority") || strings.Contains(msg, "x509: "):
-		Logger.Errorf("[TLS downstream] Handshake failed from %s: certificate chain error — check tcpTLSCAFile matches the client's issuing CA (%s)", remoteAddr, msg)
+		Logger.Errorf(base.With(logging.Str("error.type", "certificate.chain")),
+			"[TLS downstream] Handshake failed from %s: certificate chain error — check tcpTLSCAFile matches the client's issuing CA (%s)", remoteAddr, msg)
 	case strings.Contains(msg, "bad certificate") || strings.Contains(msg, "unknown certificate"):
-		Logger.Warnf("[TLS downstream] Handshake failed from %s: remote rejected our server certificate — check tcpTLSCertFile/tcpTLSKeyFile on this side (%s)", remoteAddr, msg)
+		Logger.Warnf(base.With(logging.Str("error.type", "certificate.rejected")),
+			"[TLS downstream] Handshake failed from %s: remote rejected our server certificate — check tcpTLSCertFile/tcpTLSKeyFile on this side (%s)", remoteAddr, msg)
 	case strings.Contains(msg, "no certificate"):
-		Logger.Warnf("[TLS downstream] Handshake failed from %s: client sent no certificate (clientAuth=require needs a client cert) (%s)", remoteAddr, msg)
+		Logger.Warnf(base.With(logging.Str("error.type", "certificate.missing")),
+			"[TLS downstream] Handshake failed from %s: client sent no certificate (clientAuth=require needs a client cert) (%s)", remoteAddr, msg)
 	default:
-		Logger.Warnf("[TLS downstream] Handshake failed from %s: %s", remoteAddr, msg)
+		Logger.Warnf(base, "[TLS downstream] Handshake failed from %s: %s", remoteAddr, msg)
 	}
 }
 
@@ -417,12 +469,22 @@ func logClientKeyInfo(cert *x509.Certificate) {
 	switch pub := cert.PublicKey.(type) {
 	case interface{ Size() int }: // *rsa.PublicKey
 		bits := pub.Size() * 8
-		Logger.Debugf("[TLS downstream] Client cert public key: RSA %d-bit", bits)
+		Logger.Debugf(logging.Event(logging.EventTLSHandshake,
+			logging.Str("tls.client.certificate.key.type", "RSA"),
+			logging.Int("tls.client.certificate.key.bits", int64(bits)),
+		), "[TLS downstream] Client cert public key: RSA %d-bit", bits)
 		if bits > 8192 {
-			Logger.Errorf("[TLS downstream] Client cert RSA key is %d bits — Go rejects RSA keys > 8192 bits. Regenerate the client certificate with a 2048- or 4096-bit key.", bits)
+			Logger.Errorf(logging.Event(logging.EventTLSHandshake,
+				logging.Failure(),
+				logging.Str("error.type", "certificate.key.oversized"),
+				logging.Str("tls.client.certificate.key.type", "RSA"),
+				logging.Int("tls.client.certificate.key.bits", int64(bits)),
+			), "[TLS downstream] Client cert RSA key is %d bits — Go rejects RSA keys > 8192 bits. Regenerate the client certificate with a 2048- or 4096-bit key.", bits)
 		}
 	default:
-		Logger.Debugf("[TLS downstream] Client cert public key type: %T", cert.PublicKey)
+		Logger.Debugf(logging.Event(logging.EventTLSHandshake,
+			logging.Str("tls.client.certificate.key.type", fmt.Sprintf("%T", cert.PublicKey)),
+		), "[TLS downstream] Client cert public key type: %T", cert.PublicKey)
 	}
 }
 
@@ -441,38 +503,59 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 	}
 
 	remoteAddr := conn.RemoteAddr().String()
+	peerAttrs := logging.Event(logging.EventTLSHandshake,
+		logging.Str("client.address", remoteAddr),
+	)
 
 	// For TLS connections, verify the client CN if a regex is configured
 	if t.clientCNRegex != nil {
 		if tlsConn, ok := conn.(*tls.Conn); ok {
 			// Complete the TLS handshake so we can inspect peer certificates
-			Logger.Debugf("[TLS downstream] Starting handshake with %s", remoteAddr)
+			Logger.Debugf(peerAttrs, "[TLS downstream] Starting handshake with %s", remoteAddr)
 			if err := tlsConn.Handshake(); err != nil {
 				logTLSHandshakeError(remoteAddr, err)
 				return
 			}
 			state := tlsConn.ConnectionState()
-			Logger.Debugf("[TLS downstream] Handshake complete with %s, peer certs: %d, %s / %s", remoteAddr, len(state.PeerCertificates), tlsVersionName(state.Version), tls.CipherSuiteName(state.CipherSuite))
+			Logger.Debugf(peerAttrs.With(
+				logging.Int("tls.client.certificate.chain.length", int64(len(state.PeerCertificates))),
+				logging.Str("tls.protocol.version", tlsVersionName(state.Version)),
+				logging.Str("tls.cipher", tls.CipherSuiteName(state.CipherSuite)),
+			), "[TLS downstream] Handshake complete with %s, peer certs: %d, %s / %s", remoteAddr, len(state.PeerCertificates), tlsVersionName(state.Version), tls.CipherSuiteName(state.CipherSuite))
 			if len(state.PeerCertificates) == 0 {
-				Logger.Warnf("[TLS downstream] No client certificate presented from %s (clientAuth=require) — rejecting", remoteAddr)
+				Logger.Warnf(peerAttrs.With(
+					logging.Failure(),
+					logging.Str("error.type", "certificate.missing"),
+				), "[TLS downstream] No client certificate presented from %s (clientAuth=require) — rejecting", remoteAddr)
 				return
 			}
 			leaf := state.PeerCertificates[0]
-			Logger.Debugf("[TLS downstream] Client cert subject: %s", leaf.Subject.String())
-			Logger.Debugf("[TLS downstream] Client cert issuer:  %s", leaf.Issuer.String())
-			Logger.Debugf("[TLS downstream] Client cert CN:      %s", leaf.Subject.CommonName)
+			Logger.Debugf(peerAttrs.With(logging.Str("tls.client.certificate.subject", leaf.Subject.String())),
+				"[TLS downstream] Client cert subject: %s", leaf.Subject.String())
+			Logger.Debugf(peerAttrs.With(logging.Str("tls.client.certificate.issuer", leaf.Issuer.String())),
+				"[TLS downstream] Client cert issuer:  %s", leaf.Issuer.String())
+			Logger.Debugf(peerAttrs.With(logging.Str("tls.client.certificate.cn", leaf.Subject.CommonName)),
+				"[TLS downstream] Client cert CN:      %s", leaf.Subject.CommonName)
 			logClientKeyInfo(leaf)
 			cn := leaf.Subject.CommonName
 			if !t.clientCNRegex.MatchString(cn) {
-				Logger.Warnf("[TLS downstream] Client CN %q from %s rejected by pattern %q — update tcpTLSClientCNRegex or regenerate the client certificate", cn, remoteAddr, t.clientCNRegex.String())
+				Logger.Warnf(peerAttrs.With(
+					logging.Failure(),
+					logging.Str("error.type", "certificate.cn.rejected"),
+					logging.Str("tls.client.certificate.cn", cn),
+					logging.Str("airgap.tls.cn.pattern", t.clientCNRegex.String()),
+				), "[TLS downstream] Client CN %q from %s rejected by pattern %q — update tcpTLSClientCNRegex or regenerate the client certificate", cn, remoteAddr, t.clientCNRegex.String())
 				return
 			}
-			Logger.Infof("[TLS downstream] Authenticated client CN %q from %s (pattern %q)", cn, remoteAddr, t.clientCNRegex.String())
+			Logger.Infof(peerAttrs.With(
+				logging.Str("tls.client.certificate.cn", cn),
+				logging.Str("airgap.tls.cn.pattern", t.clientCNRegex.String()),
+			), "[TLS downstream] Authenticated client CN %q from %s (pattern %q)", cn, remoteAddr, t.clientCNRegex.String())
 		}
 	} else if t.tlsConfig != nil {
 		// TLS without CN regex: still log handshake details at DEBUG
 		if tlsConn, ok := conn.(*tls.Conn); ok {
-			Logger.Debugf("[TLS downstream] Starting handshake with %s (no CN check)", remoteAddr)
+			Logger.Debugf(peerAttrs, "[TLS downstream] Starting handshake with %s (no CN check)", remoteAddr)
 			if err := tlsConn.Handshake(); err != nil {
 				logTLSHandshakeError(remoteAddr, err)
 				return
@@ -484,27 +567,43 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 					return
 				}
 				state := tlsConn.ConnectionState()
-				Logger.Infof("Pinned TLS authenticated client peer=%s fingerprint=%s", peer.Peer,
+				Logger.Infof(logging.Event(logging.EventTLSPinVerify,
+					logging.Str("client.address", remoteAddr),
+					logging.Str("airgap.tls.pin.peer", peer.Peer),
+					logging.Str("airgap.tls.pin.fingerprint", pinnedtls.Fingerprint(state.PeerCertificates[0].RawSubjectPublicKeyInfo)),
+				), "Pinned TLS authenticated client peer=%s fingerprint=%s", peer.Peer,
 					pinnedtls.Fingerprint(state.PeerCertificates[0].RawSubjectPublicKeyInfo))
 			}
 			state := tlsConn.ConnectionState()
-			Logger.Debugf("[TLS downstream] Handshake complete with %s, peer certs: %d, %s / %s", remoteAddr, len(state.PeerCertificates), tlsVersionName(state.Version), tls.CipherSuiteName(state.CipherSuite))
+			Logger.Debugf(peerAttrs.With(
+				logging.Int("tls.client.certificate.chain.length", int64(len(state.PeerCertificates))),
+				logging.Str("tls.protocol.version", tlsVersionName(state.Version)),
+				logging.Str("tls.cipher", tls.CipherSuiteName(state.CipherSuite)),
+			), "[TLS downstream] Handshake complete with %s, peer certs: %d, %s / %s", remoteAddr, len(state.PeerCertificates), tlsVersionName(state.Version), tls.CipherSuiteName(state.CipherSuite))
 			if len(state.PeerCertificates) > 0 {
 				leaf := state.PeerCertificates[0]
-				Logger.Debugf("[TLS downstream] Client cert CN: %s", leaf.Subject.CommonName)
+				Logger.Debugf(peerAttrs.With(logging.Str("tls.client.certificate.cn", leaf.Subject.CommonName)),
+					"[TLS downstream] Client cert CN: %s", leaf.Subject.CommonName)
 				logClientKeyInfo(leaf)
 				if t.pinManager == nil {
-					Logger.Infof("[TLS downstream] Authenticated client CN %q from %s (CA-chain only)", leaf.Subject.CommonName, remoteAddr)
+					Logger.Infof(peerAttrs.With(
+						logging.Str("tls.client.certificate.cn", leaf.Subject.CommonName),
+						logging.Str("airgap.tls.auth.mode", "ca"),
+					), "[TLS downstream] Authenticated client CN %q from %s (CA-chain only)", leaf.Subject.CommonName, remoteAddr)
 				}
 			} else {
-				Logger.Infof("[TLS downstream] TLS connection established with %s (one-way TLS, no client cert)", remoteAddr)
+				Logger.Infof(peerAttrs.With(logging.Str("airgap.tls.auth.mode", "one-way")),
+					"[TLS downstream] TLS connection established with %s (one-way TLS, no client cert)", remoteAddr)
 			}
 		}
 	}
 
 	reader := bufio.NewReader(conn)
 	var rotation pinnedtls.RotationSession
-	Logger.Infof("New TCP connection from %s", remoteAddr)
+	Logger.Infof(logging.Event(logging.EventTCPConnection,
+		logging.Str("client.address", remoteAddr),
+		logging.Int("airgap.tcp.connections.active", t.activeConns.Load()),
+	), "New TCP connection from %s", remoteAddr)
 
 	for {
 		select {
@@ -523,33 +622,52 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 			if t.isClosed() {
 				return
 			}
-			Logger.Debugf("TCP read error from %s: %v", remoteAddr, err)
+			Logger.Debugf(logging.Event(logging.EventTCPReceive,
+				logging.Failure(),
+				logging.Str("client.address", remoteAddr),
+				logging.ErrorType(err),
+			), "TCP read error from %s: %v", remoteAddr, err)
 			return
 		}
 
 		if len(msg) > 0 {
 			if pinnedtls.IsRotationFrame(msg) {
+				rotationAttrs := logging.Event(logging.EventTLSPinRotate,
+					logging.Str("client.address", remoteAddr),
+				)
 				if t.pinManager == nil {
-					Logger.Errorf("Pinned rotation rejected: requires pinned TLS TCP")
+					Logger.Error(rotationAttrs.With(
+						logging.Failure(),
+						logging.Str("error.type", "rotation.unsupported.transport"),
+					), "Pinned rotation rejected: requires pinned TLS TCP")
 					return
 				}
 				message, err := pinnedtls.DecodeRotationFrame(msg)
 				if err != nil {
-					Logger.Errorf("Pinned rotation malformed frame: %v", err)
+					Logger.Errorf(rotationAttrs.With(logging.Str("error.type", "rotation.malformed")).Merge(logging.Err(err)),
+						"Pinned rotation malformed frame: %v", err)
 					return
 				}
 				t.rotationMu.Lock()
 				response := t.pinManager.HandleRotation(&rotation, conn.(*tls.Conn), message, t.trustedDir, t.automaticRotation)
 				t.rotationMu.Unlock()
 				if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-					Logger.Errorf("Pinned rotation response deadline: %v", err)
+					Logger.Errorf(rotationAttrs.Merge(logging.Err(err)),
+						"Pinned rotation response deadline: %v", err)
 					return
 				}
 				if err := pinnedtls.WriteRotation(conn, response); err != nil {
-					Logger.Errorf("Pinned rotation response write: %v", err)
+					Logger.Errorf(rotationAttrs.Merge(logging.Err(err)),
+						"Pinned rotation response write: %v", err)
 					return
 				}
-				Logger.Infof("Pinned rotation result=%s role=client peer=%s id=%s old=%s new=%s reason=%s",
+				Logger.Infof(rotationAttrs.With(
+					logging.Str("airgap.tls.pin.rotation.kind", response.Kind),
+					logging.Str("airgap.tls.pin.role", "client"),
+					logging.Str("airgap.tls.pin.peer", response.Peer),
+					logging.Str("airgap.tls.pin.rotation.id", response.ID),
+					logging.Str("airgap.tls.pin.rotation.reason", response.Reason),
+				), "Pinned rotation result=%s role=client peer=%s id=%s old=%s new=%s reason=%s",
 					response.Kind, response.Peer, response.ID, response.Old, response.New, response.Reason)
 				continue
 			}
@@ -663,9 +781,12 @@ func (t *TCPAdapter) Close() error {
 
 	select {
 	case <-done:
-		Logger.Infof("TCP adapter closed gracefully")
+		Logger.Info(logging.Event(logging.EventTCPClose), "TCP adapter closed gracefully")
 	case <-time.After(5 * time.Second):
-		Logger.Warnf("TCP adapter close timeout")
+		Logger.Warn(logging.Event(logging.EventTCPClose,
+			logging.Failure(),
+			logging.Str("airgap.shutdown.reason", "close.timeout"),
+		), "TCP adapter close timeout")
 		<-done
 	}
 
@@ -740,13 +861,20 @@ func (a *NullAdapter) Write(_ string, _ string, _ int32, _ []byte) error {
 
 func (a *NullAdapter) Flush() {
 	total := atomic.LoadInt64(&a.numMessages)
-	Logger.Printf("NullAdapter flush: %d messages total", total)
+	Logger.Infof(logging.Event(logging.EventStatsReport,
+		logging.Int("airgap.message.count", total),
+		logging.Str("airgap.target", "null"),
+	), "NullAdapter flush: %d messages total", total)
 
 	if !a.startTime.IsZero() {
 		elapsed := time.Since(a.startTime)
 		if elapsed > 0 {
 			eps := float64(total) / elapsed.Seconds()
-			Logger.Printf("Processed %d messages in %s (%.2f EPS)",
+			Logger.Infof(logging.Event(logging.EventStatsReport,
+				logging.Int("airgap.message.count", total),
+				logging.Int("airgap.stats.elapsed.ms", elapsed.Milliseconds()),
+				logging.Int("airgap.stats.eps", int64(eps)),
+			), "Processed %d messages in %s (%.2f EPS)",
 				total, elapsed.Truncate(time.Millisecond), eps)
 		}
 	}
