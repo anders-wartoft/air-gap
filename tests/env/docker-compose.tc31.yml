@@ -1,0 +1,85 @@
+services:
+  kafka:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # The broker must allow the very large messages and very large fetch
+      # responses the unsafe upstream configuration asks for; otherwise the
+      # broker, not upstream, would be the component bounding memory.
+      KAFKA_MESSAGE_MAX_BYTES: 104857600
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 104857600
+      KAFKA_FETCH_MAX_BYTES: 104857600
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  topic-init:
+    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - bash
+      - -ec
+      - kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic transfer --partitions 1 --config max.message.bytes=104857600
+
+  # Accepts the TCP connection but never reads from it, so upstream's writes
+  # block and nothing drains the Kafka consumer channel.
+  stall:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-tc31:local
+    hostname: stall
+    entrypoint: ["/airgap/work/airgap-load"]
+    command: ["stall", "--listen=:1234"]
+    volumes:
+      - ${TC31_WORK:?TC31_WORK is required}:/airgap/work
+
+  upstream:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-tc31:local
+    hostname: upstream
+    mem_limit: 192m
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+      stall:
+        condition: service_started
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - ../../config/testcases:/airgap/config:ro
+      - ${TC31_WORK:?TC31_WORK is required}:/airgap/work
+    environment:
+      AIRGAP_CONFIG: /airgap/config/upstream-airgap-31-docker.properties
+    command: ["upstream"]
+    # No restart policy: the container must stay dead so the kill can be
+    # inspected.
+    restart: "no"
+
+  producer:
+    image: airgap-testenv-tc31:local
+    entrypoint: ["/airgap/work/airgap-load"]
+    command: ["produce", "--brokers=kafka:9092", "--topic=transfer", "--count=60", "--size=4194304"]
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${TC31_WORK:?TC31_WORK is required}:/airgap/work:ro

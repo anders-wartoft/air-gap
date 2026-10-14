@@ -531,7 +531,33 @@ func createTLSConfig() (*tls.Config, error) {
 // This is called for each sending thread
 // ReadFromKafkaWithContext allows external context cancellation (for SIGHUP reloads)
 // errorCallback is optional and will be called with error messages if provided
+type ConsumerSettings struct {
+	FetchDefaultBytes int32
+	FetchMaxBytes     int32
+	ChannelBufferSize int
+	BeforeMessage     func(context.Context) error
+}
+
+func applyConsumerSettings(config *sarama.Config, settings ConsumerSettings) {
+	if settings.FetchDefaultBytes > 0 {
+		config.Consumer.Fetch.Default = settings.FetchDefaultBytes
+	}
+	if settings.FetchMaxBytes > 0 {
+		config.Consumer.Fetch.Max = settings.FetchMaxBytes
+	}
+	if settings.ChannelBufferSize > 0 {
+		config.ChannelBufferSize = settings.ChannelBufferSize
+	}
+}
+
 func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds int, brokers string, topics string, group string, timestamp string, callbackFunction func(string, []byte, time.Time, []byte) bool, errorCallback ...func(string)) {
+	ReadFromKafkaWithContextSettings(ctx, name, offsetSeconds, brokers, topics, group, timestamp, callbackFunction, ConsumerSettings{}, errorCallback...)
+}
+
+// ReadFromKafkaWithContextSettings is ReadFromKafkaWithContext with explicit
+// consumer memory bounds and an optional admission check before each record is
+// removed from Sarama's bounded channel.
+func ReadFromKafkaWithContextSettings(ctx context.Context, name string, offsetSeconds int, brokers string, topics string, group string, timestamp string, callbackFunction func(string, []byte, time.Time, []byte) bool, settings ConsumerSettings, errorCallback ...func(string)) {
 	Logger.Info(logging.Event(logging.EventKafkaConsume,
 		logging.Str("airgap.kafka.consumer.name", name),
 		logging.Str("server.address", brokers),
@@ -563,6 +589,7 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 	config := sarama.NewConfig()
 	config.Version = version
 	config.ClientID = name
+	applyConsumerSettings(config, settings)
 
 	if tlsConfigParameters != nil {
 		Logger.Info(logging.Event(logging.EventTLSHandshake,
@@ -620,11 +647,12 @@ func ReadFromKafkaWithContext(ctx context.Context, name string, offsetSeconds in
 	}
 
 	consumer := Consumer{
-		name:     name,
-		ready:    make(chan bool),
-		from:     from,
-		delay:    time.Duration(offsetSeconds) * time.Second,
-		callback: callbackFunction,
+		name:          name,
+		ready:         make(chan bool),
+		from:          from,
+		delay:         time.Duration(offsetSeconds) * time.Second,
+		callback:      callbackFunction,
+		beforeMessage: settings.BeforeMessage,
 	}
 
 	client, err := sarama.NewConsumerGroup(strings.Split(brokers, ","), group, config)
@@ -793,11 +821,12 @@ func toggleConsumptionFlow(_ sarama.ConsumerGroup, isPaused *bool, _ *Consumer) 
 
 // Consumer represents a Sarama consumer group consumer
 type Consumer struct {
-	name     string
-	ready    chan bool
-	from     time.Time
-	delay    time.Duration
-	callback func(string, []byte, time.Time, []byte) bool
+	name          string
+	ready         chan bool
+	from          time.Time
+	delay         time.Duration
+	callback      func(string, []byte, time.Time, []byte) bool
+	beforeMessage func(context.Context) error
 }
 
 // Setup is run at the beginning of a new session, before ConsumeClaim
@@ -815,6 +844,14 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 	delimiter := "_"
 	keepRunning := true
 	for keepRunning {
+		if consumer.beforeMessage != nil {
+			if err := consumer.beforeMessage(session.Context()); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return nil
+				}
+				return fmt.Errorf("before consuming Kafka message: %w", err)
+			}
+		}
 		select {
 		case message, ok := <-claim.Messages():
 			if !ok {

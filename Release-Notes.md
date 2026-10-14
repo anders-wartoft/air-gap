@@ -2,6 +2,108 @@
 
 ## 0.1.14-SNAPSHOT
 
+### Upstream Large-Message Memory Safety
+
+- Upstream now applies explicit Sarama bounds through `kafkaFetchDefaultBytes`,
+  `kafkaMaxMessageBytes`, and `kafkaChannelBufferSize`. The defaults preserve
+  Sarama's 1 MiB fetch target and 100 MiB response ceiling while reducing the
+  buffered-record count from 256 to 4.
+- Memory-pressure backpressure resolves the process's cgroup v2 or v1 path,
+  including systemd service subgroups, and pauses before admitting another
+  Kafka record at `memoryHighWatermarkPercent`. Consumption resumes only at
+  `memoryLowWatermarkPercent`, providing hysteresis.
+- `memoryLimitBytes` can lower the detected ceiling, and
+  `goMemoryLimitPercent` applies a corresponding Go soft heap limit. The
+  systemd/cgroup limit remains the hard process boundary.
+- TC-30 runs upstream with a 192 MiB Docker cgroup, queues twelve 4 MiB Kafka
+  records under deterministic memory pressure, and verifies throttle/resume,
+  zero consumer lag, complete TCP transfer, zero restarts, and no OOM kill.
+
+### Airgap Lost Event (ALE) Guard
+
+- **New `maxEventBytes`** sets the largest Kafka record upstream forwards.
+  Records above it are replaced by an `AIRGAP LOST EVENT: Event <topic>
+  <partition>:<offset> couldn't be delivered due to <reason>` payload carrying
+  the original message id, so downstream keeps a continuous offset sequence and
+  the gap detector does not pull the event into resend bundles. `0` (default)
+  disables the ceiling.
+- **New `lostEventGuard`** (default `true`) controls whether the guard is sent.
+  Setting it to `false` restores the previous discard behaviour.
+- **New `airgapLostEventMessage`** renders the guard payload. Keep the
+  `AIRGAP LOST EVENT` marker: it is what downstream and operators search for.
+- **New `airgapLostEventMessageFormat`** selects `text` (default) or `json`.
+  JSON templates are validated at startup and re-serialized after placeholder
+  substitution, so quotes, backslashes and control characters in configuration
+  values or error text cannot corrupt the delivered JSON. The README includes
+  an OTLP-shaped JSON LogRecord example.
+- **Lost-event retention** now deletes files older than
+  `lostEventDirectoryDeleteAfterDays` (default 60), compresses non-zip files
+  older than `lostEventDirectoryCompressAfterDays` (default 7), and evicts the
+  oldest remaining files only when the next payload does not fit. Deletion
+  runs first and archives preserve the source mtime, so compression cannot
+  restart the deletion clock.
+- **New `lostMessageTruncatedMessage`** and
+  `lostMessageTruncatedMessageFormat` configure the alarm emitted whenever Go
+  removes a retained content file. It is logged with
+  `eventName=message.lost.truncated` and sent as `TYPE_STATUS`/`STATUS`, causing
+  downstream to store it in `internalTopic`. Text and escaping-safe JSON
+  examples are documented. TC-33 covers deletion, compression, age
+  preservation, a fresh-file negative case, JSON escaping, internal-topic
+  routing, and transfer-topic isolation.
+- **New `lostEventDirectory`** (default `/airgap/lost_events/`) writes the
+  original payload of each lost event to disk for later inspection. A failed
+  write never prevents the guard from being delivered, and an empty value makes
+  the guard say so instead of pointing at a directory.
+- Encryption failures now also produce a guard instead of formatting a nil
+  ciphertext, so an unencryptable record can neither leave as cleartext nor
+  disappear silently.
+- Every lost event is reported through the configurable `lostEvent` event,
+  always carries `eventName=message.lost`, and is counted as `lost_events` /
+  `total_lost_events` in the statistics record.
+- TC-31 is the negative control for TC-30: it runs the same stack with
+  deliberately permissive memory settings and asserts that upstream is actually
+  OOM-killed, proving the TC-30 bounds are what prevent the crash.
+
+### Configurable Airgap Events
+
+- Events an operator may need to act on are now configured with a single
+  property carrying both the severity and the text, for example
+  `memoryHighWatermarkLog=WARN:Upstream {upstreamId} entering high memory
+  watermark.` The value is either `NONE`, which turns the event off completely,
+  or `LEVEL:message`, where the level is the text before the first colon. A
+  value whose prefix is not a level is used as the message in its entirety at
+  the event's default level, so a message may contain colons without being
+  quoted, and upstream warns at startup when a prefix looks like a misspelled
+  level.
+- **New `memoryHighWatermarkLog`** and **`memoryLowWatermarkLog`** replace the
+  previously fixed memory-throttle messages. The resume event defaults to
+  `NONE`: the pause is the event worth alerting on. Both may use
+  `{memoryCurrentBytes}`, `{memoryUsedLimitBytes}`, `{memoryUsedPercent}` and
+  `{memorySource}`.
+- **New `lostEvent`** (default `INFO:...`) is the log record written when an
+  event is lost, separate from the `airgapLostEventMessage` payload delivered
+  downstream.
+- Every configuration property is available as a `{placeholder}` in every
+  message. Placeholder names are matched ignoring case and underscores, so
+  `{lostEventDirectory}` and `{lost_event_directory}` are the same placeholder
+  whichever notation the configuration file uses. Unknown placeholders are left
+  exactly as written, so a typo is visible instead of rendering an empty field.
+- The four settings that hold something other than a configured value resolve
+  to a description of their state: `{key}` and `{newkey}` render as
+  `(redacted)` or `(none)`, `{publicKey}` as its SHA-256 fingerprint,
+  `{filter}` and `{inputFilter}` as `(set)` or `(none)`, and `{translations}`
+  as the `from=to` pairs in force. Symmetric key material is never rendered,
+  because a message is written to the log and, for a lost event, delivered
+  downstream.
+- A unit test fails if a configuration property is added without being made
+  available to templates. There is no exclusion list, so the placeholder set
+  cannot fall behind the configuration.
+- The OTel attributes of every event are unchanged regardless of the configured
+  text, so machine-readable processing does not depend on the wording.
+- All of the new properties can be overridden with environment variables and
+  command-line arguments in the usual way, for instance
+  `AIRGAP_UPSTREAM_MEMORY_HIGH_WATERMARK_LOG` or `--lostEvent=NONE`.
+
 ### OpenTelemetry Log Output and Log Integrity
 
 - **New `logFormat` option** for all Go binaries. `logFormat=otel` writes OpenTelemetry Logs as OTLP/JSON, one record per line, in the same shape as the OpenTelemetry Collector file exporter, so a Collector `filelog` receiver can read it without a custom parser. `logFormat=text` remains the default and is unchanged. `service.name` is derived from the binary name and `service.instance.id` from the `id` option, falling back to the hostname.

@@ -1,0 +1,46 @@
+package kafka
+
+import (
+	"testing"
+
+	"github.com/IBM/sarama"
+)
+
+func TestApplyConsumerSettingsBoundsFetchAndBufferedRecords(t *testing.T) {
+	config := sarama.NewConfig()
+	settings := ConsumerSettings{
+		FetchDefaultBytes: 2 * 1024 * 1024,
+		FetchMaxBytes:     8 * 1024 * 1024,
+		ChannelBufferSize: 3,
+	}
+
+	applyConsumerSettings(config, settings)
+
+	if config.Consumer.Fetch.Default != settings.FetchDefaultBytes {
+		t.Fatalf("Fetch.Default=%d, want %d", config.Consumer.Fetch.Default, settings.FetchDefaultBytes)
+	}
+	if config.Consumer.Fetch.Max != settings.FetchMaxBytes {
+		t.Fatalf("Fetch.Max=%d, want %d", config.Consumer.Fetch.Max, settings.FetchMaxBytes)
+	}
+	if config.ChannelBufferSize != settings.ChannelBufferSize {
+		t.Fatalf("ChannelBufferSize=%d, want %d", config.ChannelBufferSize, settings.ChannelBufferSize)
+	}
+}
+
+func TestApplyConsumerSettingsLeavesDefaultsForZeroValues(t *testing.T) {
+	config := sarama.NewConfig()
+	defaultFetch := config.Consumer.Fetch.Default
+	defaultBuffer := config.ChannelBufferSize
+
+	applyConsumerSettings(config, ConsumerSettings{})
+
+	if config.Consumer.Fetch.Default != defaultFetch {
+		t.Fatalf("Fetch.Default=%d, want default %d", config.Consumer.Fetch.Default, defaultFetch)
+	}
+	if config.Consumer.Fetch.Max != 0 {
+		t.Fatalf("Fetch.Max=%d, want default 0", config.Consumer.Fetch.Max)
+	}
+	if config.ChannelBufferSize != defaultBuffer {
+		t.Fatalf("ChannelBufferSize=%d, want default %d", config.ChannelBufferSize, defaultBuffer)
+	}
+}

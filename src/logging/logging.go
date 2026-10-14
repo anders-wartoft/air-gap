@@ -303,6 +303,40 @@ func (l *LoggerType) Panicf(attrs Attrs, spec string, v ...interface{}) {
 	os.Exit(1)
 }
 
+// ParseLevel converts a level name to a LogLevel. The boolean reports whether
+// the name was recognised, so a caller reading a level from configuration can
+// tell a typo from a deliberate choice instead of silently falling back.
+func ParseLevel(level string) (LogLevel, bool) {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
+	case "TRACE":
+		return TRACE, true
+	case "DEBUG":
+		return DEBUG, true
+	case "INFO":
+		return INFO, true
+	case "WARN":
+		return WARN, true
+	case "ERROR":
+		return ERROR, true
+	case "FATAL":
+		return FATAL, true
+	}
+	return INFO, false
+}
+
+// Log writes one record at a level that is only known at runtime, for messages
+// whose severity comes from configuration. FATAL terminates the process, just
+// as Fatal does.
+func (l *LoggerType) Log(level LogLevel, attrs Attrs, msg string) {
+	if logLevel > level {
+		return
+	}
+	emit(level, attrs, msg)
+	if level == FATAL {
+		os.Exit(1)
+	}
+}
+
 // Parse log level from string
 func (l *LoggerType) SetLogLevel(level string) {
 	switch strings.ToUpper(level) {

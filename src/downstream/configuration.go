@@ -59,25 +59,25 @@ type KeyInfo struct {
 
 // TransferConfiguration struct definition
 type TransferConfiguration struct {
-	id                    string
-	nic                   string
-	targetIP              string
-	targetPort            int
-	bootstrapServers      string
-	topic                 string
-	mtu                   uint16
-	key                   []byte    // symmetric
-	keyInfos              []KeyInfo // array of private keys
-	privateKeyGlob        string
-	target                string
-	transport             string // Transport protocol: udp or tcp (default: udp)
-	logLevel              string
-	logFileName           string
-	certFile              string
-	keyFile               string
-	caFile                string
-	clientID              string
-	topicTranslations     string
+	id                    string            // unique id for this downstream
+	nic                   string            // network interface card to bind the listener to
+	targetIP              string            // local IP address to listen on
+	targetPort            int               // local port to listen on
+	bootstrapServers      string            // Kafka bootstrap servers to deliver to
+	topic                 string            // default Kafka topic when the message carries none
+	mtu                   uint16            // maximum transmission unit used to size the UDP read buffer
+	key                   []byte            // symmetric
+	keyInfos              []KeyInfo         // array of private keys
+	privateKeyGlob        string            // glob matching the private key files used to unwrap symmetric keys
+	target                string            // delivery target: kafka, file or console
+	transport             string            // Transport protocol: udp or tcp (default: udp)
+	logLevel              string            // log level: DEBUG, INFO, WARN, ERROR, FATAL
+	logFileName           string            // log file name, redirect logging to a file from the console
+	certFile              string            // Certificate to use to communicate with Kafka with TLS
+	keyFile               string            // Key file to use for TLS
+	caFile                string            // CA file to use for TLS
+	clientID              string            // Kafka client id reported to the broker
+	topicTranslations     string            // topic translations in JSON format
 	translations          map[string]string // map from input topic to output topic
 	logStatistics         int32             //  How often to log statistics in seconds. 0 means no logging
 	numReceivers          int               // Number of UDP receivers to start
@@ -86,7 +86,7 @@ type TransferConfiguration struct {
 	readBufferMultiplier  uint16            // Multiplier for the read buffer size
 	rcvBufSize            int               // Size of the OS receive buffer for UDP sockets
 	keyPasswordFile       string            // File containing the password to decrypt the key file
-	maximumDecompressSize int
+	maximumDecompressSize int               // maximum number of bytes to decompress before the packet is dropped; -1 means no limit
 	// Security limits - protect the downstream listening port from DoS
 	maxCacheEntries            int  // Maximum in-flight fragment-reassembly entries (OOM protection)
 	maxNrMessages              int  // Maximum nrMessages value accepted in a single packet
@@ -101,10 +101,10 @@ type TransferConfiguration struct {
 	tcpTLSClientAuth        string // client auth mode: "none" (default), "allow", "require"
 	tcpTLSClientCNRegex     string // regex to match client Common Name (used with allow/require)
 	tcpTLSCipherSuites      string // TLS protocol policy: empty or "TLS1.3" = TLS 1.3 only; comma-separated TLS 1.2 cipher names = TLS 1.2 with those suites
-	tcpTLSAuthMode          string
-	tcpTLSTrustedKeysDir    string
-	tcpTLSAutomaticRotation bool
-	tcpTLSPinIdleSeconds    int
+	tcpTLSAuthMode          string // TCP peer authentication mode: "ca" (default, CA-issued certificates) or "pinned" (exact SHA-256 public-key fingerprints, no CA)
+	tcpTLSTrustedKeysDir    string // directory with JSON trust entries for pinned mode; holds the public keys of the upstream clients we accept
+	tcpTLSAutomaticRotation bool   // allow installing a new client pin presented by an already authenticated peer (default false)
+	tcpTLSPinIdleSeconds    int    // deactivate unused overlapping pins in memory after this many idle seconds; 0 (default) disables aging
 }
 
 // Builder pattern setters for TransferConfiguration

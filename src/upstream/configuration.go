@@ -19,56 +19,76 @@ import (
 )
 
 type TransferConfiguration struct {
-	id                           string                   // unique id for this upstream
-	nic                          string                   // network interface card
-	targetIP                     string                   // target IP address
-	targetPort                   int                      // target port
-	transport                    string                   // transport protocol: udp or tcp (default: udp)
-	bootstrapServers             string                   // Kafka bootstrap servers
-	topic                        string                   // Kafka topic
-	groupID                      string                   // Kafka group ID
-	payloadSize                  uint16                   // Maximum Length of payload before fragmentations starts
-	from                         string                   // Start time for reading from Kafka
-	encryption                   bool                     // encryption on/off
-	key                          []byte                   // symmetric key in use
-	newkey                       []byte                   // a new symmetric key, when successfully sent, copy the value to key
-	publicKey                    *rsa.PublicKey           // public key for encrypting the symmetric key
-	publicKeyFile                string                   // file with the public key
-	source                       string                   // source of the messages, kafka or random
-	generateNewSymmetricKeyEvery int                      // seconds between key generation
-	logFileName                  string                   // log file name, redirect logging to a file from the console
-	sendingThreads               []map[string]int         // array of objects with thread names and offsets
-	certFile                     string                   // Certificate to use to communicate with Kafka with TLS
-	keyFile                      string                   // Key file to use for TLS
-	caFile                       string                   // CA file to use for TLS
-	keyPasswordFile              string                   // File containing the password to decrypt the key file
-	deliverFilter                string                   // filter configuration
-	topicTranslations            string                   // topic translations in JSON format
-	translations                 map[string]string        // map from input topic to output topic (derived from topicTranslations)
-	filter                       *filter.Filter           // filter instance
-	inputFilterRules             string                   // input filter rules (file path or inline)
-	inputFilterDefaultAction     string                   // default action when no rules match (allow or deny)
-	inputFilterTimeout           int                      // regex match timeout in milliseconds (default 100)
-	inputFilter                  *inputfilter.InputFilter // input filter instance
-	partitionStartValue          int                      // value added to source partition number before sending
-	eps                          float64                  // events per second
-	logLevel                     string                   // log level: DEBUG, INFO, WARN, ERROR, FATAL
-	logStatistics                int32                    // log statistics every n seconds, 0 means no logging
-	compressWhenLengthExceeds    int                      // compress messages when length exceeds this value, 0 means no compression
-	tcpRetryInterval             int                      // milliseconds between TCP send retries (default 1000)
-	tcpRetryTimes                int                      // max TCP send retries, 0 = infinite (default 0)
-	tcpRetryErrorLevel           string                   // log level for TCP retry messages (default "WARN")
-	tcpTLSEnabled                bool                     // enable TLS for TCP transport (default false)
-	tcpTLSCertFile               string                   // client certificate file for TCP mTLS
-	tcpTLSKeyFile                string                   // client private key file for TCP mTLS
-	tcpTLSKeyPasswordFile        string                   // password file for encrypted TCP TLS key
-	tcpTLSCAFile                 string                   // CA certificate file to verify downstream server cert
-	tcpTLSServerCNRegex          string                   // regex matched against server certificate CN; allows IP-based connections and load-balanced setups
-	tcpTLSCipherSuites           string                   // TLS protocol policy: empty or "TLS1.3" = TLS 1.3 only; comma-separated TLS 1.2 cipher names = TLS 1.2 with those suites
-	tcpTLSAuthMode               string
-	tcpTLSTrustedKeysDir         string
-	tcpTLSRotationEnabled        bool
-	tcpTLSPinIdleSeconds         int
+	id                                  string                   // unique id for this upstream
+	nic                                 string                   // network interface card
+	targetIP                            string                   // target IP address
+	targetPort                          int                      // target port
+	transport                           string                   // transport protocol: udp or tcp (default: udp)
+	bootstrapServers                    string                   // Kafka bootstrap servers
+	topic                               string                   // Kafka topic
+	groupID                             string                   // Kafka group ID
+	payloadSize                         uint16                   // Maximum Length of payload before fragmentations starts
+	from                                string                   // Start time for reading from Kafka
+	encryption                          bool                     // encryption on/off
+	key                                 []byte                   // symmetric key in use
+	newkey                              []byte                   // a new symmetric key, when successfully sent, copy the value to key
+	publicKey                           *rsa.PublicKey           // public key for encrypting the symmetric key
+	publicKeyFile                       string                   // file with the public key
+	source                              string                   // source of the messages, kafka or random
+	generateNewSymmetricKeyEvery        int                      // seconds between key generation
+	logFileName                         string                   // log file name, redirect logging to a file from the console
+	sendingThreads                      []map[string]int         // array of objects with thread names and offsets
+	certFile                            string                   // Certificate to use to communicate with Kafka with TLS
+	keyFile                             string                   // Key file to use for TLS
+	caFile                              string                   // CA file to use for TLS
+	keyPasswordFile                     string                   // File containing the password to decrypt the key file
+	deliverFilter                       string                   // filter configuration
+	topicTranslations                   string                   // topic translations in JSON format
+	translations                        map[string]string        // map from input topic to output topic (derived from topicTranslations)
+	filter                              *filter.Filter           // filter instance
+	inputFilterRules                    string                   // input filter rules (file path or inline)
+	inputFilterDefaultAction            string                   // default action when no rules match (allow or deny)
+	inputFilterTimeout                  int                      // regex match timeout in milliseconds (default 100)
+	inputFilter                         *inputfilter.InputFilter // input filter instance
+	partitionStartValue                 int                      // value added to source partition number before sending
+	eps                                 float64                  // events per second
+	logLevel                            string                   // log level: DEBUG, INFO, WARN, ERROR, FATAL
+	logStatistics                       int32                    // log statistics every n seconds, 0 means no logging
+	compressWhenLengthExceeds           int                      // compress messages when length exceeds this value, 0 means no compression
+	tcpRetryInterval                    int                      // milliseconds between TCP send retries (default 1000)
+	tcpRetryTimes                       int                      // max TCP send retries, 0 = infinite (default 0)
+	tcpRetryErrorLevel                  string                   // log level for TCP retry messages (default "WARN")
+	tcpTLSEnabled                       bool                     // enable TLS for TCP transport (default false)
+	tcpTLSCertFile                      string                   // client certificate file for TCP mTLS
+	tcpTLSKeyFile                       string                   // client private key file for TCP mTLS
+	tcpTLSKeyPasswordFile               string                   // password file for encrypted TCP TLS key
+	tcpTLSCAFile                        string                   // CA certificate file to verify downstream server cert
+	tcpTLSServerCNRegex                 string                   // regex matched against server certificate CN; allows IP-based connections and load-balanced setups
+	tcpTLSCipherSuites                  string                   // TLS protocol policy: empty or "TLS1.3" = TLS 1.3 only; comma-separated TLS 1.2 cipher names = TLS 1.2 with those suites
+	tcpTLSAuthMode                      string                   // TCP peer authentication mode: "ca" (default, CA-issued certificates) or "pinned" (exact SHA-256 public-key fingerprints, no CA)
+	tcpTLSTrustedKeysDir                string                   // directory with JSON trust entries for pinned mode; holds the public keys of the downstream servers we accept
+	tcpTLSRotationEnabled               bool                     // allow acknowledged client identity rotation in pinned mode (default false: never switch identity without an explicit config change)
+	tcpTLSPinIdleSeconds                int                      // deactivate unused overlapping pins in memory after this many idle seconds; 0 (default) disables aging
+	kafkaFetchDefaultBytes              int                      // Sarama Consumer.Fetch.Default: bytes requested per partition per fetch; the normal working-set size (default 1 MiB)
+	kafkaMaxMessageBytes                int                      // Sarama Consumer.Fetch.Max: hard ceiling per partition per fetch. Must be at least the broker's max.message.bytes, otherwise larger records are skipped by Sarama
+	kafkaChannelBufferSize              int                      // Sarama ChannelBufferSize: records pre-buffered per partition before the handler runs. Peak consumer memory is roughly kafkaMaxMessageBytes * (buffer + 1) * partitions
+	memoryLimitBytes                    int64                    // explicit memory budget in bytes; 0 (default) auto-detects from the cgroup. May only lower a detected cgroup limit, never raise it
+	memoryHighWatermarkPercent          int                      // pause Kafka record admission when used memory reaches this percentage of the limit (default 75)
+	memoryLowWatermarkPercent           int                      // resume Kafka record admission when used memory falls back to this percentage of the limit (default 65); must be lower than the high watermark
+	memoryCheckIntervalMs               int                      // milliseconds between memory samples while deciding whether to pause or resume admission (default 250)
+	goMemoryLimitPercent                int                      // percentage of the memory limit handed to the Go runtime as its soft heap target (GOMEMLIMIT); 0 disables it (default 80)
+	memoryHighWatermarkLog              string                   // LEVEL:message written when Kafka record admission is paused, or NONE to stay silent. See messages.go for the template rules
+	memoryLowWatermarkLog               string                   // LEVEL:message written when Kafka record admission resumes, or NONE (default) to stay silent
+	maxEventBytes                       int                      // largest Kafka record upstream will forward; larger records are replaced by an Airgap Lost Event guard. 0 (default) disables the ceiling
+	lostEventGuard                      bool                     // emit an Airgap Lost Event guard in place of records that cannot be delivered, keeping the offset sequence continuous (default true)
+	lostEvent                           string                   // LEVEL:message written when an event is lost, or NONE to stay silent. Lost-event placeholders are listed in lostEventContext
+	airgapLostEventMessage              string                   // payload delivered in place of a lost record. Keep the AIRGAP LOST EVENT prefix so downstream can find every lost event
+	airgapLostEventMessageFormat        string                   // rendering mode for airgapLostEventMessage: text (default) or json
+	lostEventDirectory                  string                   // directory where the original payload of a lost event is written for forensics; empty disables it
+	lostEventDirectoryCompressAfterDays int                      // age in days after which stale files in lostEventDirectory are compressed to .zip (default 7)
+	lostEventDirectoryDeleteAfterDays   int                      // age in days after which stale files in lostEventDirectory are removed (default 60)
+	lostMessageTruncatedMessage         string                   // LEVEL:message emitted when a lost-event file is removed or truncated to reclaim disk space; NONE disables it
+	lostMessageTruncatedMessageFormat   string                   // rendering mode for lostMessageTruncatedMessage: text (default) or json
 }
 
 func DefaultConfiguration() TransferConfiguration {
@@ -94,6 +114,26 @@ func DefaultConfiguration() TransferConfiguration {
 	config.tcpTLSEnabled = false       // default: plain TCP
 	config.tcpTLSCipherSuites = ""     // default: TLS 1.3 enforced
 	config.tcpTLSAuthMode = "ca"
+	config.kafkaFetchDefaultBytes = 1024 * 1024
+	config.kafkaMaxMessageBytes = 100 * 1024 * 1024
+	config.kafkaChannelBufferSize = 4
+	config.memoryLimitBytes = 0
+	config.memoryHighWatermarkPercent = 80
+	config.memoryLowWatermarkPercent = 70
+	config.memoryCheckIntervalMs = 100
+	config.goMemoryLimitPercent = 70
+	config.memoryHighWatermarkLog = defaultMemoryHighWatermarkLog
+	config.memoryLowWatermarkLog = defaultMemoryLowWatermarkLog
+	config.maxEventBytes = 0
+	config.lostEventGuard = true
+	config.lostEvent = defaultLostEvent
+	config.airgapLostEventMessage = defaultAirgapLostEventMessage
+	config.airgapLostEventMessageFormat = messageFormatText
+	config.lostEventDirectory = defaultLostEventDirectory
+	config.lostEventDirectoryCompressAfterDays = 7
+	config.lostEventDirectoryDeleteAfterDays = 60
+	config.lostMessageTruncatedMessage = defaultLostMessageTruncatedMessage
+	config.lostMessageTruncatedMessageFormat = messageFormatText
 	return config
 }
 
@@ -322,6 +362,92 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 					Logger.Infof(configApplied("compressWhenLengthExceeds", result.compressWhenLengthExceeds), "compressWhenLengthExceeds: %d", result.compressWhenLengthExceeds)
 				}
 			}
+		case "kafkaFetchDefaultBytes", "kafkaMaxMessageBytes", "kafkaChannelBufferSize",
+			"memoryHighWatermarkPercent", "memoryLowWatermarkPercent",
+			"memoryCheckIntervalMs", "goMemoryLimitPercent", "maxEventBytes":
+			tmp, err := strconv.Atoi(value)
+			if err != nil || tmp < 0 {
+				return result, fmt.Errorf("Error in config %s. Illegal value: %s. Legal values are non-negative integers", key, value)
+			}
+			switch key {
+			case "kafkaFetchDefaultBytes":
+				result.kafkaFetchDefaultBytes = tmp
+			case "kafkaMaxMessageBytes":
+				result.kafkaMaxMessageBytes = tmp
+			case "kafkaChannelBufferSize":
+				result.kafkaChannelBufferSize = tmp
+			case "memoryHighWatermarkPercent":
+				result.memoryHighWatermarkPercent = tmp
+			case "memoryLowWatermarkPercent":
+				result.memoryLowWatermarkPercent = tmp
+			case "memoryCheckIntervalMs":
+				result.memoryCheckIntervalMs = tmp
+			case "goMemoryLimitPercent":
+				result.goMemoryLimitPercent = tmp
+			case "maxEventBytes":
+				result.maxEventBytes = tmp
+			}
+			Logger.Infof(configApplied(key, tmp), "%s: %d", key, tmp)
+		case "lostEventGuard":
+			tmp, err := strconv.ParseBool(value)
+			if err != nil {
+				return result, fmt.Errorf("Error in config lostEventGuard. Illegal value: %s. Legal values are true or false", value)
+			}
+			result.lostEventGuard = tmp
+			Logger.Infof(configApplied("lostEventGuard", tmp), "lostEventGuard: %t", tmp)
+		case "lostEvent":
+			result.lostEvent = value
+			Logger.Infof(configApplied("lostEvent", value), "lostEvent: %s", value)
+		case "airgapLostEventMessage":
+			result.airgapLostEventMessage = value
+			Logger.Infof(configApplied("airgapLostEventMessage", value), "airgapLostEventMessage: %s", value)
+		case "airgapLostEventMessageFormat":
+			value = strings.ToLower(strings.TrimSpace(value))
+			if value != messageFormatText && value != messageFormatJSON {
+				return result, fmt.Errorf("Error in config airgapLostEventMessageFormat. Illegal value: %s. Legal values are text or json", value)
+			}
+			result.airgapLostEventMessageFormat = value
+			Logger.Infof(configApplied("airgapLostEventMessageFormat", value), "airgapLostEventMessageFormat: %s", value)
+		case "memoryHighWatermarkLog":
+			result.memoryHighWatermarkLog = value
+			Logger.Infof(configApplied("memoryHighWatermarkLog", value), "memoryHighWatermarkLog: %s", value)
+		case "memoryLowWatermarkLog":
+			result.memoryLowWatermarkLog = value
+			Logger.Infof(configApplied("memoryLowWatermarkLog", value), "memoryLowWatermarkLog: %s", value)
+		case "lostEventDirectory":
+			result.lostEventDirectory = value
+			Logger.Infof(configApplied("lostEventDirectory", value), "lostEventDirectory: %s", value)
+		case "lostEventDirectoryCompressAfterDays":
+			tmp, err := strconv.Atoi(value)
+			if err != nil || tmp < 0 {
+				return result, fmt.Errorf("Error in config lostEventDirectoryCompressAfterDays. Illegal value: %s. Legal values are non-negative integers", value)
+			}
+			result.lostEventDirectoryCompressAfterDays = tmp
+			Logger.Infof(configApplied("lostEventDirectoryCompressAfterDays", tmp), "lostEventDirectoryCompressAfterDays: %d", tmp)
+		case "lostEventDirectoryDeleteAfterDays":
+			tmp, err := strconv.Atoi(value)
+			if err != nil || tmp < 0 {
+				return result, fmt.Errorf("Error in config lostEventDirectoryDeleteAfterDays. Illegal value: %s. Legal values are non-negative integers", value)
+			}
+			result.lostEventDirectoryDeleteAfterDays = tmp
+			Logger.Infof(configApplied("lostEventDirectoryDeleteAfterDays", tmp), "lostEventDirectoryDeleteAfterDays: %d", tmp)
+		case "lostMessageTruncatedMessage":
+			result.lostMessageTruncatedMessage = value
+			Logger.Infof(configApplied("lostMessageTruncatedMessage", value), "lostMessageTruncatedMessage: %s", value)
+		case "lostMessageTruncatedMessageFormat":
+			value = strings.ToLower(strings.TrimSpace(value))
+			if value != messageFormatText && value != messageFormatJSON {
+				return result, fmt.Errorf("Error in config lostMessageTruncatedMessageFormat. Illegal value: %s. Legal values are text or json", value)
+			}
+			result.lostMessageTruncatedMessageFormat = value
+			Logger.Infof(configApplied("lostMessageTruncatedMessageFormat", value), "lostMessageTruncatedMessageFormat: %s", value)
+		case "memoryLimitBytes":
+			tmp, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || tmp < 0 {
+				return result, fmt.Errorf("Error in config memoryLimitBytes. Illegal value: %s. Legal values are non-negative integers", value)
+			}
+			result.memoryLimitBytes = tmp
+			Logger.Infof(configApplied(key, tmp), "%s: %d", key, tmp)
 		case "inputFilterRules":
 			result.inputFilterRules = value
 			Logger.Infof(configApplied("inputFilterRules", value), "inputFilterRules: %s", value)
@@ -590,6 +716,33 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			config.compressWhenLengthExceeds = compressWhenLengthExceedsInt
 		}
 	}
+	applyIntEnvironment(prefix, "KAFKA_FETCH_DEFAULT_BYTES", "kafkaFetchDefaultBytes", &config.kafkaFetchDefaultBytes)
+	applyIntEnvironment(prefix, "KAFKA_MAX_MESSAGE_BYTES", "kafkaMaxMessageBytes", &config.kafkaMaxMessageBytes)
+	applyIntEnvironment(prefix, "KAFKA_CHANNEL_BUFFER_SIZE", "kafkaChannelBufferSize", &config.kafkaChannelBufferSize)
+	applyInt64Environment(prefix, "MEMORY_LIMIT_BYTES", "memoryLimitBytes", &config.memoryLimitBytes)
+	applyIntEnvironment(prefix, "MEMORY_HIGH_WATERMARK_PERCENT", "memoryHighWatermarkPercent", &config.memoryHighWatermarkPercent)
+	applyIntEnvironment(prefix, "MEMORY_LOW_WATERMARK_PERCENT", "memoryLowWatermarkPercent", &config.memoryLowWatermarkPercent)
+	applyIntEnvironment(prefix, "MEMORY_CHECK_INTERVAL_MS", "memoryCheckIntervalMs", &config.memoryCheckIntervalMs)
+	applyIntEnvironment(prefix, "GO_MEMORY_LIMIT_PERCENT", "goMemoryLimitPercent", &config.goMemoryLimitPercent)
+	applyIntEnvironment(prefix, "MAX_EVENT_BYTES", "maxEventBytes", &config.maxEventBytes)
+	if v := os.Getenv(prefix + "LOST_EVENT_GUARD"); v != "" {
+		tmp, err := strconv.ParseBool(v)
+		if err != nil {
+			Logger.Fatalf(configInvalid("lostEventGuard", v).With(logging.Str("airgap.config.source", prefix+"LOST_EVENT_GUARD")), "Error in environment variable %sLOST_EVENT_GUARD. Illegal value: %s. Legal values are true or false", prefix, v)
+		}
+		Logger.Info(configOverride("lostEventGuard", prefix+"LOST_EVENT_GUARD", v), "Overriding lostEventGuard with environment variable: "+prefix+"LOST_EVENT_GUARD with value: "+v)
+		config.lostEventGuard = tmp
+	}
+	applyStringEnvironment(prefix, "LOST_EVENT", "lostEvent", &config.lostEvent)
+	applyStringEnvironment(prefix, "AIRGAP_LOST_EVENT_MESSAGE", "airgapLostEventMessage", &config.airgapLostEventMessage)
+	applyStringEnvironment(prefix, "AIRGAP_LOST_EVENT_MESSAGE_FORMAT", "airgapLostEventMessageFormat", &config.airgapLostEventMessageFormat)
+	applyStringEnvironment(prefix, "MEMORY_HIGH_WATERMARK_LOG", "memoryHighWatermarkLog", &config.memoryHighWatermarkLog)
+	applyStringEnvironment(prefix, "MEMORY_LOW_WATERMARK_LOG", "memoryLowWatermarkLog", &config.memoryLowWatermarkLog)
+	applyStringEnvironment(prefix, "LOST_EVENT_DIRECTORY", "lostEventDirectory", &config.lostEventDirectory)
+	applyIntEnvironment(prefix, "LOST_EVENT_DIRECTORY_COMPRESS_AFTER_DAYS", "lostEventDirectoryCompressAfterDays", &config.lostEventDirectoryCompressAfterDays)
+	applyIntEnvironment(prefix, "LOST_EVENT_DIRECTORY_DELETE_AFTER_DAYS", "lostEventDirectoryDeleteAfterDays", &config.lostEventDirectoryDeleteAfterDays)
+	applyStringEnvironment(prefix, "LOST_MESSAGE_TRUNCATED_MESSAGE", "lostMessageTruncatedMessage", &config.lostMessageTruncatedMessage)
+	applyStringEnvironment(prefix, "LOST_MESSAGE_TRUNCATED_MESSAGE_FORMAT", "lostMessageTruncatedMessageFormat", &config.lostMessageTruncatedMessageFormat)
 	if inputFilterRules := os.Getenv(prefix + "INPUT_FILTER_RULES"); inputFilterRules != "" {
 		Logger.Info(configOverride("inputFilterRules", prefix+"INPUT_FILTER_RULES", inputFilterRules), "Overriding inputFilterRules with environment variable: "+prefix+"INPUT_FILTER_RULES"+" with value: "+inputFilterRules)
 		config.inputFilterRules = inputFilterRules
@@ -696,6 +849,49 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	return config
 }
 
+// applyStringEnvironment overrides a free-text setting from the environment.
+// An empty variable is treated as unset, because a message template or a
+// directory path has no meaningful empty value to set deliberately.
+func applyStringEnvironment(prefix, environmentName, setting string, destination *string) {
+	raw := os.Getenv(prefix + environmentName)
+	if raw == "" {
+		return
+	}
+	Logger.Info(configOverride(setting, prefix+environmentName, raw),
+		"Overriding "+setting+" with environment variable: "+prefix+environmentName+" with value: "+raw)
+	*destination = raw
+}
+
+func applyIntEnvironment(prefix, environmentName, setting string, destination *int) {
+	raw := os.Getenv(prefix + environmentName)
+	if raw == "" {
+		return
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		Logger.Fatalf(configInvalid(setting, raw).With(logging.Str("airgap.config.source", prefix+environmentName)),
+			"Error in environment variable %s%s. Illegal value: %s. Legal values are non-negative integers", prefix, environmentName, raw)
+	}
+	Logger.Info(configOverride(setting, prefix+environmentName, raw),
+		"Overriding "+setting+" with environment variable: "+prefix+environmentName+" with value: "+raw)
+	*destination = value
+}
+
+func applyInt64Environment(prefix, environmentName, setting string, destination *int64) {
+	raw := os.Getenv(prefix + environmentName)
+	if raw == "" {
+		return
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 0 {
+		Logger.Fatalf(configInvalid(setting, raw).With(logging.Str("airgap.config.source", prefix+environmentName)),
+			"Error in environment variable %s%s. Illegal value: %s. Legal values are non-negative integers", prefix, environmentName, raw)
+	}
+	Logger.Info(configOverride(setting, prefix+environmentName, raw),
+		"Overriding "+setting+" with environment variable: "+prefix+environmentName+" with value: "+raw)
+	*destination = value
+}
+
 // parseCommandLineOverrides parses --name=value arguments and applies them to the config struct.
 func parseCommandLineOverrides(args []string, config TransferConfiguration) TransferConfiguration {
 	for _, arg := range args {
@@ -800,6 +996,71 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				Logger.Fatalf(configInvalid("compressWhenLengthExceeds", value), "Error parsing --compressWhenLengthExceeds: %s", value)
 			}
 			config.compressWhenLengthExceeds = v
+		case "kafkaFetchDefaultBytes", "kafkaMaxMessageBytes", "kafkaChannelBufferSize",
+			"memoryHighWatermarkPercent", "memoryLowWatermarkPercent",
+			"memoryCheckIntervalMs", "goMemoryLimitPercent", "maxEventBytes":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 {
+				Logger.Fatalf(configInvalid(key, value), "Error parsing --%s: %s. Legal values are non-negative integers", key, value)
+			}
+			switch key {
+			case "kafkaFetchDefaultBytes":
+				config.kafkaFetchDefaultBytes = v
+			case "kafkaMaxMessageBytes":
+				config.kafkaMaxMessageBytes = v
+			case "kafkaChannelBufferSize":
+				config.kafkaChannelBufferSize = v
+			case "memoryHighWatermarkPercent":
+				config.memoryHighWatermarkPercent = v
+			case "memoryLowWatermarkPercent":
+				config.memoryLowWatermarkPercent = v
+			case "memoryCheckIntervalMs":
+				config.memoryCheckIntervalMs = v
+			case "goMemoryLimitPercent":
+				config.goMemoryLimitPercent = v
+			case "maxEventBytes":
+				config.maxEventBytes = v
+			}
+		case "lostEventGuard":
+			v, err := strconv.ParseBool(value)
+			if err != nil {
+				Logger.Fatalf(configInvalid("lostEventGuard", value), "Error parsing --lostEventGuard: %s. Legal values are true or false", value)
+			}
+			config.lostEventGuard = v
+		case "lostEvent":
+			config.lostEvent = value
+		case "airgapLostEventMessage":
+			config.airgapLostEventMessage = value
+		case "airgapLostEventMessageFormat":
+			config.airgapLostEventMessageFormat = strings.ToLower(strings.TrimSpace(value))
+		case "memoryHighWatermarkLog":
+			config.memoryHighWatermarkLog = value
+		case "memoryLowWatermarkLog":
+			config.memoryLowWatermarkLog = value
+		case "lostEventDirectory":
+			config.lostEventDirectory = value
+		case "lostEventDirectoryCompressAfterDays":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 {
+				Logger.Fatalf(configInvalid(key, value), "Error parsing --lostEventDirectoryCompressAfterDays: %s. Legal values are non-negative integers", value)
+			}
+			config.lostEventDirectoryCompressAfterDays = v
+		case "lostEventDirectoryDeleteAfterDays":
+			v, err := strconv.Atoi(value)
+			if err != nil || v < 0 {
+				Logger.Fatalf(configInvalid(key, value), "Error parsing --lostEventDirectoryDeleteAfterDays: %s. Legal values are non-negative integers", value)
+			}
+			config.lostEventDirectoryDeleteAfterDays = v
+		case "lostMessageTruncatedMessage":
+			config.lostMessageTruncatedMessage = value
+		case "lostMessageTruncatedMessageFormat":
+			config.lostMessageTruncatedMessageFormat = strings.ToLower(strings.TrimSpace(value))
+		case "memoryLimitBytes":
+			v, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || v < 0 {
+				Logger.Fatalf(configInvalid(key, value), "Error parsing --memoryLimitBytes: %s. Legal values are non-negative integers", value)
+			}
+			config.memoryLimitBytes = v
 		case "inputFilterRules":
 			config.inputFilterRules = value
 		case "inputFilterDefaultAction":
@@ -1002,6 +1263,74 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	if result.tcpRetryTimes < 0 {
 		Logger.Fatalf(configInvalid("tcpRetryTimes", result.tcpRetryTimes), "Error in config tcpRetryTimes. Illegal value: %d. Legal values are a non-negative integer (0 = infinite)", result.tcpRetryTimes)
 	}
+	if result.kafkaFetchDefaultBytes <= 0 || result.kafkaFetchDefaultBytes > math.MaxInt32 {
+		Logger.Fatalf(configInvalid("kafkaFetchDefaultBytes", result.kafkaFetchDefaultBytes),
+			"Invalid kafkaFetchDefaultBytes: %d. Legal values are 1-%d", result.kafkaFetchDefaultBytes, math.MaxInt32)
+	}
+	if result.kafkaMaxMessageBytes < result.kafkaFetchDefaultBytes || result.kafkaMaxMessageBytes > math.MaxInt32 {
+		Logger.Fatalf(configInvalid("kafkaMaxMessageBytes", result.kafkaMaxMessageBytes),
+			"Invalid kafkaMaxMessageBytes: %d. It must be between kafkaFetchDefaultBytes (%d) and %d",
+			result.kafkaMaxMessageBytes, result.kafkaFetchDefaultBytes, math.MaxInt32)
+	}
+	if result.kafkaChannelBufferSize <= 0 {
+		Logger.Fatalf(configInvalid("kafkaChannelBufferSize", result.kafkaChannelBufferSize),
+			"Invalid kafkaChannelBufferSize: %d. Legal values are positive integers", result.kafkaChannelBufferSize)
+	}
+	if result.memoryLimitBytes < 0 {
+		Logger.Fatalf(configInvalid("memoryLimitBytes", result.memoryLimitBytes),
+			"Invalid memoryLimitBytes: %d. Legal values are non-negative integers", result.memoryLimitBytes)
+	}
+	if result.memoryLowWatermarkPercent <= 0 ||
+		result.memoryHighWatermarkPercent <= result.memoryLowWatermarkPercent ||
+		result.memoryHighWatermarkPercent > 100 {
+		Logger.Fatalf(configInvalid("memoryWatermarks", fmt.Sprintf("%d/%d", result.memoryLowWatermarkPercent, result.memoryHighWatermarkPercent)),
+			"Invalid memory watermarks: low=%d high=%d. Required: 0 < low < high <= 100",
+			result.memoryLowWatermarkPercent, result.memoryHighWatermarkPercent)
+	}
+	if result.memoryCheckIntervalMs <= 0 {
+		Logger.Fatalf(configInvalid("memoryCheckIntervalMs", result.memoryCheckIntervalMs),
+			"Invalid memoryCheckIntervalMs: %d. Legal values are positive integers", result.memoryCheckIntervalMs)
+	}
+	if result.goMemoryLimitPercent < 0 || result.goMemoryLimitPercent > 100 {
+		Logger.Fatalf(configInvalid("goMemoryLimitPercent", result.goMemoryLimitPercent),
+			"Invalid goMemoryLimitPercent: %d. Legal values are 0-100", result.goMemoryLimitPercent)
+	}
+	validateMessageSpec("memoryHighWatermarkLog", result.memoryHighWatermarkLog, logging.WARN)
+	validateMessageSpec("memoryLowWatermarkLog", result.memoryLowWatermarkLog, logging.INFO)
+	validateMessageSpec("lostEvent", result.lostEvent, logging.INFO)
+	validateMessageSpec("lostMessageTruncatedMessage", result.lostMessageTruncatedMessage, logging.WARN)
+	result.airgapLostEventMessageFormat = strings.ToLower(strings.TrimSpace(result.airgapLostEventMessageFormat))
+	result.lostMessageTruncatedMessageFormat = strings.ToLower(strings.TrimSpace(result.lostMessageTruncatedMessageFormat))
+	if err := validatePayloadTemplate(result.airgapLostEventMessageFormat, result.airgapLostEventMessage); err != nil {
+		Logger.Fatalf(configInvalid("airgapLostEventMessage", result.airgapLostEventMessage).With(logging.ErrorType(err)),
+			"Invalid airgapLostEventMessage for format=%s: %v", result.airgapLostEventMessageFormat, err)
+	}
+	if err := validatePayloadTemplate(result.lostMessageTruncatedMessageFormat, "{}"); err != nil {
+		Logger.Fatalf(configInvalid("lostMessageTruncatedMessageFormat", result.lostMessageTruncatedMessageFormat).With(logging.ErrorType(err)),
+			"Invalid lostMessageTruncatedMessageFormat: %v", err)
+	}
+	truncatedSpec := parseMessageSpec(result.lostMessageTruncatedMessage, logging.WARN)
+	if truncatedSpec.enabled {
+		if err := validatePayloadTemplate(result.lostMessageTruncatedMessageFormat, truncatedSpec.template); err != nil {
+			Logger.Fatalf(configInvalid("lostMessageTruncatedMessage", result.lostMessageTruncatedMessage).With(logging.ErrorType(err)),
+				"Invalid lostMessageTruncatedMessage for format=%s: %v", result.lostMessageTruncatedMessageFormat, err)
+		}
+	}
+	if result.lostEventDirectoryCompressAfterDays < 0 {
+		Logger.Fatalf(configInvalid("lostEventDirectoryCompressAfterDays", result.lostEventDirectoryCompressAfterDays), "Invalid lostEventDirectoryCompressAfterDays: %d. Legal values are non-negative integers", result.lostEventDirectoryCompressAfterDays)
+	}
+	if result.lostEventDirectoryDeleteAfterDays < 0 {
+		Logger.Fatalf(configInvalid("lostEventDirectoryDeleteAfterDays", result.lostEventDirectoryDeleteAfterDays), "Invalid lostEventDirectoryDeleteAfterDays: %d. Legal values are non-negative integers", result.lostEventDirectoryDeleteAfterDays)
+	}
+	// Records larger than kafkaMaxMessageBytes are skipped by the Kafka client
+	// before upstream ever sees them, so no lost-event guard can be produced
+	// for them. Keeping maxEventBytes below that ceiling makes every oversized
+	// record visible downstream instead of silently disappearing.
+	if result.maxEventBytes > 0 && result.kafkaMaxMessageBytes > 0 && result.maxEventBytes > result.kafkaMaxMessageBytes {
+		Logger.Warnf(configInvalid("maxEventBytes", result.maxEventBytes),
+			"maxEventBytes (%d) is larger than kafkaMaxMessageBytes (%d). Records between the two sizes are skipped by the Kafka client and cannot be replaced by a lost-event guard",
+			result.maxEventBytes, result.kafkaMaxMessageBytes)
+	}
 	switch result.tcpRetryErrorLevel {
 	case "DEBUG", "INFO", "WARN", "ERROR":
 		// valid
@@ -1136,6 +1465,26 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Infof(configApplied("inputFilterDefaultAction", config.inputFilterDefaultAction), "  inputFilterDefaultAction: %s", config.inputFilterDefaultAction)
 	Logger.Infof(configApplied("inputFilterTimeout", config.inputFilterTimeout), "  inputFilterTimeout: %dms", config.inputFilterTimeout)
 	Logger.Infof(configApplied("partitionStartValue", config.partitionStartValue), "  partitionStartValue: %d", config.partitionStartValue)
+	Logger.Infof(configApplied("kafkaFetchDefaultBytes", config.kafkaFetchDefaultBytes), "  kafkaFetchDefaultBytes: %d", config.kafkaFetchDefaultBytes)
+	Logger.Infof(configApplied("kafkaMaxMessageBytes", config.kafkaMaxMessageBytes), "  kafkaMaxMessageBytes: %d", config.kafkaMaxMessageBytes)
+	Logger.Infof(configApplied("kafkaChannelBufferSize", config.kafkaChannelBufferSize), "  kafkaChannelBufferSize: %d", config.kafkaChannelBufferSize)
+	Logger.Infof(configApplied("memoryLimitBytes", config.memoryLimitBytes), "  memoryLimitBytes: %d", config.memoryLimitBytes)
+	Logger.Infof(configApplied("memoryHighWatermarkPercent", config.memoryHighWatermarkPercent), "  memoryHighWatermarkPercent: %d", config.memoryHighWatermarkPercent)
+	Logger.Infof(configApplied("memoryLowWatermarkPercent", config.memoryLowWatermarkPercent), "  memoryLowWatermarkPercent: %d", config.memoryLowWatermarkPercent)
+	Logger.Infof(configApplied("memoryCheckIntervalMs", config.memoryCheckIntervalMs), "  memoryCheckIntervalMs: %d", config.memoryCheckIntervalMs)
+	Logger.Infof(configApplied("goMemoryLimitPercent", config.goMemoryLimitPercent), "  goMemoryLimitPercent: %d", config.goMemoryLimitPercent)
+	Logger.Infof(configApplied("maxEventBytes", config.maxEventBytes), "  maxEventBytes: %d", config.maxEventBytes)
+	Logger.Infof(configApplied("lostEventGuard", config.lostEventGuard), "  lostEventGuard: %t", config.lostEventGuard)
+	Logger.Infof(configApplied("lostEvent", config.lostEvent), "  lostEvent: %s", config.lostEvent)
+	Logger.Infof(configApplied("airgapLostEventMessage", config.airgapLostEventMessage), "  airgapLostEventMessage: %s", config.airgapLostEventMessage)
+	Logger.Infof(configApplied("airgapLostEventMessageFormat", config.airgapLostEventMessageFormat), "  airgapLostEventMessageFormat: %s", config.airgapLostEventMessageFormat)
+	Logger.Infof(configApplied("memoryHighWatermarkLog", config.memoryHighWatermarkLog), "  memoryHighWatermarkLog: %s", config.memoryHighWatermarkLog)
+	Logger.Infof(configApplied("memoryLowWatermarkLog", config.memoryLowWatermarkLog), "  memoryLowWatermarkLog: %s", config.memoryLowWatermarkLog)
+	Logger.Infof(configApplied("lostEventDirectory", config.lostEventDirectory), "  lostEventDirectory: %s", config.lostEventDirectory)
+	Logger.Infof(configApplied("lostEventDirectoryCompressAfterDays", config.lostEventDirectoryCompressAfterDays), "  lostEventDirectoryCompressAfterDays: %d", config.lostEventDirectoryCompressAfterDays)
+	Logger.Infof(configApplied("lostEventDirectoryDeleteAfterDays", config.lostEventDirectoryDeleteAfterDays), "  lostEventDirectoryDeleteAfterDays: %d", config.lostEventDirectoryDeleteAfterDays)
+	Logger.Infof(configApplied("lostMessageTruncatedMessage", config.lostMessageTruncatedMessage), "  lostMessageTruncatedMessage: %s", config.lostMessageTruncatedMessage)
+	Logger.Infof(configApplied("lostMessageTruncatedMessageFormat", config.lostMessageTruncatedMessageFormat), "  lostMessageTruncatedMessageFormat: %s", config.lostMessageTruncatedMessageFormat)
 	if config.transport == "tcp" {
 		tcpRetryTimesStr := "infinite"
 		if config.tcpRetryTimes > 0 {

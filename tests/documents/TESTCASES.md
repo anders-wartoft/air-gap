@@ -5012,3 +5012,369 @@ to a record hash, window completeness, signature, or verification key cannot
 produce a successful result. The separate 100-event LogGenerator verdict
 proves that enabling hashing and signing does not change successful
 end-to-end delivery.
+
+---
+
+## TC-30 — Large-message memory bounds and adaptive backpressure
+
+Verify that upstream remains inside a hard cgroup memory ceiling while large
+Kafka records are waiting, pauses record admission during pressure, resumes
+after pressure is released, and completes the transfer without an OOM kill or
+restart.
+
+* Covers: REQ-8a, REQ-8c
+* Implemented in: 0.1.14-SNAPSHOT
+* Runner: `./run-testcase.sh 30`
+
+### Setup
+
+The standalone Docker runner creates:
+
+```text
+producer (12 × 4 MiB records)
+  -> Kafka[transfer]
+  -> upstream (192 MiB cgroup limit)
+  -> TCP drain
+```
+
+Upstream uses [upstream-airgap-30-docker.properties](../../config/testcases/upstream-airgap-30-docker.properties):
+
+```properties
+kafkaFetchDefaultBytes=1048576
+kafkaMaxMessageBytes=6291456
+kafkaChannelBufferSize=1
+memoryHighWatermarkPercent=60
+memoryLowWatermarkPercent=50
+memoryCheckIntervalMs=50
+goMemoryLimitPercent=70
+memoryHighWatermarkLog=WARN:Upstream {upstreamId} entering high memory watermark. Pausing Kafka record admission at {memoryCurrentBytes} of {memoryUsedLimitBytes} bytes ({memoryUsedPercent} percent, from {memorySource}).
+memoryLowWatermarkLog=INFO:Upstream {upstreamId} leaving high memory watermark. Resuming Kafka record admission at {memoryCurrentBytes} of {memoryUsedLimitBytes} bytes ({memoryUsedPercent} percent, from {memorySource}).
+```
+
+Both watermark events are turned on explicitly. `memoryLowWatermarkLog` is
+`NONE` by default, so the resume event has to be configured to be observed, and
+the two messages together prove that a configured level and a configured
+template reach the log.
+
+Kafka and the topic permit records up to 7 MiB, while upstream deliberately
+accepts at most 6 MiB. The generated 4 MiB records are therefore valid but
+large enough to exercise the bounded fetch, transformation, fragmentation,
+and TCP-send path.
+
+### Automated procedure
+
+1. Build a Linux helper and start Kafka, the TCP drain, and upstream.
+2. Require upstream's Sarama consumer to become ready.
+3. Inside the upstream container's cgroup, start a separate helper process
+   that allocates and touches 64 MiB for eight seconds.
+4. Sample `memory.current` throughout the run.
+5. Produce twelve 4 MiB Kafka records while that pressure is active.
+6. Require upstream to log a high-watermark throttle transition, at the
+   configured `WARN` level and with the configured text.
+7. Release the temporary allocation and require a low-watermark resume
+   transition, at the configured `INFO` level and with the configured text.
+   Require no watermark message to contain an unresolved placeholder.
+8. Wait until Kafka reports consumer-group lag zero.
+9. Require the TCP drain to have received at least the 48 MiB source payload
+   (protocol headers make the actual byte count slightly larger).
+10. Inspect the upstream container and require:
+    * running state;
+    * restart count zero;
+    * `OOMKilled=false`; and
+    * sampled memory no higher than the 192 MiB cgroup ceiling.
+
+The helper in [lib/loadgen/main.go](../env/lib/loadgen/main.go) is independent
+of production memory-control code. It only generates Kafka records, drains TCP
+bytes, and creates deterministic cgroup pressure.
+
+### Expected result
+
+```text
+upstream memory throttle: observed
+upstream memory resume: observed
+watermark templates expanded: all substituted
+large Kafka records consumed: lag 0
+large payload transferred: at least 50331648 TCP bytes
+upstream process survival: running, restarts=0, OOMKilled=false
+cgroup memory ceiling: measured peak at most 201326592 bytes
+```
+
+### What it proves
+
+The hard fetch and channel bounds prevent unbounded Sarama prefetch. The
+cgroup-aware high/low watermarks apply real backpressure and recover without
+operator intervention, and both transitions are reported with the severity and
+the wording the operator configured. Valid large records are eventually transferred, while
+the upstream process remains alive below its configured operating-system
+memory ceiling.
+
+## TC-31 — Unsafe memory configuration crashes upstream (negative control)
+
+Verify that the bounds exercised by TC-30 are what keeps upstream alive, by
+running the same stack with deliberately permissive consumer settings and
+requiring the process to actually be killed for exceeding its cgroup.
+
+This test passes when upstream crashes. If it starts failing, upstream is no
+longer sensitive to the consumer memory envelope and TC-30 has stopped proving
+anything.
+
+* Covers: REQ-8a
+* Implemented in: 0.1.14-SNAPSHOT
+* Runner: `./run-testcase.sh 31`
+
+### Setup
+
+```text
+producer (60 × 4 MiB records)
+  -> Kafka[transfer]  (broker allows 100 MiB messages and fetch responses)
+  -> upstream (192 MiB cgroup limit, 3 sending threads, 32 MiB of extra pressure)
+  -> TCP receiver that never reads
+```
+
+Upstream uses [upstream-airgap-31-docker.properties](../../config/testcases/upstream-airgap-31-docker.properties):
+
+```properties
+sendingThreads=[{"t0": 0}, {"t1": 0}, {"t2": 0}]
+kafkaFetchDefaultBytes=104857600
+kafkaMaxMessageBytes=104857600
+kafkaChannelBufferSize=64
+memoryHighWatermarkPercent=100
+memoryLowWatermarkPercent=99
+goMemoryLimitPercent=0
+```
+
+Every bound TC-30 sets is removed. A single fetch may pull 100 MiB per
+partition where TC-30 allows 1 MiB, a record may be 100 MiB where TC-30 allows
+6 MiB, 64 of them may queue in the consumer channel where TC-30 allows 1, and
+admission is only paused at 100 percent of the limit, which the kernel never
+lets the process reach. Three sending threads mean three independent consumers,
+each paying that cost in full.
+
+The receiver accepts the TCP connection but never reads from it, so upstream's
+writes block and nothing drains the consumers. The container has no restart
+policy, so the killed process stays dead and can be inspected.
+
+The broker is configured for 100 MiB messages and fetch responses so that the
+broker, rather than upstream, is not the component bounding memory. Note that
+100 MiB is also Sarama's own hard response ceiling; configuring more than that
+does not fetch more.
+
+The test applies 32 MiB of extra cgroup pressure, half of what TC-30 survives.
+That is the point of the control: the unsafe configuration dies under
+conditions the bounded configuration handles with room to spare.
+
+### Automated procedure
+
+1. Build the Linux helper and start Kafka, the stalled receiver, and upstream.
+2. Require upstream's Sarama consumer to become ready.
+3. Allocate 32 MiB of anonymous memory inside the upstream container and wait
+   for the helper to report `pressure-ready`.
+4. Start sampling `memory.current` every 100 ms. Sampling must start before the
+   producer, because the kill arrives within a second or two of the first fetch.
+5. Produce sixty 4 MiB Kafka records.
+6. Wait until the container leaves the running state, or for at most 180
+   seconds.
+7. Inspect the upstream container and require:
+   * `OOMKilled=true` or exit code 137;
+   * a non-running container state; and
+   * a sampled memory peak above half the cgroup ceiling.
+
+### Expected result
+
+```text
+unbounded consumer is killed: OOMKilled=true, exit=137
+upstream did not survive: exited
+memory grew towards the cgroup cap: peak above 100663296 bytes
+watermark cannot save an oversized buffer: killed before the watermark was reached
+```
+
+### What it proves
+
+Memory watermarks cannot rescue a consumer whose buffer envelope already
+exceeds the process limit. Sarama decodes a whole fetch response before any of
+it reaches upstream, so the peak is paid before any watermark can be observed,
+and the cost is multiplied by the number of concurrent consumers. Bounding
+`kafkaFetchDefaultBytes`, `kafkaMaxMessageBytes` and `kafkaChannelBufferSize`
+against the number of sending threads, as TC-30 does, is therefore mandatory
+rather than advisory.
+
+## TC-32 — Airgap Lost Event guard replaces undeliverable records
+
+Verify that a record upstream cannot deliver is replaced by a guard payload
+carrying the same message id, that the original payload is retained on the
+upstream machine, and that the delivered offset sequence has no hole for the
+gap detector to chase.
+
+* Covers: REQ-8b, REQ-8c
+* Implemented in: 0.1.14-SNAPSHOT
+* Runner: `./run-testcase.sh 32`
+
+### Setup
+
+```text
+producer (alternating 1 KiB and 4 MiB records, six in total)
+  -> Kafka[transfer]
+  -> upstream (maxEventBytes=1048576)
+  -> TCP drain that captures every delivered byte
+```
+
+Upstream uses [upstream-airgap-32-docker.properties](../../config/testcases/upstream-airgap-32-docker.properties):
+
+```properties
+maxEventBytes=1048576
+lostEventGuard=true
+tcpTLSCAFile=value "quoted"\backslash
+lostEvent=ERROR:Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. The message can be found in its entirety on upstream machine {upstream_id}, in {lostEventDirectory}.
+airgapLostEventMessageFormat=json
+airgapLostEventMessage={"eventName":"message.lost","severityText":"ERROR","body":{"stringValue":"AIRGAP LOST EVENT: Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}"},"attributes":[{"key":"messaging.destination.name","value":{"stringValue":"{topic_name}"}},{"key":"messaging.destination.partition.id","value":{"stringValue":"{partition}"}},{"key":"messaging.kafka.offset","value":{"intValue":"{row}"}},{"key":"error.type","value":{"stringValue":"airgap.event.lost"}},{"key":"airgap.event.lost.reason","value":{"stringValue":"{reason}"}},{"key":"service.instance.id","value":{"stringValue":"{upstreamId}"}},{"key":"airgap.event.lost.file","value":{"stringValue":"{lostEventFile}"}},{"key":"airgap.message.size","value":{"intValue":"{eventBytes}"}},{"key":"airgap.message.max_size","value":{"intValue":"{kafkaMaxMessageBytes}"}},{"key":"airgap.test.escape","value":{"stringValue":"{tcpTLSCAFile}"}}]}
+lostEventDirectory=/airgap/work/lost-events
+```
+
+The delivered guard is an OTLP-shaped JSON LogRecord. TC-32 includes a
+configuration value containing quotes and a backslash and requires the wire
+payload to contain their JSON-escaped forms. `lostEvent` remains a text log
+record and is raised from its `INFO` default to `ERROR`, so the test also proves
+the configured level reaches the log.
+
+Offsets 0, 2 and 4 carry 1 KiB records and must be delivered unchanged. Offsets
+1, 3 and 5 carry 4 MiB records, above `maxEventBytes`, and must be replaced by
+guards.
+
+### Automated procedure
+
+1. Build the Linux helper and start Kafka, the capturing TCP drain, and
+   upstream.
+2. Require upstream's Sarama consumer to become ready.
+3. Produce six records alternating 1 KiB and 4 MiB payloads.
+4. Wait until Kafka reports consumer-group lag zero.
+5. Require exactly three guards in the captured TCP stream.
+6. Require one guard to match the OTLP-shaped JSON template, including topic,
+   partition, offset, reason, upstream id, lost-event file, configured record
+   ceiling, and JSON-escaped quote and backslash characters.
+7. Require a guard for each of offsets 1, 3 and 5, proving the delivered
+   sequence is continuous.
+8. Require three files in `lostEventDirectory` totalling 12 MiB, proving the
+   original payloads were retained in full.
+9. Require the loss to be logged at the configured `ERROR` level, with the
+   configured text, for every lost record, and require no message to contain an
+   unresolved placeholder.
+10. Require the small records to have been delivered unchanged.
+11. Require consumer lag zero, a running container, and zero restarts, proving
+    the partition was neither stalled nor crashed.
+
+### Expected result
+
+```text
+lost-event guards delivered: 3
+JSON guard template rendered: matched
+offset sequence preserved: all present
+original payloads stored: 3
+stored payloads complete: 12582912 bytes
+lost events logged at the configured level: 3
+lost-event templates expanded: all substituted
+small records unaffected: 3
+partition not stalled: lag 0
+upstream process survival: running, restarts=0
+```
+
+### What it proves
+
+An undeliverable event neither disappears silently nor blocks its partition.
+Downstream receives a continuous offset sequence, so the gap detector does not
+request a resend that could never succeed, while the loss stays explicit in the
+delivered data, in the upstream log, and in the retained original payload. The
+wire-level assertion also proves that arbitrary placeholder values cannot break
+the configured JSON object.
+
+---
+
+## TC-33 — Lost-event retention and truncation status
+
+Verify that upstream applies the configured retention policy safely, preserves
+the age of compressed evidence, and sends one machine-readable status record
+for every content file it removes. Also verify the negative path: a fresh file
+must remain untouched and must not produce an alarm.
+
+* Covers: REQ-8b
+* Implemented in: 0.1.14-SNAPSHOT
+* Runner: `./run-testcase.sh 33`
+
+### Setup
+
+```text
+Kafka[source]
+  -> upstream (lostEventDirectory mounted from the test workspace)
+  -> downstream
+  -> Kafka[transfer] and Kafka[airgap-internal]
+```
+
+The seed helper creates:
+
+| File | Age | Expected behavior |
+| --- | ---: | --- |
+| `delete-me.bin` | 70 days | deleted |
+| `delete-me.zip` | 70 days | deleted |
+| `compress "quoted"\backslash.bin` | 10 days | zipped, source removed, original mtime retained |
+| `fresh.bin` | 1 day | retained unchanged; no status |
+
+Upstream is configured with:
+
+```properties
+lostEventDirectory=/airgap/work/lost-events
+lostEventDirectoryCompressAfterDays=7
+lostEventDirectoryDeleteAfterDays=60
+lostMessageTruncatedMessageFormat=json
+lostMessageTruncatedMessage=WARN:{"eventName":"message.lost.truncated","severityText":"WARN","body":{"stringValue":"AIRGAP LOST MESSAGE TRUNCATED: The message file {fileName} created on {fileDate} was truncated by upstream due to lack of disc space. Current disc free space is {diskFreeBytes} bytes and the truncated file was {fileSize} bytes."},"attributes":[{"key":"file.name","value":{"stringValue":"{fileName}"}},{"key":"file.mtime","value":{"stringValue":"{fileDate}"}},{"key":"file.size","value":{"intValue":"{fileSize}"}},{"key":"airgap.disk.free_bytes","value":{"intValue":"{diskFreeBytes}"}},{"key":"service.instance.id","value":{"stringValue":"{upstreamId}"}},{"key":"airgap.event.lost.action","value":{"stringValue":"{action}"}}]}
+```
+
+The source and destination Kafka topics are intentionally different.
+`topicTranslations={"source":"transfer"}` prevents the downstream result from
+being consumed again by the same upstream.
+
+### Automated procedure
+
+1. Build the Linux binaries and helper.
+2. Start Kafka, seed the four retained files, and start downstream and upstream.
+3. Produce one 4 KiB record above `maxEventBytes=1024`, triggering retention
+   before the original payload is retained.
+4. Wait for source consumer lag zero.
+5. Verify both 70-day files are absent.
+6. Verify the 10-day source is absent, its ZIP archive is readable, both the
+   archive and entry remain approximately 10 days old, and the payload is
+   intact.
+7. Verify `fresh.bin` remains intact.
+8. Consume `airgap-internal` and require exactly three valid JSON records with
+   `eventName=message.lost.truncated`: two `deleted` and one `compressed`.
+   Require the quote and backslash in the compressed filename to round-trip.
+9. Consume `transfer` and require the ALE guard but no truncation status,
+   proving `TYPE_STATUS`/`STATUS` was routed only to `internalTopic`.
+10. Require both processes running with zero restarts.
+
+### Positive results
+
+```text
+retention policy: archive age preserved, fresh=true, expired=false
+truncation status routing: records=3 actions=compressed:1 deleted:2
+guard delivery: observed
+status isolation: isolated to internal topic
+partition progress: lag 0
+process survival: both running with zero restarts
+```
+
+### Negative results
+
+The test fails if:
+
+- either 70-day file remains or is compressed instead of deleted;
+- compression gives the archive a fresh mtime;
+- the 1-day file is changed, removed, compressed, or mentioned by a status;
+- any removal lacks a status record;
+- the JSON filename does not survive quote/backslash escaping;
+- a truncation status appears in the transfer topic; or
+- either process restarts.
+
+### What it proves
+
+Deletion precedes compression, archive age cannot escape retention, fresh
+evidence is preserved, and every Go removal is observable downstream in the
+internal topic without contaminating the transferred event stream.

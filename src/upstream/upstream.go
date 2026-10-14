@@ -70,6 +70,7 @@ var receivedEvents int64  // Kafka messages received
 var sentEvents int64      // UDP fragments sent (one message can be multiple fragments)
 var messagesSent int64    // Actual Kafka messages successfully sent (not fragments)
 var messagesDropped int64 // Messages that failed to send after all retries
+var lostEvents int64      // Messages replaced by an Airgap Lost Event guard
 var filteredEvents int64
 var unfilteredEvents int64
 var filterTimeouts int64
@@ -77,6 +78,7 @@ var totalReceived int64
 var totalSent int64
 var totalMessagesSent int64    // Total messages sent since start
 var totalMessagesDropped int64 // Total messages dropped since start
+var totalLostEvents int64      // Total Airgap Lost Event guards emitted since start
 var totalFiltered int64
 var totalUnfiltered int64
 var totalFilterTimeouts int64
@@ -217,6 +219,7 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 				sent := atomic.SwapInt64(&sentEvents, 0)
 				msgsSent := atomic.SwapInt64(&messagesSent, 0)
 				msgsDropped := atomic.SwapInt64(&messagesDropped, 0)
+				lost := atomic.SwapInt64(&lostEvents, 0)
 				filtered := atomic.SwapInt64(&filteredEvents, 0)
 				unfiltered := atomic.SwapInt64(&unfilteredEvents, 0)
 				filterTimeoutsInterval := atomic.SwapInt64(&filterTimeouts, 0)
@@ -224,6 +227,7 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 				totalSnt := atomic.LoadInt64(&totalSent)
 				totalMsgsSent := atomic.LoadInt64(&totalMessagesSent)
 				totalMsgsDropped := atomic.LoadInt64(&totalMessagesDropped)
+				totalLost := atomic.LoadInt64(&totalLostEvents)
 				totalFilt := atomic.LoadInt64(&totalFiltered)
 				totalUnfilt := atomic.LoadInt64(&totalUnfiltered)
 				totalFiltTimeouts := atomic.LoadInt64(&totalFilterTimeouts)
@@ -246,6 +250,7 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 					"sent":                   sent,
 					"messages_sent":          msgsSent,
 					"messages_dropped":       msgsDropped,
+					"lost_events":            lost,
 					"filtered":               filtered,
 					"unfiltered":             unfiltered,
 					"filter_timeouts":        filterTimeoutsInterval,
@@ -254,6 +259,7 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 					"total_sent":             totalSnt,
 					"total_messages_sent":    totalMsgsSent,
 					"total_messages_dropped": totalMsgsDropped,
+					"total_lost_events":      totalLost,
 					"total_filtered":         totalFilt,
 					"total_unfiltered":       totalUnfilt,
 					"total_filter_timeouts":  totalFiltTimeouts,
@@ -268,6 +274,7 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 						logging.Int("airgap.message.received", recv),
 						logging.Int("airgap.message.sent", msgsSent),
 						logging.Int("airgap.message.dropped", msgsDropped),
+						logging.Int("airgap.message.lost", lost),
 						logging.Int("airgap.message.filtered", filtered),
 						logging.Int("airgap.fragment.sent", sent),
 						logging.Str("airgap.transport.status", transportStatus),
@@ -429,6 +436,31 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 	return kafkaHandlerWithContext(context.Background(), timeFrom, udpClient, id, nil, t, received)
 }
 
+// encodeForTransport encrypts the payload when encryption is enabled and splits
+// the result into wire messages. Returning an error instead of silently
+// formatting a nil ciphertext lets the caller substitute a lost-event guard.
+func encodeForTransport(id string, payload []byte, isCompressed bool) ([][]byte, error) {
+	var messageType uint8
+	if config.encryption {
+		ciphertext, err := protocol.Encrypt(payload, config.key)
+		if err != nil {
+			return nil, err
+		}
+		if isCompressed {
+			messageType = protocol.Merge(protocol.TYPE_MESSAGE, protocol.TYPE_COMPRESSED_GZIP)
+		} else {
+			messageType = protocol.Merge(protocol.TYPE_MESSAGE, 0)
+		}
+		return protocol.FormatMessage(messageType, id, ciphertext, config.payloadSize), nil
+	}
+	if isCompressed {
+		messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, protocol.TYPE_COMPRESSED_GZIP)
+	} else {
+		messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, 0)
+	}
+	return protocol.FormatMessage(messageType, id, payload, config.payloadSize), nil
+}
+
 func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient UDPClient, id string, _ []byte, t time.Time, received []byte) bool {
 	atomic.AddInt64(&receivedEvents, 1)
 	atomic.AddInt64(&totalReceived, 1)
@@ -508,6 +540,20 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 	}
 
 	id = transformMessageID(id)
+
+	// Records that are too large to process safely are replaced by an Airgap
+	// Lost Event guard. The guard carries the same message id, so downstream
+	// still sees the offset and the gap detector does not pull it into resend
+	// bundles, while the loss stays visible in the delivered data.
+	if config.maxEventBytes > 0 && len(received) > config.maxEventBytes {
+		reason := fmt.Sprintf("message size %d bytes exceeds maxEventBytes %d bytes", len(received), config.maxEventBytes)
+		guard := recordLostEvent(udpClient, id, reason, received)
+		if guard == nil {
+			return keepRunning
+		}
+		received = guard
+	}
+
 	// Compress or not
 	var isCompressed = false
 	if config.compressWhenLengthExceeds > 0 && len(received) > config.compressWhenLengthExceeds {
@@ -527,26 +573,7 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 	}
 
 	// Encrypt or not
-	var messages [][]byte
-	var err error
-	var messageType uint8
-	if config.encryption {
-		var ciphertext []byte
-		ciphertext, err = protocol.Encrypt(received, config.key)
-		if isCompressed {
-			messageType = protocol.Merge(protocol.TYPE_MESSAGE, protocol.TYPE_COMPRESSED_GZIP)
-		} else {
-			messageType = protocol.Merge(protocol.TYPE_MESSAGE, 0)
-		}
-		messages = protocol.FormatMessage(messageType, id, ciphertext, config.payloadSize)
-	} else {
-		if isCompressed {
-			messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, protocol.TYPE_COMPRESSED_GZIP)
-		} else {
-			messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, 0)
-		}
-		messages = protocol.FormatMessage(messageType, id, received, config.payloadSize)
-	}
+	messages, err := encodeForTransport(id, received, isCompressed)
 	if err != nil {
 		Logger.Error(logging.Event(logging.EventCryptoEncrypt,
 			logging.Failure(),
@@ -554,6 +581,22 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 			logging.Int("airgap.message.size", int64(len(received))),
 			logging.ErrorType(err),
 		), err)
+		// The payload cannot be encrypted, so it can never be delivered. Send
+		// an Airgap Lost Event guard in its place rather than an unencrypted or
+		// empty message.
+		guard := recordLostEvent(udpClient, id, fmt.Sprintf("encryption failed: %v", err), received)
+		if guard == nil {
+			return keepRunning
+		}
+		messages, err = encodeForTransport(id, guard, false)
+		if err != nil {
+			Logger.Errorf(logging.Event(logging.EventCryptoEncrypt,
+				logging.Failure(),
+				logging.Str("airgap.message.id", id),
+				logging.ErrorType(err),
+			), "Could not encrypt the lost-event guard for id=%s: %v. Message will be retried.", id, err)
+			return false
+		}
 	}
 
 	if Logger.CanLog(logging.DEBUG) {
@@ -918,7 +961,7 @@ func Main(build string) {
 	var kafkaAdapter KafkaClient
 	switch config.source {
 	case "kafka":
-		kafkaAdapter = &KafkaAdapter{}
+		kafkaAdapter = NewKafkaAdapter(config)
 	case "random":
 		kafkaAdapter = &RandomKafkaAdapter{}
 	default:

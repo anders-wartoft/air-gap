@@ -117,6 +117,158 @@ If a cell is blank it means the spreadsheet left that cell blank.
 * Covered by: TC-10
 * Notes: Supported in the systemd templates (`MemoryMax`, `MemoryHigh`).
 
+### REQ-8a — Upstream large-message memory safety
+
+> Upstream must bound Kafka prefetch memory and pause record admission before
+> the effective process memory limit is exhausted.
+
+* Implemented in: 0.1.14-SNAPSHOT
+* Covered by: TC-30, TC-31
+
+For a Kafka-backed upstream:
+
+1. `kafkaMaxMessageBytes` sets the largest Kafka record upstream accepts and
+   is applied to Sarama's maximum fetch size. A larger record is rejected
+   explicitly instead of being admitted with unbounded memory use.
+2. `kafkaChannelBufferSize` bounds the number of fetched records Sarama may
+   buffer per consumer channel. `kafkaFetchDefaultBytes` bounds the normal
+   fetch target.
+3. Upstream determines the effective memory ceiling from cgroup v2, then
+   cgroup v1, and finally process RSS plus system memory. A nonzero
+   `memoryLimitBytes` may lower, but never raise, the detected ceiling.
+4. At `memoryHighWatermarkPercent`, upstream pauses before removing another
+   record from Sarama's bounded channel. It resumes only after usage reaches
+   `memoryLowWatermarkPercent`, preventing rapid pause/resume oscillation.
+5. The wait is context-aware so SIGTERM is not blocked by memory pressure.
+6. `goMemoryLimitPercent` applies a Go runtime soft heap limit relative to the
+   same effective ceiling. It supplements rather than replaces the cgroup and
+   fetch bounds because the Go heap is not the complete process working set.
+7. Throttle and resume transitions are logged with current bytes, limit
+   bytes, source, both watermarks, and `airgap.memory.throttled`. The severity
+   and text of both transitions are configurable through
+   `memoryHighWatermarkLog` and `memoryLowWatermarkLog` as described in
+   REQ-8c. The attributes do not depend on the configured text.
+
+The deterministic envelope is the fixed process working set plus, for every
+configured sending thread, at most `kafkaChannelBufferSize` records of up to
+`kafkaMaxMessageBytes`, Sarama fetch/decode overhead, and one record being
+transformed and fragmented. Operators must choose a systemd/cgroup limit with
+headroom for those copies. Throttling controls sustained pressure; it cannot
+make a single over-limit record safe, which is why the hard record-size limit
+is mandatory.
+
+### REQ-8b — Airgap Lost Event guard
+
+> An event that upstream cannot deliver must neither disappear silently nor
+> block the partition.
+
+* Implemented in: 0.1.14-SNAPSHOT
+* Covered by: TC-32, TC-33
+
+1. `maxEventBytes` sets the largest Kafka record upstream forwards. A record
+   above the ceiling is not transmitted as-is. `0` disables the ceiling.
+2. When `lostEventGuard` is true (the default), upstream transmits a guard
+   payload in place of the record. The guard carries the *same* message id, so
+   downstream observes a continuous offset sequence and the gap detector does
+   not request a resend of an event that can never be delivered.
+3. The guard payload is rendered from `airgapLostEventMessage` using the rules
+   of REQ-8c. On top of every configuration property it may use
+   `{topic_name}`, `{partition}`, `{row}`, `{reason}`, `{eventBytes}` and
+   `{lostEventFile}`. The default is
+   `AIRGAP LOST EVENT: Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. The message can be found in its entirety on upstream machine {upstream_id}, in {lostEventDirectory}. Max message length is {kafkaMaxMessageBytes}.`
+   The `AIRGAP LOST EVENT` marker is what downstream and operators search for
+   to find every event that was lost in transfer.
+4. `airgapLostEventMessageFormat` selects `text` (the default) or `json`. In
+   JSON mode the configured template must be one JSON object and placeholders
+   must occur inside JSON string values. Upstream validates the object before
+   startup and re-serializes it after substitution, so quotes, backslashes and
+   control characters in values cannot produce invalid JSON.
+5. A record whose encryption fails also produces a guard. Upstream must never
+   fall back to transmitting an unencrypted payload when encryption is enabled,
+   and must never transmit an empty ciphertext.
+6. When `lostEventDirectory` is set (default `/airgap/lost_events/`), the
+   original payload is written there as one file per lost event before the
+   guard is sent. A failed write is logged but never prevents delivery of the
+   guard. When it is empty, the guard states that no directory is configured
+   rather than pointing at one.
+7. Every lost event produces the configurable `lostEvent` record, which always
+   carries `eventName=message.lost`, the message id, topic, partition, offset,
+   original size, reason, whether a guard was sent, and the stored file path
+   when one was written.
+8. Lost events are counted and reported as `lost_events` and
+   `total_lost_events` in the periodic statistics record.
+9. `lostEventGuard=false` restores the previous behaviour: the record is
+   discarded and only the log record remains.
+10. Before writing a new retained payload, upstream removes regular files older
+    than `lostEventDirectoryDeleteAfterDays` (default 60), then compresses
+    non-zip regular files older than `lostEventDirectoryCompressAfterDays`
+    (default 7). `0` disables the corresponding stage.
+11. Compression is streamed rather than loading the retained payload into
+    memory. The resulting archive and its entry preserve the source mtime.
+    Deletion runs before compression, so an already-expired source cannot gain
+    a fresh retention period by first becoming an archive.
+12. If the filesystem still lacks room for the new payload and write margin,
+    upstream removes remaining regular files oldest first until the write fits
+    or no candidate remains. A free-space measurement failure must not trigger
+    emergency deletion.
+13. Every successful Go removal of a retained content file emits the
+    configurable `lostMessageTruncatedMessage` locally and as a protocol
+    `TYPE_STATUS` message with id `STATUS`. Downstream therefore routes it to
+    `internalTopic`, not to the original event topic. The record carries
+    `eventName=message.lost.truncated`, file name, original mtime, size, current
+    free bytes, and action (`compressed`, `deleted`, `evicted`, or
+    `write_failed`). Its default body is
+    `AIRGAP LOST MESSAGE TRUNCATED: The message file {fileName} created on {fileDate} was truncated by upstream due to lack of disc space. Current disc free space is {diskFreeBytes} bytes and the truncated file was {fileSize} bytes.`
+14. `lostMessageTruncatedMessageFormat` selects `text` (default) or `json`.
+    JSON uses the same validated and escaping-safe object rendering as the ALE
+    guard. `lostMessageTruncatedMessage=NONE` disables the configurable local
+    record and status message.
+
+Records larger than `kafkaMaxMessageBytes` are skipped by the Kafka client
+before upstream sees them and therefore cannot be replaced by a guard.
+`maxEventBytes` must be configured at or below `kafkaMaxMessageBytes`;
+upstream warns at startup when it is not.
+
+### REQ-8c — Configurable Airgap events
+
+> An operator must be able to decide the severity and the wording of the events
+> that report what upstream is doing, without a code change.
+
+* Implemented in: 0.1.14-SNAPSHOT
+* Covered by: TC-30, TC-32
+
+1. A configurable event is a single property holding both severity and text.
+   The value is either `NONE`, which means no record is written, or
+   `LEVEL:message`, where the level is the text before the first colon and the
+   message is everything after it.
+2. Legal levels are `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` and `FATAL`,
+   matched case-insensitively.
+3. A value whose prefix is not a legal level is used as the message in its
+   entirety, at the event's default level, so a message may contain colons
+   without being quoted. Upstream warns at startup when such a prefix looks
+   like a misspelled level.
+4. Every configuration property is available as a `{placeholder}` in every
+   message. Placeholder names are matched ignoring case and underscores, so
+   `{lostEventDirectory}` and `{lost_event_directory}` resolve to the same
+   value regardless of the notation used in the configuration file.
+5. Each event may add context placeholders, which take precedence over the
+   configuration for the duration of that event.
+6. An unknown placeholder is left exactly as written, so a typo is visible in
+   the output instead of rendering an empty field.
+7. Every field of the configuration resolves to a placeholder value, so a
+   placeholder is never silently unavailable. The fields that do not hold a
+   configured value resolve to a description of their state: the symmetric keys
+   render as `(redacted)` or `(none)`, the public key as its SHA-256
+   fingerprint or `(none)`, and the compiled filters as `(set)` or `(none)`.
+   Symmetric key material must never be rendered, because a message is written
+   to the log and, for a lost event, delivered downstream.
+8. The OTel attributes of an event do not depend on the configured text, so
+   machine-readable processing is unaffected by wording and severity changes.
+9. The configurable events are `memoryHighWatermarkLog` (default `WARN`),
+   `memoryLowWatermarkLog` (default `NONE`) and `lostEvent` (default `INFO`).
+   All of them can be overridden with environment variables and command-line
+   arguments like any other property.
+
 ## REQ-9 — No log loss on restart
 
 > Air-gap must not lose logs on restart.

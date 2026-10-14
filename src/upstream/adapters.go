@@ -18,13 +18,73 @@ import (
 	"sitia.nu/airgap/src/udp"
 )
 
-type KafkaAdapter struct{}
+type KafkaAdapter struct {
+	settings kafka.ConsumerSettings
+}
+
+func NewKafkaAdapter(config TransferConfiguration) *KafkaAdapter {
+	settings := kafka.ConsumerSettings{
+		FetchDefaultBytes: int32(config.kafkaFetchDefaultBytes),
+		FetchMaxBytes:     int32(config.kafkaMaxMessageBytes),
+		ChannelBufferSize: config.kafkaChannelBufferSize,
+	}
+	sampler := newSystemMemorySampler(config.memoryLimitBytes)
+	sample, err := sampler.Sample()
+	if err != nil {
+		Logger.Warnf(logging.Event(logging.EventMemoryLimit,
+			logging.Failure(),
+			logging.Error("memory.limit.unavailable"),
+		), "Memory-pressure throttling disabled because no usable memory limit could be detected: %v", err)
+		return &KafkaAdapter{settings: settings}
+	}
+
+	if config.goMemoryLimitPercent > 0 {
+		goLimit, limitErr := applyGoMemoryLimit(sampler, config.goMemoryLimitPercent)
+		if limitErr != nil {
+			Logger.Errorf(logging.Event(logging.EventMemoryLimit,
+				logging.Failure(),
+				logging.ErrorType(limitErr),
+			), "Failed to apply Go memory limit: %v", limitErr)
+		} else {
+			Logger.Infof(logging.Event(logging.EventMemoryLimit,
+				logging.Int("airgap.memory.limit_bytes", sample.limit),
+				logging.Int("airgap.memory.go_limit_bytes", goLimit),
+				logging.Str("airgap.memory.source", sample.source),
+			), "Applied Go memory limit %d bytes from %s limit %d bytes", goLimit, sample.source, sample.limit)
+		}
+	}
+
+	controller := newMemoryController(
+		sampler,
+		config.memoryHighWatermarkPercent,
+		config.memoryLowWatermarkPercent,
+		time.Duration(config.memoryCheckIntervalMs)*time.Millisecond,
+		func(throttled bool, current memorySample) {
+			attrs := logging.Event(logging.EventMemoryThrottle,
+				logging.Bool("airgap.memory.throttled", throttled),
+				logging.Int("airgap.memory.current_bytes", current.current),
+				logging.Int("airgap.memory.limit_bytes", current.limit),
+				logging.Str("airgap.memory.source", current.source),
+				logging.Int("airgap.memory.high_watermark_percent", int64(config.memoryHighWatermarkPercent)),
+				logging.Int("airgap.memory.low_watermark_percent", int64(config.memoryLowWatermarkPercent)),
+			)
+			context := memoryWatermarkContext(current)
+			if throttled {
+				emitConfiguredMessage(parseMessageSpec(config.memoryHighWatermarkLog, logging.WARN), attrs, context)
+			} else {
+				emitConfiguredMessage(parseMessageSpec(config.memoryLowWatermarkLog, logging.INFO), attrs, context)
+			}
+		},
+	)
+	settings.BeforeMessage = controller.Wait
+	return &KafkaAdapter{settings: settings}
+}
 
 func (k *KafkaAdapter) Read(ctx context.Context, name string, offset int,
 	bootstrapServers, topic, group, from string,
 	handler kafka.KafkaHandler) {
 	// Pass UpdateKafkaStatus as error callback to report Kafka issues
-	kafka.ReadFromKafkaWithContext(ctx, name, offset, bootstrapServers, topic, group, from, handler, UpdateKafkaStatus)
+	kafka.ReadFromKafkaWithContextSettings(ctx, name, offset, bootstrapServers, topic, group, from, handler, k.settings, UpdateKafkaStatus)
 }
 
 func (k *KafkaAdapter) SetTLS(certFile, keyFile, caFile, keyPasswordFile string) error {

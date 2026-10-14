@@ -114,6 +114,353 @@ On downstream startup, a file glob is read from the configuration file. When a k
 
 UDP receive is normally faster than Kafka writes. The downstream application tries to safeguard against lost packets by using a lightweight thread that receives events, decrypts them using AES256 (quite fast) and then adds the events to an array. Another thread consumes the array and writes to Kafka using the async protocol (that also returns immediately and processes the write in yet another thread). If the performance is not enough, first try to add nodes to the Kafka cluster and add the nodes to the bootstrapServers configuration in the downstream process. You can also try to add several events together before writing them to the upstream Kafka, since there is some overhead for each Kafka event, especially for writing. As a last resort, the upstream sender can be set to throttle (eps property), e.g., by adding a small time.Sleep after each sent event. You should be able to securely transmit tens of thousand events every second using one transmission chain, but for large installations you might have to add more sender/receiver chains, as well as upgrade the Kafka instances.
 
+#### Upstream memory bounds for large Kafka records
+
+`eps` limits event rate but does not bound memory when Kafka records are
+large. Upstream therefore also bounds Sarama fetches and buffered records and
+uses the process cgroup limit for adaptive backpressure:
+
+```properties
+kafkaFetchDefaultBytes=1048576
+kafkaMaxMessageBytes=10485760
+kafkaChannelBufferSize=4
+memoryLimitBytes=0
+memoryHighWatermarkPercent=80
+memoryLowWatermarkPercent=70
+memoryCheckIntervalMs=100
+goMemoryLimitPercent=70
+```
+
+`memoryLimitBytes=0` detects the effective cgroup v2/v1 limit, falling back to
+process RSS and system memory outside a cgroup. A positive value can lower the
+detected limit, which is useful for a stricter application budget. At the high
+watermark upstream stops admitting records from Sarama; it resumes at the low
+watermark. The gap between them prevents rapid oscillation. Both transitions
+are reported through [configurable Airgap events](#configurable-airgap-events):
+
+```properties
+memoryHighWatermarkLog=WARN:Upstream {upstreamId} entering high memory watermark. Pausing Kafka record admission at {memoryCurrentBytes} of {memoryUsedLimitBytes} bytes ({memoryUsedPercent} percent, from {memorySource}).
+memoryLowWatermarkLog=NONE
+```
+
+The resume event is `NONE` by default: the pause is the event worth alerting
+on, and a pause that resolves itself does not need a record. Set it to a
+`LEVEL:message` value to measure how long throttling lasted.
+
+`kafkaMaxMessageBytes` must be at least as large as the largest permitted
+Kafka record and no larger than the memory envelope can safely transform.
+Records above it fail explicitly instead of growing the process without a
+bound. Each sending thread has its own Kafka consumer, so capacity planning
+must include approximately:
+
+```text
+fixed working set
++ sending threads × kafkaChannelBufferSize × kafkaMaxMessageBytes
++ one record's compression/encryption/fragmentation copies per active thread
++ Kafka, TLS, socket, stack, and garbage-collector headroom
+```
+
+Keep the systemd `MemoryHigh`/`MemoryMax` limits as the final operating-system
+boundary. The Go soft heap limit and adaptive throttle reduce pressure before
+that boundary; they do not replace it.
+
+#### Configurable Airgap events
+
+Events that report something an operator may need to act on are configured with
+a single property that carries both the severity and the text:
+
+```properties
+memoryHighWatermarkLog=WARN:Upstream {upstreamId} entering high memory watermark.
+memoryLowWatermarkLog=NONE
+lostEvent=INFO:Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}.
+```
+
+The value is either `NONE`, which turns the event off completely, or
+`LEVEL:message`. The level is the text before the first colon and may be
+`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` or `FATAL`; everything after it is the
+message. A value whose prefix is not a level is used as the message in its
+entirety at the event's default level, so a message may contain colons without
+being quoted. Upstream warns at startup when a prefix looks like a misspelled
+level.
+
+Every configuration property is available as a `{placeholder}` in every
+message, and placeholder names are matched ignoring case and underscores. So
+`{lostEventDirectory}`, `{lost_event_directory}` and `{LostEventDirectory}` are
+the same placeholder, whichever notation the configuration file uses. An
+unknown placeholder is left exactly as written, so a typo is visible in the
+output instead of silently rendering an empty field.
+
+Four settings hold something other than a configured value, so they resolve to
+a description of their state rather than to their contents:
+
+| Placeholder | Resolves to |
+| --- | --- |
+| `{key}`, `{newkey}` | `(redacted)` when a symmetric key is in use, `(none)` when it is not. A message is written to the log and, for a lost event, delivered downstream, and the symmetric key is exactly what protects that delivery, so the material itself is never rendered. |
+| `{publicKey}` | The SHA-256 fingerprint of the key read from `publicKeyFile`, for example `SHA256:k7p...=`, or `(none)`. A public key is not secret, but its PEM body is far too long for a log line. |
+| `{filter}`, `{inputFilter}` | `(set)` or `(none)`. These are compiled from `deliverFilter` and `inputFilterRules`, which are available verbatim under their own names. |
+| `{translations}` | The topic translations in force as `from=to` pairs, or `(none)`. |
+
+Each event adds its own context placeholders on top of the configuration:
+
+| Event | Context placeholders |
+| --- | --- |
+| `memoryHighWatermarkLog`, `memoryLowWatermarkLog` | `{memoryCurrentBytes}`, `{memoryUsedLimitBytes}`, `{memoryUsedPercent}`, `{memorySource}` |
+| `lostEvent`, `airgapLostEventMessage` | `{topic_name}`, `{partition}`, `{row}`, `{reason}`, `{eventBytes}`, `{lostEventFile}` |
+| `lostMessageTruncatedMessage` | `{fileName}`, `{fileDate}`, `{diskFreeBytes}`, `{fileSize}`, `{action}` |
+
+`{memoryUsedLimitBytes}` is the limit actually in force, which may be the
+detected cgroup limit; `{memoryLimitBytes}` keeps its meaning as the configured
+property.
+
+Every event also carries its OTel attributes regardless of the configured text,
+so machine-readable processing does not depend on the wording. All of these
+properties can be overridden with environment variables and command-line
+arguments in the usual way, for instance
+`AIRGAP_UPSTREAM_MEMORY_HIGH_WATERMARK_LOG` or `--lostEvent=NONE`.
+
+#### Airgap Lost Event (ALE) guard
+
+Backpressure delays a record; it cannot make an oversized record deliverable.
+When upstream cannot deliver a record it would otherwise have to choose between
+two bad options: discard it, which makes the gap detector pull the offset into
+resend bundles forever, or refuse to commit it, which stalls the partition.
+
+Instead upstream forwards a short guard payload under the *same* message id:
+
+```text
+AIRGAP LOST EVENT: Event transfer 3:91824 couldn't be delivered due to message size 12582912 bytes exceeds maxEventBytes 6291456 bytes. The message can be found in its entirety on upstream machine Upstream_1, in /airgap/lost_events/. Max message length is 6291456.
+```
+
+Downstream sees a continuous offset sequence, so the event is not resent, and
+the loss is explicit and searchable in the delivered data. Each lost event is
+also reported through the configurable `lostEvent` event, always carries
+`eventName=message.lost`, and is counted as `lost_events` /
+`total_lost_events` in the statistics record.
+
+```properties
+maxEventBytes=6291456
+lostEventGuard=true
+lostEvent=INFO:Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. The message can be found in its entirety on upstream machine {upstream_id}, in {lostEventDirectory}.
+airgapLostEventMessageFormat=text
+airgapLostEventMessage=AIRGAP LOST EVENT: Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. The message can be found in its entirety on upstream machine {upstream_id}, in {lostEventDirectory}. Max message length is {kafkaMaxMessageBytes}.
+lostEventDirectory=/airgap/lost_events/
+lostEventDirectoryCompressAfterDays=7
+lostEventDirectoryDeleteAfterDays=60
+lostMessageTruncatedMessageFormat=text
+lostMessageTruncatedMessage=AIRGAP LOST MESSAGE TRUNCATED: The message file {fileName} created on {fileDate} was truncated by upstream due to lack of disc space. Current disc free space is {diskFreeBytes} bytes and the truncated file was {fileSize} bytes.
+```
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `maxEventBytes` | `0` (disabled) | Largest record upstream forwards. Larger records are replaced by a guard. |
+| `lostEventGuard` | `true` | When `false`, an undeliverable record is discarded instead of being replaced by a guard. |
+| `lostEvent` | `INFO:...` | Log record written when an event is lost. `NONE` turns it off. |
+| `airgapLostEventMessageFormat` | `text` | Rendering mode for the guard payload: `text` or `json`. |
+| `airgapLostEventMessage` | the text above | Payload delivered in place of the record. |
+| `lostEventDirectory` | `/airgap/lost_events/` | Directory where the original payload of a lost event is written, one file per event, for later inspection. Empty disables it, and the guard then says so instead of pointing at a directory. |
+| `lostEventDirectoryCompressAfterDays` | `7` | Old files in the lost-event directory are zipped after this many days to make room. |
+| `lostEventDirectoryDeleteAfterDays` | `60` | Old files are removed after this many days, even if they were not already archived. |
+| `lostMessageTruncatedMessage` | `AIRGAP LOST MESSAGE TRUNCATED: ...` | Status message emitted when a lost-event file is pruned or truncated to reclaim disk space. `NONE` disables it. |
+| `lostMessageTruncatedMessageFormat` | `text` | Rendering format for the status message: `text` or `json`. |
+
+#### Lost-event disk retention
+
+Retaining the original payload makes an ALE auditable, but an unbounded
+`lostEventDirectory` can fill the filesystem and affect Kafka, logging, and the
+rest of the host. The recommended solution is layered:
+
+1. Alert on filesystem utilization before upstream needs to reclaim space.
+2. Compress older payloads to reduce their footprint.
+3. Delete payloads after a documented retention period.
+4. If a new lost-event payload still does not fit, remove the oldest remaining
+   files first rather than letting the write fail silently.
+
+Upstream applies that policy before every lost-event write. It first deletes
+files older than `lostEventDirectoryDeleteAfterDays`, including existing
+archives. It then compresses non-zip files older than
+`lostEventDirectoryCompressAfterDays`. Deletion deliberately runs first, and a
+new archive keeps both the filesystem mtime and the ZIP-entry mtime of its
+source, so compression cannot reset a 60-day retention clock. Finally,
+upstream checks whether the filesystem has room for the new payload plus a
+small write margin. If not, it removes the oldest remaining regular files
+until the payload fits or no candidates remain. Set either age to `0` to
+disable that stage.
+
+Every successful Go removal of a content file—including removal of a source
+after compression, scheduled deletion, emergency eviction, and cleanup of a
+partial failed write—produces:
+
+- a local record with `eventName=message.lost.truncated`; and
+- a wire message with protocol type `STATUS` and id `STATUS`.
+
+Because `STATUS` is not a `topic_partition_row` id, downstream writes it to its
+configured `internalTopic`, where an operator can alarm on
+`eventName=message.lost.truncated`. The status context contains `{fileName}`,
+`{fileDate}`, `{diskFreeBytes}`, `{fileSize}` and `{action}`. The action is
+`compressed`, `deleted`, `evicted`, or `write_failed`. `NONE` disables the
+configurable status record, although the ordinary operational log still says
+which file was removed. A transport failure is logged locally; it does not
+undo a removal that already succeeded.
+
+A JSON/OTLP-shaped status configuration is:
+
+```properties
+lostMessageTruncatedMessageFormat=json
+lostMessageTruncatedMessage=WARN:{"eventName":"message.lost.truncated","severityText":"WARN","body":{"stringValue":"AIRGAP LOST MESSAGE TRUNCATED: The message file {fileName} created on {fileDate} was truncated by upstream due to lack of disc space. Current disc free space is {diskFreeBytes} bytes and the truncated file was {fileSize} bytes."},"attributes":[{"key":"file.name","value":{"stringValue":"{fileName}"}},{"key":"file.mtime","value":{"stringValue":"{fileDate}"}},{"key":"file.size","value":{"intValue":"{fileSize}"}},{"key":"airgap.disk.free_bytes","value":{"intValue":"{diskFreeBytes}"}},{"key":"service.instance.id","value":{"stringValue":"{upstreamId}"}},{"key":"airgap.event.lost.action","value":{"stringValue":"{action}"}}]}
+```
+
+For example, a compressed source produces:
+
+```json
+{
+  "eventName": "message.lost.truncated",
+  "severityText": "WARN",
+  "body": {
+    "stringValue": "AIRGAP LOST MESSAGE TRUNCATED: The message file transfer_3_91824.bin created on 2026-10-04T09:47:42Z was truncated by upstream due to lack of disc space. Current disc free space is 1048576000 bytes and the truncated file was 12582912 bytes."
+  },
+  "attributes": [
+    {"key": "file.name", "value": {"stringValue": "transfer_3_91824.bin"}},
+    {"key": "file.mtime", "value": {"stringValue": "2026-10-04T09:47:42Z"}},
+    {"key": "file.size", "value": {"intValue": "12582912"}},
+    {"key": "airgap.disk.free_bytes", "value": {"intValue": "1048576000"}},
+    {"key": "service.instance.id", "value": {"stringValue": "Upstream_1"}},
+    {"key": "airgap.event.lost.action", "value": {"stringValue": "compressed"}}
+  ]
+}
+```
+
+If retention must be managed externally instead, the following Bash example
+uses configurable ages, deletes expired files before compression, preserves
+the source mtime on each archive, and safely handles spaces in file names.
+Run it as the same account that owns `lostEventDirectory`; the `zip` command
+must be installed:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+directory="${LOST_EVENT_DIRECTORY:-/airgap/lost_events}"
+compress_after_days="${COMPRESS_AFTER_DAYS:-7}"
+delete_after_days="${DELETE_AFTER_DAYS:-60}"
+
+# Delete first, otherwise compressing an already-expired source would create a
+# fresh archive and accidentally restart its retention clock.
+if (( delete_after_days > 0 )); then
+    find "$directory" -type f -mtime "+$delete_after_days" -print -delete
+fi
+
+if (( compress_after_days > 0 )); then
+    while IFS= read -r -d '' source; do
+        archive="${source}.zip"
+        temporary="${source}.tmp.zip"
+        [[ -e "$archive" ]] && continue
+        rm -f -- "$temporary"
+        zip -jq "$temporary" "$source"
+        touch -r "$source" "$temporary"
+        mv -- "$temporary" "$archive"
+        rm -- "$source"
+    done < <(find "$directory" -type f ! -name '*.zip' -mtime "+$compress_after_days" -print0)
+fi
+```
+
+External scripts cannot emit upstream's status protocol message. If this
+procedure is used instead of the built-in policy, route its output to the
+host's monitoring system and alert on every deletion or failed archive.
+
+Keep the exact `AIRGAP LOST EVENT` marker in `airgapLostEventMessage`. In text
+mode it should start the payload; a JSON template normally puts it in `body`.
+It is what downstream and operators search for to find every event that was
+lost in transfer.
+
+To deliver the guard as an OTLP-shaped JSON LogRecord, set the format to
+`json`. The property value must be one JSON object on one line:
+
+```properties
+airgapLostEventMessageFormat=json
+airgapLostEventMessage={"eventName":"message.lost","severityText":"ERROR","body":{"stringValue":"AIRGAP LOST EVENT: Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}"},"attributes":[{"key":"messaging.destination.name","value":{"stringValue":"{topic_name}"}},{"key":"messaging.destination.partition.id","value":{"stringValue":"{partition}"}},{"key":"messaging.kafka.offset","value":{"intValue":"{row}"}},{"key":"error.type","value":{"stringValue":"airgap.event.lost"}},{"key":"airgap.event.lost.reason","value":{"stringValue":"{reason}"}},{"key":"service.instance.id","value":{"stringValue":"{upstreamId}"}},{"key":"airgap.event.lost.file","value":{"stringValue":"{lostEventFile}"}},{"key":"airgap.message.size","value":{"intValue":"{eventBytes}"}}]}
+```
+
+That produces a compact record shaped like:
+
+```json
+{
+  "eventName": "message.lost",
+  "severityText": "ERROR",
+  "body": {
+    "stringValue": "AIRGAP LOST EVENT: Event transfer 3:91824 couldn't be delivered due to message size 12582912 bytes exceeds maxEventBytes 6291456 bytes"
+  },
+  "attributes": [
+    {
+      "key": "messaging.destination.name",
+      "value": {
+        "stringValue": "transfer"
+      }
+    },
+    {
+      "key": "messaging.destination.partition.id",
+      "value": {
+        "stringValue": "3"
+      }
+    },
+    {
+      "key": "messaging.kafka.offset",
+      "value": {
+        "intValue": "91824"
+      }
+    },
+    {
+      "key": "error.type",
+      "value": {
+        "stringValue": "airgap.event.lost"
+      }
+    },
+    {
+      "key": "airgap.event.lost.reason",
+      "value": {
+        "stringValue": "message size 12582912 bytes exceeds maxEventBytes 6291456 bytes"
+      }
+    },
+    {
+      "key": "service.instance.id",
+      "value": {
+        "stringValue": "Upstream_1"
+      }
+    },
+    {
+      "key": "airgap.event.lost.file",
+      "value": {
+        "stringValue": "/airgap/lost_events/transfer_3_91824-1791965041406.bin"
+      }
+    },
+    {
+      "key": "airgap.message.size",
+      "value": {
+        "intValue": "12582912"
+      }
+    }
+  ]
+}
+```
+
+This is a single OTLP JSON `LogRecord`, not a complete
+`ExportLogsServiceRequest` envelope. Placeholders in JSON mode must occur
+inside JSON string values, not property names, including OTLP `intValue` fields
+because the OTLP JSON mapping represents 64-bit integers as strings. Upstream
+parses the configured object before startup and rejects malformed JSON. For
+each guard it substitutes the placeholders and serializes the object again
+with Go's JSON encoder, so `"`, `\`, tabs, newlines and other control
+characters in values cannot break the JSON payload. The format can also be set
+with `AIRGAP_UPSTREAM_AIRGAP_LOST_EVENT_MESSAGE_FORMAT=json` or
+`--airgapLostEventMessageFormat=json`.
+
+Guards are also emitted when encryption of a record fails, so an unencryptable
+payload never leaves as cleartext and never silently disappears.
+
+Keep `maxEventBytes` at or below `kafkaMaxMessageBytes`. Records larger than
+`kafkaMaxMessageBytes` are skipped by the Kafka client before upstream sees
+them, so no guard can be produced for them; upstream warns at startup if the
+two are configured the other way around.
+
 ### Automatic resend
 
 Since UDP is an unreliable protocol, you can set up air-gap to automatically resend logs at specific time intervals. In the upstream property file, add the following property:

@@ -72,11 +72,13 @@ const (
 	EventCryptoKeyExchange = "crypto.key.exchange"
 
 	// The message pipeline itself.
-	EventProtocolEncode = "protocol.encode"
-	EventProtocolDecode = "protocol.decode"
-	EventProtocolCache  = "protocol.cache"
-	EventMessageFilter  = "message.filter"
-	EventMessageDeliver = "message.deliver"
+	EventProtocolEncode   = "protocol.encode"
+	EventProtocolDecode   = "protocol.decode"
+	EventProtocolCache    = "protocol.cache"
+	EventMessageFilter    = "message.filter"
+	EventMessageDeliver   = "message.deliver"
+	EventMessageLost      = "message.lost"
+	EventMessageTruncated = "message.lost.truncated"
 
 	// Gap detection and recovery.
 	EventGapDetected = "gap.detected"
@@ -94,6 +96,8 @@ const (
 	EventLogAnchor = "log.integrity.anchor"
 
 	// Operational reporting that does not belong to a single domain.
-	EventStatsReport = "stats.report"
-	EventDiagnostic  = "app.diagnostic"
+	EventStatsReport    = "stats.report"
+	EventDiagnostic     = "app.diagnostic"
+	EventMemoryLimit    = "memory.limit.applied"
+	EventMemoryThrottle = "memory.throttle"
 )
