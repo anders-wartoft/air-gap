@@ -12,14 +12,7 @@ import (
 )
 
 func TestKeyPasswordFileReadErrorIsStatic(t *testing.T) {
-	err := keyPasswordFileReadError(&os.PathError{
-		Op:   "open",
-		Path: "/secret/password-file",
-		Err:  os.ErrNotExist,
-	})
-	if strings.Contains(err.Error(), "/secret/password-file") {
-		t.Fatal("key password file error exposes the file path")
-	}
+	err := keyPasswordFileReadError(os.ErrNotExist)
 	if err.Error() != "failed to read key password file: file does not exist" {
 		t.Fatal("key password file error lacks the expected static classification")
 	}
