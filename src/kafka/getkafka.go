@@ -109,6 +109,17 @@ func SetTLSConfigParameters(certFile, keyFile, caFile, keyPasswordFile string) (
 	return createTLSConfig()
 }
 
+func keyPasswordFileReadError(err error) error {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return errors.New("failed to read key password file: file does not exist")
+	case errors.Is(err, os.ErrPermission):
+		return errors.New("failed to read key password file: permission denied")
+	default:
+		return errors.New("failed to read key password file")
+	}
+}
+
 // LoadTLSCertificate loads a TLS certificate and private key, decrypting the key if a
 // password file is provided. This is exported so that non-Kafka TLS clients (e.g. TCP
 // transport) can reuse the same key-decryption logic.
@@ -137,14 +148,7 @@ func LoadTLSCertificate(certFile, keyFile, keyPasswordFile string) (tls.Certific
 	if keyPasswordFile != "" {
 		passphrase, err := os.ReadFile(keyPasswordFile)
 		if err != nil {
-			switch {
-			case errors.Is(err, os.ErrNotExist):
-				return tls.Certificate{}, errors.New("failed to read key password file: file does not exist")
-			case errors.Is(err, os.ErrPermission):
-				return tls.Certificate{}, errors.New("failed to read key password file: permission denied")
-			default:
-				return tls.Certificate{}, errors.New("failed to read key password file")
-			}
+			return tls.Certificate{}, keyPasswordFileReadError(err)
 		}
 		passphraseBytes := []byte(strings.TrimSpace(string(passphrase)))
 
@@ -459,7 +463,7 @@ func createTLSConfig() (*tls.Config, error) {
 		// Read the passphrase from the password file
 		passphrase, err := os.ReadFile(tlsConfigParameters.KeyPasswordFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read key password file: %w", err)
+			return nil, keyPasswordFileReadError(err)
 		}
 		passphraseBytes := []byte(strings.TrimSpace(string(passphrase)))
 
