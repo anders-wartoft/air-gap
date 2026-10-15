@@ -546,6 +546,7 @@ type ConsumerSettings struct {
 	FetchDefaultBytes int32
 	FetchMaxBytes     int32
 	ChannelBufferSize int
+	MaxProcessingTime time.Duration
 	BeforeMessage     func(context.Context) error
 }
 
@@ -558,6 +559,9 @@ func applyConsumerSettings(config *sarama.Config, settings ConsumerSettings) {
 	}
 	if settings.ChannelBufferSize > 0 {
 		config.ChannelBufferSize = settings.ChannelBufferSize
+	}
+	if settings.MaxProcessingTime > 0 {
+		config.Consumer.MaxProcessingTime = settings.MaxProcessingTime
 	}
 }
 

@@ -16,6 +16,7 @@ func TestReadParametersParsesMemoryAndKafkaBounds(t *testing.T) {
 	content := "kafkaFetchDefaultBytes=1048576\n" +
 		"kafkaMaxMessageBytes=6291456\n" +
 		"kafkaChannelBufferSize=2\n" +
+		"kafkaMaxProcessingTimeMs=45000\n" +
 		"memoryLimitBytes=201326592\n" +
 		"memoryHighWatermarkPercent=75\n" +
 		"memoryLowWatermarkPercent=60\n" +
@@ -32,12 +33,29 @@ func TestReadParametersParsesMemoryAndKafkaBounds(t *testing.T) {
 	if config.kafkaFetchDefaultBytes != 1048576 ||
 		config.kafkaMaxMessageBytes != 6291456 ||
 		config.kafkaChannelBufferSize != 2 ||
+		config.kafkaMaxProcessingTimeMs != 45000 ||
 		config.memoryLimitBytes != 201326592 ||
 		config.memoryHighWatermarkPercent != 75 ||
 		config.memoryLowWatermarkPercent != 60 ||
 		config.memoryCheckIntervalMs != 25 ||
 		config.goMemoryLimitPercent != 65 {
 		t.Fatalf("unexpected memory configuration: %+v", config)
+	}
+}
+
+func TestKafkaMaxProcessingTimeOverrides(t *testing.T) {
+	t.Setenv("AIRGAP_UPSTREAM_KAFKA_MAX_PROCESSING_TIME_MS", "41000")
+	fromEnvironment := overrideConfiguration(DefaultConfiguration())
+	if fromEnvironment.kafkaMaxProcessingTimeMs != 41000 {
+		t.Fatalf("environment kafkaMaxProcessingTimeMs = %d, want 41000", fromEnvironment.kafkaMaxProcessingTimeMs)
+	}
+
+	fromCommandLine := parseCommandLineOverrides(
+		[]string{"upstream", "--kafkaMaxProcessingTimeMs=42000"},
+		DefaultConfiguration(),
+	)
+	if fromCommandLine.kafkaMaxProcessingTimeMs != 42000 {
+		t.Fatalf("command-line kafkaMaxProcessingTimeMs = %d, want 42000", fromCommandLine.kafkaMaxProcessingTimeMs)
 	}
 }
 

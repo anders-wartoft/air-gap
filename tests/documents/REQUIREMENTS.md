@@ -269,6 +269,29 @@ upstream warns at startup when it is not.
    All of them can be overridden with environment variables and command-line
    arguments like any other property.
 
+### REQ-8d — Stable Kafka subscriptions during slow processing
+
+> Expected upstream processing delays must not make Sarama abandon and recreate
+> an otherwise healthy Kafka partition subscription.
+
+* Implemented in: 0.1.14-SNAPSHOT
+* Covered by: TC-34
+
+1. Upstream applies `kafkaMaxProcessingTimeMs` to Sarama
+   `Consumer.MaxProcessingTime`. The default is 30000 ms.
+2. The value must be a positive integer and can be set through the property
+   file, `AIRGAP_UPSTREAM_KAFKA_MAX_PROCESSING_TIME_MS`, or
+   `--kafkaMaxProcessingTimeMs`.
+3. The configured interval must cover the longest expected synchronous
+   processing time for one record, including rate limiting, memory
+   backpressure, compression, encryption, fragmentation, transport writes and
+   bounded retries.
+4. Under processing delays shorter than the configured interval, upstream must
+   not log `abandoned subscription ... because consuming was taking too long`,
+   must reach consumer lag zero, and must not duplicate or lose records.
+5. Increasing the interval does not claim to increase throughput. Sustained
+   overload remains observable as Kafka consumer lag.
+
 ## REQ-9 — No log loss on restart
 
 > Air-gap must not lose logs on restart.

@@ -71,6 +71,7 @@ type TransferConfiguration struct {
 	kafkaFetchDefaultBytes              int                      // Sarama Consumer.Fetch.Default: bytes requested per partition per fetch; the normal working-set size (default 1 MiB)
 	kafkaMaxMessageBytes                int                      // Sarama Consumer.Fetch.Max: hard ceiling per partition per fetch. Must be at least the broker's max.message.bytes, otherwise larger records are skipped by Sarama
 	kafkaChannelBufferSize              int                      // Sarama ChannelBufferSize: records pre-buffered per partition before the handler runs. Peak consumer memory is roughly kafkaMaxMessageBytes * (buffer + 1) * partitions
+	kafkaMaxProcessingTimeMs            int                      // Sarama Consumer.MaxProcessingTime: maximum expected interval between draining records from a partition channel (default 30 seconds)
 	memoryLimitBytes                    int64                    // explicit memory budget in bytes; 0 (default) auto-detects from the cgroup. May only lower a detected cgroup limit, never raise it
 	memoryHighWatermarkPercent          int                      // pause Kafka record admission when used memory reaches this percentage of the limit (default 75)
 	memoryLowWatermarkPercent           int                      // resume Kafka record admission when used memory falls back to this percentage of the limit (default 65); must be lower than the high watermark
@@ -116,6 +117,7 @@ func DefaultConfiguration() TransferConfiguration {
 	config.kafkaFetchDefaultBytes = 1024 * 1024
 	config.kafkaMaxMessageBytes = 100 * 1024 * 1024
 	config.kafkaChannelBufferSize = 4
+	config.kafkaMaxProcessingTimeMs = 30000
 	config.memoryLimitBytes = 0
 	config.memoryHighWatermarkPercent = 80
 	config.memoryLowWatermarkPercent = 70
@@ -361,7 +363,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 					Logger.Infof(configApplied("compressWhenLengthExceeds", result.compressWhenLengthExceeds), "compressWhenLengthExceeds: %d", result.compressWhenLengthExceeds)
 				}
 			}
-		case "kafkaFetchDefaultBytes", "kafkaMaxMessageBytes", "kafkaChannelBufferSize",
+		case "kafkaFetchDefaultBytes", "kafkaMaxMessageBytes", "kafkaChannelBufferSize", "kafkaMaxProcessingTimeMs",
 			"memoryHighWatermarkPercent", "memoryLowWatermarkPercent",
 			"memoryCheckIntervalMs", "goMemoryLimitPercent", "maxEventBytes":
 			tmp, err := strconv.Atoi(value)
@@ -375,6 +377,8 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 				result.kafkaMaxMessageBytes = tmp
 			case "kafkaChannelBufferSize":
 				result.kafkaChannelBufferSize = tmp
+			case "kafkaMaxProcessingTimeMs":
+				result.kafkaMaxProcessingTimeMs = tmp
 			case "memoryHighWatermarkPercent":
 				result.memoryHighWatermarkPercent = tmp
 			case "memoryLowWatermarkPercent":
@@ -718,6 +722,7 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	applyIntEnvironment(prefix, "KAFKA_FETCH_DEFAULT_BYTES", "kafkaFetchDefaultBytes", &config.kafkaFetchDefaultBytes)
 	applyIntEnvironment(prefix, "KAFKA_MAX_MESSAGE_BYTES", "kafkaMaxMessageBytes", &config.kafkaMaxMessageBytes)
 	applyIntEnvironment(prefix, "KAFKA_CHANNEL_BUFFER_SIZE", "kafkaChannelBufferSize", &config.kafkaChannelBufferSize)
+	applyIntEnvironment(prefix, "KAFKA_MAX_PROCESSING_TIME_MS", "kafkaMaxProcessingTimeMs", &config.kafkaMaxProcessingTimeMs)
 	applyInt64Environment(prefix, "MEMORY_LIMIT_BYTES", "memoryLimitBytes", &config.memoryLimitBytes)
 	applyIntEnvironment(prefix, "MEMORY_HIGH_WATERMARK_PERCENT", "memoryHighWatermarkPercent", &config.memoryHighWatermarkPercent)
 	applyIntEnvironment(prefix, "MEMORY_LOW_WATERMARK_PERCENT", "memoryLowWatermarkPercent", &config.memoryLowWatermarkPercent)
@@ -995,7 +1000,7 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				Logger.Fatalf(configInvalid("compressWhenLengthExceeds", value), "Error parsing --compressWhenLengthExceeds: %s", value)
 			}
 			config.compressWhenLengthExceeds = v
-		case "kafkaFetchDefaultBytes", "kafkaMaxMessageBytes", "kafkaChannelBufferSize",
+		case "kafkaFetchDefaultBytes", "kafkaMaxMessageBytes", "kafkaChannelBufferSize", "kafkaMaxProcessingTimeMs",
 			"memoryHighWatermarkPercent", "memoryLowWatermarkPercent",
 			"memoryCheckIntervalMs", "goMemoryLimitPercent", "maxEventBytes":
 			v, err := strconv.Atoi(value)
@@ -1009,6 +1014,8 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				config.kafkaMaxMessageBytes = v
 			case "kafkaChannelBufferSize":
 				config.kafkaChannelBufferSize = v
+			case "kafkaMaxProcessingTimeMs":
+				config.kafkaMaxProcessingTimeMs = v
 			case "memoryHighWatermarkPercent":
 				config.memoryHighWatermarkPercent = v
 			case "memoryLowWatermarkPercent":
@@ -1275,6 +1282,11 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		Logger.Fatalf(configInvalid("kafkaChannelBufferSize", result.kafkaChannelBufferSize),
 			"Invalid kafkaChannelBufferSize: %d. Legal values are positive integers", result.kafkaChannelBufferSize)
 	}
+	maxProcessingTimeMs := int64(math.MaxInt64 / int64(time.Millisecond))
+	if result.kafkaMaxProcessingTimeMs <= 0 || int64(result.kafkaMaxProcessingTimeMs) > maxProcessingTimeMs {
+		Logger.Fatalf(configInvalid("kafkaMaxProcessingTimeMs", result.kafkaMaxProcessingTimeMs),
+			"Invalid kafkaMaxProcessingTimeMs: %d. Legal values are 1-%d", result.kafkaMaxProcessingTimeMs, maxProcessingTimeMs)
+	}
 	if result.memoryLimitBytes < 0 {
 		Logger.Fatalf(configInvalid("memoryLimitBytes", result.memoryLimitBytes),
 			"Invalid memoryLimitBytes: %d. Legal values are non-negative integers", result.memoryLimitBytes)
@@ -1467,6 +1479,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Infof(configApplied("kafkaFetchDefaultBytes", config.kafkaFetchDefaultBytes), "  kafkaFetchDefaultBytes: %d", config.kafkaFetchDefaultBytes)
 	Logger.Infof(configApplied("kafkaMaxMessageBytes", config.kafkaMaxMessageBytes), "  kafkaMaxMessageBytes: %d", config.kafkaMaxMessageBytes)
 	Logger.Infof(configApplied("kafkaChannelBufferSize", config.kafkaChannelBufferSize), "  kafkaChannelBufferSize: %d", config.kafkaChannelBufferSize)
+	Logger.Infof(configApplied("kafkaMaxProcessingTimeMs", config.kafkaMaxProcessingTimeMs), "  kafkaMaxProcessingTimeMs: %d", config.kafkaMaxProcessingTimeMs)
 	Logger.Infof(configApplied("memoryLimitBytes", config.memoryLimitBytes), "  memoryLimitBytes: %d", config.memoryLimitBytes)
 	Logger.Infof(configApplied("memoryHighWatermarkPercent", config.memoryHighWatermarkPercent), "  memoryHighWatermarkPercent: %d", config.memoryHighWatermarkPercent)
 	Logger.Infof(configApplied("memoryLowWatermarkPercent", config.memoryLowWatermarkPercent), "  memoryLowWatermarkPercent: %d", config.memoryLowWatermarkPercent)

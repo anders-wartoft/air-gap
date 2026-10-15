@@ -242,6 +242,7 @@ func templateValues(c TransferConfiguration) map[string]string {
 		"kafkaFetchDefaultBytes":              strconv.Itoa(c.kafkaFetchDefaultBytes),
 		"kafkaMaxMessageBytes":                strconv.Itoa(c.kafkaMaxMessageBytes),
 		"kafkaChannelBufferSize":              strconv.Itoa(c.kafkaChannelBufferSize),
+		"kafkaMaxProcessingTimeMs":            strconv.Itoa(c.kafkaMaxProcessingTimeMs),
 		"memoryLimitBytes":                    strconv.FormatInt(c.memoryLimitBytes, 10),
 		"memoryHighWatermarkPercent":          strconv.Itoa(c.memoryHighWatermarkPercent),
 		"memoryLowWatermarkPercent":           strconv.Itoa(c.memoryLowWatermarkPercent),

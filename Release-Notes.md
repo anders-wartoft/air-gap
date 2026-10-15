@@ -1,5 +1,21 @@
 # Release Notes
 
+## 0.1.15-SNAPSHOT
+
+### Stable Kafka subscriptions during slow UDP processing
+
+- **New `kafkaMaxProcessingTimeMs`** configures Sarama's
+  `Consumer.MaxProcessingTime` and defaults to 30 seconds. Upstream processes a
+  Kafka record synchronously through rate limiting, memory admission,
+  transformation and transport delivery; the former 100 ms Sarama default
+  could therefore log `abandoned subscription ... because consuming was taking
+  too long` and recreate a healthy partition subscription. This was local
+  consumer backpressure, not a lost Kafka connection.
+- TC-34 deliberately limits a UDP upstream to one event per second with a
+  one-record Sarama channel. It verifies eight records arrive exactly once,
+  consumer lag reaches zero, no subscription is abandoned, and neither
+  upstream nor downstream restarts.
+
 ## 0.1.14-SNAPSHOT
 
 ### Upstream Large-Message Memory Safety

@@ -124,6 +124,7 @@ uses the process cgroup limit for adaptive backpressure:
 kafkaFetchDefaultBytes=1048576
 kafkaMaxMessageBytes=10485760
 kafkaChannelBufferSize=4
+kafkaMaxProcessingTimeMs=30000
 memoryLimitBytes=0
 memoryHighWatermarkPercent=80
 memoryLowWatermarkPercent=70
@@ -146,6 +147,17 @@ memoryLowWatermarkLog=NONE
 The resume event is `NONE` by default: the pause is the event worth alerting
 on, and a pause that resolves itself does not need a record. Set it to a
 `LEVEL:message` value to measure how long throttling lasted.
+
+Upstream handles each Kafka record synchronously until its transport send has
+finished. Sarama's historical `Consumer.MaxProcessingTime` default is only
+100 ms. If rate limiting, compression, encryption, fragmentation, memory
+backpressure, or UDP writes keep the callback busy longer than that, Sarama may
+log `abandoned subscription ... because consuming was taking too long`. This
+is local consumer backpressure, not proof that the Kafka connection was lost.
+`kafkaMaxProcessingTimeMs` configures that deadline and defaults to 30000 ms.
+Set it above the longest expected processing time for one record. A larger
+value prevents false subscription churn but does not increase throughput;
+persistent overload remains visible as consumer lag.
 
 `kafkaMaxMessageBytes` must be at least as large as the largest permitted
 Kafka record and no larger than the memory envelope can safely transform.

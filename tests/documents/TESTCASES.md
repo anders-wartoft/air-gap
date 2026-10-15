@@ -5378,3 +5378,70 @@ The test fails if:
 Deletion precedes compression, archive age cannot escape retention, fresh
 evidence is preserved, and every Go removal is observable downstream in the
 internal topic without contaminating the transferred event stream.
+
+---
+
+## TC-34 — Slow UDP Kafka subscription stability
+
+Verify that expected synchronous UDP processing delays do not make Sarama
+abandon and recreate an otherwise healthy Kafka partition subscription.
+
+* Covers: REQ-8d
+* Implemented in: 0.1.14-SNAPSHOT
+* Runner: `./run-testcase.sh 34`
+
+### Setup
+
+```text
+producer (8 × 1 KiB records)
+  -> Kafka[source]
+  -> upstream (UDP, one event/second)
+  -> downstream
+  -> Kafka[transfer]
+```
+
+Upstream uses a one-record Sarama channel so backpressure reaches the broker
+immediately:
+
+```properties
+transport=udp
+eps=1
+kafkaChannelBufferSize=1
+kafkaMaxProcessingTimeMs=2000
+topicTranslations={"source":"transfer"}
+```
+
+Sarama's historical 100 ms default abandons this subscription because the
+callback deliberately waits approximately one second between records. The
+configured two-second interval covers that expected delay without hiding a
+permanently stalled consumer.
+
+### Automated procedure
+
+1. Build the Linux binaries and helper.
+2. Start Kafka with `source`, `transfer` and `airgap-internal` topics.
+3. Start a UDP downstream and the rate-limited upstream.
+4. Require the upstream Sarama consumer to become ready.
+5. Produce eight 1 KiB records to `source`.
+6. Wait for group `tc34-Slow-udp` to reach lag zero.
+7. Require the upstream log to show `kafkaMaxProcessingTimeMs: 2000`.
+8. Require no `abandoned subscription ... consuming was taking too long`.
+9. Read the `transfer` end offset and require exactly eight records.
+10. Require upstream and downstream to remain running with zero restarts.
+
+### Expected result
+
+```text
+processing timeout applied: configured
+Kafka subscription stability: stable
+slow consumer progress: lag 0
+UDP delivery: 8 records
+process survival: both running with zero restarts
+```
+
+### What it proves
+
+The configured processing interval reaches Sarama and covers a known,
+deterministic callback delay. Slow UDP processing produces ordinary Kafka lag
+while work is pending, rather than subscription abandonment, duplicate
+delivery, or process restart.

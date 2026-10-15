@@ -30,10 +30,15 @@ func kafkaConsumerSettings(config TransferConfiguration) (kafka.ConsumerSettings
 	if config.kafkaMaxMessageBytes < config.kafkaFetchDefaultBytes || config.kafkaMaxMessageBytes > math.MaxInt32 {
 		return kafka.ConsumerSettings{}, fmt.Errorf("kafkaMaxMessageBytes must be between kafkaFetchDefaultBytes and %d", math.MaxInt32)
 	}
+	maxProcessingTimeMs := int64(math.MaxInt64 / int64(time.Millisecond))
+	if config.kafkaMaxProcessingTimeMs <= 0 || int64(config.kafkaMaxProcessingTimeMs) > maxProcessingTimeMs {
+		return kafka.ConsumerSettings{}, fmt.Errorf("kafkaMaxProcessingTimeMs must be between 1 and %d", maxProcessingTimeMs)
+	}
 	return kafka.ConsumerSettings{
 		FetchDefaultBytes: int32(config.kafkaFetchDefaultBytes),
 		FetchMaxBytes:     int32(config.kafkaMaxMessageBytes),
 		ChannelBufferSize: config.kafkaChannelBufferSize,
+		MaxProcessingTime: time.Duration(int64(config.kafkaMaxProcessingTimeMs)) * time.Millisecond,
 	}, nil
 }
 
