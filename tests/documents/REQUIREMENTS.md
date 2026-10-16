@@ -1166,6 +1166,15 @@ bind the hash algorithm, anchor range, preceding and final chain values,
 service identity, process start, run/segment/window identities, signer ID, and
 public-key ID.
 
+Every Version 1 chain step must bind the record's `timeUnixNano`,
+`severityNumber`, and `severityText` in addition to its sequence number and
+body hash. Changing the displayed event time or either severity representation
+must therefore invalidate that record's chain value and every signed
+checkpoint covering it. The body hash remains a digest of the UTF-8 body alone.
+The byte encoding must be specified normatively as fixed-width big-endian
+integers and length-framed UTF-8 strings, with an explicit table of protected
+and unprotected OpenTelemetry fields.
+
 The signing certificate must be dedicated to log signing, use an Ed25519 key,
 and allow `digitalSignature`. The public-key ID must be the SHA-256 fingerprint
 of the DER SubjectPublicKeyInfo. A verifier must resolve that ID through an
@@ -1175,3 +1184,107 @@ record is not trusted.
 Signing is optional and must not change the text default or unsigned OTLP
 output. A signing failure must be surfaced in the log output and must never be
 represented as a valid signature.
+
+A deterministic, public Version 1 test vector must publish every chain and
+checkpoint input byte, intermediate digest, SubjectPublicKeyInfo key ID, and
+Ed25519 signature. Independent Go producer and Python verifier tests must
+reproduce it byte-for-byte. Test-only private material must be conspicuously
+identified and must never be usable as a production default.
+
+The format documentation must identify RFC 5848 as evaluated syslog-specific
+prior art and must not claim compatibility with it. It must identify COSE Sign1
+as a possible future versioned checkpoint container and RFC 3161 as the
+external mechanism needed when independently trusted time is required. Neither
+future mechanism may be inferred or silently applied to Version 1 records.
+
+### REQ-52.11 — Signing-certificate lifecycle and authenticated rotation
+
+The dedicated log-signing certificate may be self-signed and registered
+explicitly, or issued by an organization CA. Provisioning must accept an
+existing Ed25519 PKCS#8 private key and certificate without requiring the
+service to generate or control the CA. The leaf certificate must meet
+REQ-52.10, and an optional configured signing EKU and URI SAN signer identity
+must be validated before activation.
+
+The signing certificate and key paths, signer identity, and required EKU must
+be reloadable from the service configuration on `SIGHUP`. Reload is atomic:
+the complete candidate configuration must be read and validated before the
+active signer changes. A missing, malformed, expired, mismatched, wrongly
+identified, or otherwise invalid candidate must leave the old signer active
+and must be logged as a failed reload. Re-reading an unchanged key is a no-op.
+
+Before replacing one valid signer with another, the service must:
+
+1. locally log a `log.integrity.signing_certificate.rotate` STATUS event that
+   identifies the old and new key IDs, signer ID, certificate serial, and the
+   new leaf certificate;
+2. close a checkpoint window containing that local event and sign its anchor
+   with the old key; and
+3. only then activate the new key for subsequent checkpoints and send the
+   byte-identical STATUS document downstream through the role's existing
+   STATUS channel.
+
+The certificate announcement must be in the hashed event body, not only in
+uncommitted semantic attributes, so the old signature authenticates the exact
+new certificate. A process crash at any point must not produce an announcement
+signed by the new key that falsely claims authorization by the old key.
+Services without an active old signer may install their initial signer during
+startup, but cannot claim an authenticated key transition.
+
+### REQ-52.12 — Automatic acquisition of signature evidence
+
+For an operator report, the supplied Kibana query selects the case events; it
+must not require the operator to discover or manually export checkpoint
+records. For every selected chained event, the verifier must automatically
+query the exact `airgap.log.run.id` and `airgap.log.window.id`, require an
+exact, non-truncated result count, and retrieve the complete window including
+its signed anchor. Automatically fetched records are evidence and must be
+identified separately from the operator-selected case events in the report.
+
+When an anchor uses a key that is not directly trusted, the verifier may
+recursively retrieve the unique certificate-rotation window announcing that
+key and verify its old-key-signed checkpoint. Expansion must be bounded by
+unique run/window and key IDs, reject cycles and ambiguous announcements, and
+fail closed on missing records, missing anchors, incomplete windows, unknown
+keys, untrusted certificate chains, or search-result truncation.
+
+Initial trust must come from outside the searched logs: either an independently
+trusted `airgap-log-trust-v1` registry or a configured CA bundle. A certificate
+or public key found only in an unsigned or unverified log record is not trust.
+The credentials/configuration file may name these trust inputs so normal
+operator use requires only the case query and report destination.
+
+The case query must be expressible either as an Elasticsearch query-string
+expression or as an Event Query Language query, so an operator can reuse a
+saved search without rewriting it. Both forms must accept an optional
+inclusive start and end timestamp. The EQL form must reject sequence results,
+because every matching event must be verifiable individually. Time bounds and
+the selection syntax apply only to the case query: automatic evidence
+acquisition must remain unbounded in time, so a window or certificate-rotation
+record outside the operator's time range is still retrieved and verified.
+
+The completed report must verify, for every selected event and every fetched
+evidence record, the body hash, chain value, chain continuity, checkpoint
+statement, signing certificate identity and validity, and Ed25519 signature.
+Changing a body, event timestamp, severity number, severity text, recorded
+hash, chain value, checkpoint hash, signature, certificate announcement, or
+required record must make the report fail.
+
+Certificate validity must be evaluated at the signed anchor's protected event
+time, not at report-generation time. A certificate that was valid at the
+event time but has since expired must remain valid historical evidence and
+produce a visible non-failing warning in both the event detail and summary. A
+certificate that was not yet valid or had expired at the event time must fail
+verification. Certificate parsing, chain validation, public-key extraction,
+and Ed25519 verification must run in the verifier process rather than invoke
+an external OpenSSL command.
+
+Acceptance coverage must include the complete deployed query path, not only
+mock search responses: a real Air-gap role must produce a signed window, the
+preserved OTLP records and searchable integrity fields must be indexed into
+Elasticsearch, the case query must select one event, and the verifier must
+retrieve and validate that event's complete evidence through a real Kibana
+console proxy. The same selection must also be proven through a real EQL
+query. The test must retain altered-body, altered-hash, and
+altered-signature indices as negative controls. Timestamp and severity
+mutations must also be retained as negative controls.

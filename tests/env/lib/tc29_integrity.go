@@ -45,7 +45,10 @@ type keyValue struct {
 }
 
 type logRecord struct {
-	Body struct {
+	TimeUnixNano   string `json:"timeUnixNano"`
+	SeverityNumber int    `json:"severityNumber"`
+	SeverityText   string `json:"severityText"`
+	Body           struct {
 		StringValue *string `json:"stringValue,omitempty"`
 	} `json:"body"`
 	Attributes []keyValue `json:"attributes"`
@@ -72,6 +75,9 @@ type parsedRecord struct {
 	attrs    map[string]anyValue
 	resource map[string]anyValue
 	seq      uint64
+	timeNano int64
+	severity int
+	level    string
 }
 
 func main() {
@@ -250,12 +256,19 @@ func readRecords(path string) ([]parsedRecord, error) {
 		if err != nil {
 			return nil, err
 		}
+		timeNano, err := strconv.ParseInt(wire.TimeUnixNano, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid timeUnixNano: %w", err)
+		}
 		result = append(result, parsedRecord{
 			raw:      append([]byte(nil), line...),
 			body:     *wire.Body.StringValue,
 			attrs:    attrs,
 			resource: resource,
 			seq:      sequence,
+			timeNano: timeNano,
+			severity: wire.SeverityNumber,
+			level:    wire.SeverityText,
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -336,6 +349,14 @@ func verifyWindow(window []parsedRecord, anchor parsedRecord, certificatePath, e
 		var sequence [8]byte
 		binary.BigEndian.PutUint64(sequence[:], record.seq)
 		hash.Write(sequence[:])
+		binary.BigEndian.PutUint64(sequence[:], uint64(record.timeNano))
+		hash.Write(sequence[:])
+		var severity [4]byte
+		binary.BigEndian.PutUint32(severity[:], uint32(record.severity))
+		hash.Write(severity[:])
+		binary.BigEndian.PutUint32(severity[:], uint32(len(record.level)))
+		hash.Write(severity[:])
+		hash.Write([]byte(record.level))
 		hash.Write(payloadHash[:])
 		previous = hash.Sum(nil)
 		if hex.EncodeToString(previous) != stringAttr(record.attrs, "airgap.log.chain") {

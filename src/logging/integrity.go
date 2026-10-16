@@ -11,12 +11,14 @@ import (
 	"hash"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Attribute names used for log integrity. They live in a vendor-specific
 // namespace, which the OpenTelemetry log data model permits for attributes that
 // are not covered by a semantic convention.
 const (
+	AttrIntegrityVersion  = "airgap.log.integrity.version"
 	AttrHashAlg           = "airgap.log.hash.alg"
 	AttrHash              = "airgap.log.hash"
 	AttrSequence          = "airgap.log.seq"
@@ -32,6 +34,7 @@ const (
 	AttrSignerID          = "airgap.log.signer.id"
 	AttrKeyID             = "airgap.log.key.id"
 	AttrCertificateSerial = "airgap.log.certificate.serial"
+	AttrCertificateDER    = "airgap.log.certificate.der"
 	AttrSignatureError    = "airgap.log.signature.error"
 	AttrProcessStart      = "airgap.log.process.start_unix_nano"
 	AttrRunID             = "airgap.log.run.id"
@@ -46,6 +49,18 @@ const (
 // chainDomain separates these hashes from any other use of the same algorithm,
 // so a chain value can never be mistaken for a hash computed elsewhere.
 const chainDomain = "airgap-log-chain-v1"
+
+// integrityVersion names the Air-gap Log Integrity Format that produced a
+// record. It is emitted on every stamped record so that a verifier can select
+// the hashing, chaining and checkpoint rules from the record itself instead of
+// knowing out of band which version wrote the log. It is also the version
+// framed into the signed checkpoint statement, so the two can never drift.
+//
+// The value is deliberately not part of any hash input. Record hashes cover the
+// body only, and the checkpoint statement frames this version explicitly, so
+// rewriting the attribute makes a verifier apply rules that then fail rather
+// than letting it silently downgrade.
+const integrityVersion = "v1"
 
 // anchorBody is the body of a generated anchor record. It is constant so that
 // an anchor is recognisable without parsing attributes.
@@ -210,10 +225,9 @@ func (s *integrityState) chainingEnabled() bool {
 // stamp consumes the next sequence number and returns the integrity attributes
 // for a record. The hash input is exactly the UTF-8 bytes of the fully formatted
 // body string before JSON escaping. No OTLP envelope serialization or JSON
-// canonicalization is involved. This keeps the hash stable across a collector
-// that rewrites metadata, at the cost of leaving those fields outside the hash
-// until signatures cover them.
-func (s *integrityState) stamp(body string) []Attr {
+// canonicalization is involved. The chain separately commits to the original
+// event timestamp, severity number and severity text.
+func (s *integrityState) stamp(timestamp time.Time, level LogLevel, body string) []Attr {
 	if !s.enabled {
 		return nil
 	}
@@ -226,6 +240,7 @@ func (s *integrityState) stamp(body string) []Attr {
 	s.seq++
 
 	attrs := []Attr{
+		{Key: AttrIntegrityVersion, Value: integrityVersion},
 		{Key: AttrHashAlg, Value: s.algorithm.name},
 		{Key: AttrHash, Value: hex.EncodeToString(payloadHash)},
 		{Key: AttrSequence, Value: strconv.FormatUint(seq, 10), IsInt: true},
@@ -237,7 +252,14 @@ func (s *integrityState) stamp(body string) []Attr {
 	}
 
 	previous := s.chain
-	s.chain = s.advanceChain(previous, seq, payloadHash)
+	s.chain = s.advanceChain(
+		previous,
+		seq,
+		timestamp.UnixNano(),
+		severityNumber(level),
+		severityText(level),
+		payloadHash,
+	)
 	s.sinceAnchor++
 
 	// chain.prev makes a record verifiable against its predecessor without
@@ -257,21 +279,42 @@ func (s *integrityState) stamp(body string) []Attr {
 	return attrs
 }
 
-// advanceChain folds one record into the chain. The sequence number is part of
-// the input so that reordering records invalidates the chain even when two
-// payloads are identical, which is common in logs.
-func (s *integrityState) advanceChain(previous []byte, seq uint64, payloadHash []byte) []byte {
+// advanceChain folds one record into the chain. Sequence, timestamp and severity
+// are part of the input, so reordering or editing operator-visible metadata
+// invalidates the chain even when two payloads are identical.
+func (s *integrityState) advanceChain(
+	previous []byte,
+	seq uint64,
+	timeUnixNano int64,
+	severityNo int,
+	severity string,
+	payloadHash []byte,
+) []byte {
 	h := s.algorithm.factory()
 	h.Write([]byte(chainDomain))
 	h.Write([]byte{0})
 	h.Write(previous)
 
-	seqBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(seqBytes, seq)
-	h.Write(seqBytes)
+	var fixed [8]byte
+	binary.BigEndian.PutUint64(fixed[:], seq)
+	h.Write(fixed[:])
+	binary.BigEndian.PutUint64(fixed[:], uint64(timeUnixNano))
+	h.Write(fixed[:])
+
+	var severityBytes [4]byte
+	binary.BigEndian.PutUint32(severityBytes[:], uint32(severityNo))
+	h.Write(severityBytes[:])
+	writeFramedHashString(h, severity)
 	h.Write(payloadHash)
 
 	return h.Sum(nil)
+}
+
+func writeFramedHashString(h hash.Hash, value string) {
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+	h.Write(length[:])
+	h.Write([]byte(value))
 }
 
 // anchorDue reports whether an anchor record should follow the record that was

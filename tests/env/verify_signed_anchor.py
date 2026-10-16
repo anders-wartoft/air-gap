@@ -13,6 +13,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 CHAIN_DOMAIN = b"airgap-log-chain-v1\x00"
 CHECKPOINT_DOMAIN = b"airgap-log-checkpoint-v1\x00"
+FORMAT_VERSION = "v1"
+VERSION_ATTRIBUTE = "airgap.log.integrity.version"
 
 
 def fail(message):
@@ -45,6 +47,18 @@ def value(attrs, key):
     if "boolValue" in item:
         return item["boolValue"]
     fail(f"unsupported attribute value: {key}")
+
+
+def optional(attrs, key, default=None):
+    """Read an attribute that legitimately appears on only some records.
+
+    Marker attributes such as airgap.log.anchor are present only on the records
+    they describe, so probing for them with value() would reject every ordinary
+    record in the window.
+    """
+    if key not in attrs:
+        return default
+    return value(attrs, key)
 
 
 def text(attrs, key):
@@ -116,16 +130,34 @@ def verify_key(registry_path, key_id, signer_id):
     return key
 
 
+def declared_version(attrs):
+    """Read the format version from the record instead of assuming it.
+
+    Records written before the attribute existed carry no version. They are
+    Version 1 by definition, because no other version was ever emitted.
+    """
+    if VERSION_ATTRIBUTE not in attrs:
+        return None
+    version = text(attrs, VERSION_ATTRIBUTE)
+    if version != FORMAT_VERSION:
+        fail(
+            f"record declares integrity format {version!r}; this verifier "
+            f"implements {FORMAT_VERSION!r} only"
+        )
+    return version
+
+
 def verify(path, registry_path):
     items = sorted(records(path), key=lambda item: int(value(item[2], "airgap.log.seq")))
     anchors = [
         item for item in items
-        if value(item[2], "airgap.log.anchor") is True
+        if optional(item[2], "airgap.log.anchor") is True
     ]
     if len(anchors) != 1 or anchors[0] is not items[-1]:
         fail("export must contain exactly one final anchor")
 
     resource, _, anchor = anchors[0]
+    anchor_version = declared_version(anchor)
     run_id = text(anchor, "airgap.log.run.id")
     segment_id = text(anchor, "airgap.log.segment.id")
     window_id = text(anchor, "airgap.log.window.id")
@@ -144,8 +176,9 @@ def verify(path, registry_path):
             or text(attrs, "airgap.log.segment.id") != segment_id
             or text(attrs, "airgap.log.window.id") != window_id
             or text(attrs, "airgap.log.hash.alg") != algorithm
+            or declared_version(attrs) != anchor_version
         ):
-            fail("inconsistent window identity or hash algorithm")
+            fail("inconsistent window identity, hash algorithm or format version")
         body = record["body"]["stringValue"]
         payload_hash = digest(algorithm, body.encode())
         if payload_hash.hex() != text(attrs, "airgap.log.hash"):
@@ -156,9 +189,18 @@ def verify(path, registry_path):
         if index == len(items) - 1 and chain_previous != anchor_previous:
             fail("anchor does not follow the final record in the window")
         sequence = int(value(attrs, "airgap.log.seq")).to_bytes(8, "big")
+        time_unix_nano = int(record["timeUnixNano"]).to_bytes(8, "big")
+        severity_number = int(record["severityNumber"]).to_bytes(4, "big")
+        severity_text = str(record["severityText"]).encode("utf-8")
         chain = digest(
             algorithm,
-            CHAIN_DOMAIN + chain_previous + sequence + payload_hash,
+            CHAIN_DOMAIN
+            + chain_previous
+            + sequence
+            + time_unix_nano
+            + severity_number
+            + frame(severity_text)
+            + payload_hash,
         )
         if chain.hex() != text(attrs, "airgap.log.chain"):
             fail(f"chain mismatch at sequence {value(attrs, 'airgap.log.seq')}")
@@ -170,8 +212,7 @@ def verify(path, registry_path):
     statement = b"".join(
         [
             CHECKPOINT_DOMAIN,
-            b"\x00",
-            frame("v1"),
+            frame(anchor_version or FORMAT_VERSION),
             frame(algorithm),
             frame(text(anchor, "airgap.log.signature.alg")),
             frame(text(anchor, "airgap.log.signer.id")),

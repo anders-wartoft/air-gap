@@ -5527,3 +5527,317 @@ A reload releases the rotated file, so logrotate reclaims its disk space
 immediately rather than at the next service restart. Application records and
 Kafka client records both follow the reopened file, and repeated rotations do
 not accumulate descriptors.
+
+## TC-36 — Kibana log integrity report
+
+Create an operator-facing integrity report for all events returned by a Kibana
+query, normally selected by a case tag. The report must show the integrity
+version from the event JSON, check every available hash and chain, and fail
+closed for signature material until cryptographic signature verification is
+implemented.
+
+* Covers: log integrity verification
+* Implemented in: 0.1.15-SNAPSHOT
+* Runner: `./run-testcase.sh 36`
+
+The runner prints the stdout and the full report of every case, so a
+command-line run shows exactly what an operator would see rather than only the
+final verdict. Set `TC36_QUIET=1` to print the verdict alone.
+
+### Setup
+
+TC-36 is independent of the Kafka transfer Compose topology. It starts a fake
+Kibana HTTP endpoint and runs the report script inside a Python 3.12 Docker
+container. The endpoint returns OTLP-shaped Elasticsearch hits and requires the
+API key from the temporary credentials file.
+
+The operator script can also be used directly against Kibana:
+
+```bash
+python3 verify_integrity_report.py \
+  --kibana-url https://kibana.example.com \
+  --credentials-file case-1234-kibana.json \
+  --index 'logs-*' \
+  --query 'tags:case-1234' \
+  --date-from 2026-10-10T10:00:00.000Z \
+  --date-to 2026-10-10T12:00:00.000Z \
+  --max-details 10 \
+  --report-file case-1234-integrity.txt
+```
+
+`--query` takes an Elasticsearch **query-string** expression, not EQL, KQL, or
+a Dev Tools request body. The script inserts the value verbatim into the
+`query_string` clause below and sends that body to
+`POST <index>/_search` through the Kibana console proxy:
+
+```json
+{
+  "size": 100,
+  "track_total_hits": true,
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "query_string": {
+            "query": "VALUE OF --query"
+          }
+        },
+        {
+          "range": {
+            "@timestamp": {
+              "gte": "VALUE OF --date-from",
+              "lte": "VALUE OF --date-to",
+              "format": "strict_date_optional_time_nanos"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "sort": [
+    {
+      "@timestamp": {
+        "order": "asc"
+      }
+    }
+  ]
+}
+```
+
+The `range` filter is present only when `--date-from` or `--date-to` is given.
+Passing a JSON object to `--query` therefore does not work: it is searched for
+as literal text.
+
+An operator holding a saved EQL search uses `--eql` instead, which is sent to
+`POST <index>/_eql/search` with `@timestamp` as the timestamp field,
+`event.category` as the event-category field, and the date bounds as the EQL
+`filter`:
+
+```bash
+python3 verify_integrity_report.py \
+  --credentials-file case-1234-kibana.json \
+  --eql 'any where tags == "case-1234"' \
+  --date-from 2026-10-10T10:00:00.000Z
+```
+
+`--query` and `--eql` are mutually exclusive; both accept `--date-from` and
+`--date-to`. The date bounds and the selection syntax apply only to the case
+query. Automatically fetched evidence always uses unbounded `query_string`
+searches, so a window or rotation event outside the operator's time range is
+still acquired and verified.
+
+The credentials file may contain an API key:
+
+```json
+{
+  "kibana_url": "https://kibana.example.com",
+  "api_key": "base64:..."
+}
+```
+
+or basic-auth credentials:
+
+```json
+{
+  "kibana_url": "https://kibana.example.com",
+  "username": "svc-operator",
+  "password": "secret"
+}
+```
+
+`--kibana-url` overrides `kibana_url`. A saved Elasticsearch response can be
+checked with `--events-file` instead of querying Kibana.
+
+### Automated procedure
+
+1. Build the pinned verifier image and run its focused unit tests. Require an
+   expired leaf that was valid at the protected event timestamp to produce a
+   🧣 warning while the result remains `PASS`; require expiry at event time to
+   fail. Reconstruct the public Version 1 chain and signed-checkpoint vector
+   byte-for-byte, including the SPKI key ID and deterministic Ed25519
+   signature.
+2. Start the fake Kibana endpoint.
+3. Run `verify_integrity_report.py` in the Python 3.12 container with an API
+   key, an index pattern, and the query `tags:case-36`.
+4. Return eleven valid events, forcing the result count above the default
+   ten-event detail limit.
+5. Verify that stdout contains the compact summary and the full report file
+   contains all event details and ends with `Overall result: ✅`.
+6. Verify two independent run/segment chains when their events are
+   interleaved.
+7. Verify that `airgap.log.chain.restart=true` opens an explicitly declared
+   continuity boundary.
+8. Return, in one query, an unsupported version, a malformed hit, a tampered
+   hash, an event with a deleted chain value, and a valid event after those
+   failures.
+9. Verify that every event is reported, that the valid event after the errors
+   is still checked, and that both stdout and the full report end with
+   `Overall result: ❌`.
+10. Repeat the Kibana query and the interleaved-chain case with an edited
+   message body, and require both to fail. See **Negative control** below.
+11. Repeat the Kibana query with `--size=5` while eleven events match. Require
+    the verifier to reject the truncated result instead of reporting a green
+    result for the five returned events.
+
+### Expected result
+
+```text
+✅ PASS 11 event(s) checked: 11 passed, 0 failed
+Full report written to .../report.txt
+Overall result: ✅
+─── TC-36 Kibana integrity report verification: PASS ───
+```
+
+The negative-control runs fail instead, naming the event they caught:
+
+```text
+❌ FAIL 11 event(s) checked: 10 passed, 1 failed
+[hash] ❌ FAILED (SHA256): recorded 5f340d…, computed 2c2b66…
+[chain] ❌ value FAILED (SHA256): recorded 4ded2c…, computed c69afa…
+Overall result: ❌
+```
+
+A truncated query fails before verification and explains how to retrieve the
+complete case:
+
+```text
+❌ Kibana query matched 11 event(s), but returned 5 because --size=5; increase --size so every matching event can be verified
+Overall result: ❌
+```
+
+### Negative control
+
+Every positive case has a matching negative control, each built by editing a
+message body. Without them, a verifier that never recomputes a digest would
+report the positive cases as passing.
+
+1. **Complete result set.** The query `tags:case-36-truncated` matches eleven
+   events but requests only five. The verifier must fail closed using
+   Elasticsearch's exact `hits.total`; it must never issue a green report for
+   a partial case.
+2. **Kibana path.** The query `tags:case-36-tampered` returns the same eleven
+   events with one body edited after indexing and its recorded hash left
+   untouched. The body-hash layer must report `[hash] ❌ FAILED` for that event,
+   the other ten must still pass, and the run must fail.
+3. **Interleaved chains.** One body is edited *and* its `airgap.log.hash` is
+   recomputed to match, so the body-hash layer accepts it. Only the chain value
+   still commits to the original body, so the chain layer must report
+   `[chain] ❌ value FAILED`.
+4. **Mixed failures.** The tampered event in the mixed result set is also a
+   genuine body edit, verified alongside the unsupported version, malformed
+   hit, and deleted chain value.
+
+Each control must exit non-zero, name the offending event, leave the untouched
+events reported as passing, and end both stdout and the full report with
+`Overall result: ❌`.
+If any control ever passes, the corresponding positive case proves nothing.
+
+### What it proves
+
+An operator can query a tagged case, authenticate to Kibana with an API key or
+basic credentials, and receive a compact pass/fail answer with an attachable
+full report. The verifier does not silently downgrade unknown versions,
+mistake independent chains for broken chains, accept undeclared chain breaks,
+or report unchecked signature material as valid.
+
+## TC-37 — Signed hash-chain rotation and automatic evidence acquisition
+
+Verify a CA-issued log-signing certificate, an old-key-authenticated live
+rotation, and automatic retrieval of every signed window needed to prove one
+operator-selected event.
+
+* Covers: REQ-52.11, REQ-52.12
+* Implemented in: 0.1.15-SNAPSHOT
+* Runner: `./run-testcase.sh 37`
+
+The runner prints the complete positive report and all three negative-control
+reports, including every selected and automatically fetched evidence event.
+Set `TC37_QUIET=1` to print only the testcase verdict.
+
+### Setup
+
+The standalone runner follows the Compose override pattern used by TC-34 and
+TC-35. It combines `docker-compose.kafka-transfer.yml` with
+`docker-compose.tc37.yml` under a unique project name and starts:
+
+1. a real `airgap-upstream` process built from the current source;
+2. Elasticsearch 8.15.3; and
+3. Kibana 8.15.3 using that Elasticsearch node.
+
+The runner generates an Ed25519 CA and two CA-issued leaf certificates sharing
+the signer URI `urn:airgap:test:tc37`. The real upstream writes OTLP JSON logs
+with a three-record SHA-256 chain and old-key-signed anchors. After one complete
+window exists, `configure-log-signing.py` atomically installs the replacement
+paths and the runner sends `SIGHUP` to PID 1 in the upstream container. The
+upstream then writes the certificate-rotation STATUS record, closes it with an
+old-key signature, activates the replacement, and produces a complete
+new-key-signed window.
+
+The loader preserves every original OTLP JSON record in `event.original` and
+materializes `@timestamp`, `tags`, `service.name`,
+`airgap.log.run.id`, `airgap.log.window.id`, `airgap.log.seq`, and
+`airgap.log.signing.new.key.id` as searchable Elasticsearch fields. It creates
+separate good, changed-body, changed-timestamp, changed-severity, changed-hash,
+and changed-signature indices. The
+case tag is attached to one ordinary event in the new-key-signed window.
+Signature and certificate verification run in-process through pinned Python
+`cryptography` and `pyOpenSSL` packages, with the generated CA as the only
+initial trust root; the verifier does not invoke an OpenSSL subprocess.
+
+### Automated procedure
+
+1. Generate the CA plus old and new leaf certificates, and build the real
+   upstream binary.
+2. Start the upstream, Elasticsearch, and Kibana through the TC-37 Compose
+   override and wait for all three to become ready.
+3. Wait for the upstream to write an old-key-signed window, update its
+   configuration through the provisioning script, and send `SIGHUP`.
+4. Wait for the real process to write an authenticated rotation and a complete
+   new-key-signed window.
+5. Index the preserved upstream records and searchable integrity fields into
+   real Elasticsearch.
+6. Send the verifier's JSON `query_string` wrapper directly to Elasticsearch
+   with a tagged expression and an `@timestamp` range filter. Require exactly
+   one selected event.
+7. Call `verify_integrity_report.py` against real Kibana with that same
+   expression and `--date-from`.
+8. Require the verifier to fetch that record's complete run/window and its
+   new-key-signed anchor.
+9. Because the new key is not initially trusted, require a second evidence
+   query for the unique rotation window announcing its key ID.
+10. Validate the old anchor certificate against the CA, verify the rotation
+   window and old-key signature, validate the announced new certificate, and
+   then verify the selected window's new-key signature.
+11. Report the original record as `selected` and all additional records as
+   automatically fetched `evidence`.
+12. Repeat the positive verification with a real `--eql` query and the same
+   `--date-from`, requiring the same selected event, the same automatically
+   fetched evidence, and the same verified signature.
+13. Repeat through real Elasticsearch and Kibana with the selected body,
+   original timestamp, severity, and recorded hash changed, and with the
+   anchor signature changed. Each mutation must fail at the corresponding
+   layer and end with `Overall result: ❌`.
+
+### Expected result
+
+```text
+real Elasticsearch selected exactly one signed case event
+selection=1 selected event(s); additional evidence automatically fetched
+[hash] ✅ OK (SHA256)
+[chain] ✅ value OK (SHA256)
+[signature] ✅ verified (Ed25519)
+Overall result: ✅
+✅ tc37-signed-chain-test passed
+```
+
+### What it proves
+
+The result is not based on fabricated search responses or logger-only fixture
+objects. A real Air-gap service produces and rotates the signed chain, real
+Elasticsearch executes the case and evidence queries, and real Kibana proxies
+the verifier requests. An operator needs only the case query. The verifier
+fetches bounded, identity-specific evidence, establishes the initial signer
+through the configured CA, follows an old-key-authenticated certificate
+transition, and rejects changed contents, hashes, or signatures. A running
+service can adopt a CA-issued replacement on `SIGHUP` without an
+unauthenticated gap in its local log chain.

@@ -93,7 +93,8 @@ const (
 	EventCreateFileWrite = "create.file.write"
 
 	// Log integrity. The anchor record closes a hash chain window.
-	EventLogAnchor = "log.integrity.anchor"
+	EventLogAnchor                   = "log.integrity.anchor"
+	EventLogSigningCertificateRotate = "log.integrity.signing_certificate.rotate"
 
 	// Operational reporting that does not belong to a single domain.
 	EventStatsReport    = "stats.report"

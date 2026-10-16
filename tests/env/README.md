@@ -40,7 +40,11 @@ first: relative paths and merge behavior are resolved from that model. Validate
 each merged model with `docker compose ... config` when changing either file.
 
 TC-34 and TC-35 use this convention. Their runners set `TC_WORK` and invoke
-both files automatically.
+both files automatically. TC-36 is a standalone Python/Docker testcase and is
+documented in the [testcase catalogue](../documents/TESTCASES.md#tc-36--kibana-log-integrity-report).
+TC-36 and TC-37 build `Dockerfile.integrity-report`, which pins the in-process
+Python cryptography dependencies used by the operator verifier; neither test
+depends on the host's OpenSSL executable or LibreSSL behavior.
 
 ## Topology
 

@@ -106,7 +106,7 @@ func writeRecord(timestamp time.Time, level LogLevel, body string, semantic Attr
 	if level >= ERROR {
 		semantic = semantic.With(Failure())
 	}
-	stamped := integrity.stamp(body)
+	stamped := integrity.stamp(timestamp, level, body)
 	writeRecordWithStamp(timestamp, level, body, semantic, extra, stamped)
 	return stamped
 }
@@ -178,20 +178,29 @@ func emit(level LogLevel, attrs Attrs, body string) {
 	writeRecord(now, level, body, attrs, nil)
 
 	if integrity.anchorDue() {
-		anchorAttrs := integrity.anchorAttributes()
-		anchorStamped := integrity.stamp(anchorBody)
-		signatureAttrs, err := integrity.signAnchor(anchorAttrs, anchorStamped)
-		if err != nil {
+		if err := writeAnchorLocked(now); err != nil {
 			logger.Printf("[ERROR] failed to sign log checkpoint: %v", err)
-			signatureAttrs = []Attr{{
-				Key:   AttrSignatureError,
-				Value: err.Error(),
-			}}
 		}
-		anchorAttrs = append(anchorAttrs, signatureAttrs...)
-		writeRecordWithStamp(now, INFO, anchorBody, Event(EventLogAnchor), anchorAttrs, anchorStamped)
-		integrity.finishAnchor()
 	}
+}
+
+// writeAnchorLocked closes the current window. The caller must hold emitMu.
+func writeAnchorLocked(timestamp time.Time) error {
+	anchorAttrs := integrity.anchorAttributes()
+	anchorStamped := integrity.stamp(timestamp, INFO, anchorBody)
+	signatureAttrs, err := integrity.signAnchor(anchorAttrs, anchorStamped)
+	if err != nil {
+		signatureAttrs = []Attr{{
+			Key:   AttrSignatureError,
+			Value: err.Error(),
+		}}
+	}
+	anchorAttrs = append(anchorAttrs, signatureAttrs...)
+	writeRecordWithStamp(
+		timestamp, INFO, anchorBody, Event(EventLogAnchor), anchorAttrs, anchorStamped,
+	)
+	integrity.finishAnchor()
+	return err
 }
 
 // format renders the body. A call without arguments is taken literally, so that

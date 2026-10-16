@@ -553,6 +553,19 @@ func Main(build string) {
 					Logger.Errorf(hupAttrs.Merge(logging.Err(err)), "Failed reopening log file: %v", err)
 				}
 			}
+			if fileName != "" {
+				rotation, err := Logger.ReloadSigningCertificate(fileName)
+				if err != nil {
+					Logger.Errorf(logging.Event(
+						logging.EventLogSigningCertificateRotate,
+						logging.Failure(),
+						logging.Str("file.path", fileName),
+						logging.ErrorType(err),
+					), "Log-signing certificate reload failed: %v", err)
+				} else if rotation.Authenticated {
+					sendMessage(protocol.TYPE_STATUS, "", config.topic, rotation.Status)
+				}
+			}
 			if tcpAdapter, ok := receiver.(*TCPAdapter); ok {
 				var err error
 				if tcpAdapter.pinned {

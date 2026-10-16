@@ -1,0 +1,53 @@
+services:
+  tc37-upstream:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-kafka-transfer:local
+    hostname: tc37-upstream
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - ${TC_WORK:?TC_WORK is required}:${TC_WORK}
+    environment:
+      AIRGAP_CONFIG: ${TC_WORK}/upstream.properties
+    command: ["upstream"]
+    restart: "no"
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.license.self_generated.type: basic
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - target: 9200
+        published: 0
+        host_ip: 127.0.0.1
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS
+          'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=1s'
+          >/dev/null
+      interval: 3s
+      timeout: 2s
+      retries: 60
+    restart: "no"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      XPACK_SECURITY_ENABLED: "false"
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - target: 5601
+        published: 0
+        host_ip: 127.0.0.1
+    restart: "no"

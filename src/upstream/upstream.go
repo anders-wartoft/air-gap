@@ -1032,6 +1032,34 @@ func Main(build string) {
 						), "Failed reopening log file: %v", err)
 					}
 				}
+				if fileName != "" {
+					rotation, err := Logger.ReloadSigningCertificate(fileName)
+					if err != nil {
+						Logger.Errorf(logging.Event(
+							logging.EventLogSigningCertificateRotate,
+							logging.Failure(),
+							logging.Str("file.path", fileName),
+							logging.ErrorType(err),
+						), "Log-signing certificate reload failed: %v", err)
+					} else if rotation.Authenticated {
+						messages := protocol.FormatMessage(
+							protocol.TYPE_STATUS,
+							"STATUS",
+							rotation.Status,
+							config.payloadSize,
+						)
+						for _, message := range messages {
+							if err := transportAdapter.SendMessage(message); err != nil {
+								Logger.Errorf(logging.Event(
+									logging.EventLogSigningCertificateRotate,
+									logging.Failure(),
+									logging.ErrorType(err),
+								), "Could not send log-signing certificate rotation STATUS: %v", err)
+								break
+							}
+						}
+					}
+				}
 				if tcpAdapter, ok := transportAdapter.(*TCPAdapter); ok {
 					var err error
 					if tcpAdapter.pinned {

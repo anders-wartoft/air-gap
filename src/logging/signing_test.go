@@ -8,10 +8,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -155,6 +157,214 @@ func TestSigningConfigurationCanBeAppliedInAnyFileOrder(t *testing.T) {
 	if integrity.signer == nil {
 		t.Fatal("signer was not enabled after all signing options were applied")
 	}
+}
+
+func TestRotateSigningCertificateAuthenticatesNewCertificateWithOldKey(t *testing.T) {
+	buf := resetLogging(t)
+	mustSetOTel(t)
+	if err := Logger.SetHashAlgorithm("SHA256"); err != nil {
+		t.Fatalf("SetHashAlgorithm: %v", err)
+	}
+	if err := Logger.SetHashChainLength(10); err != nil {
+		t.Fatalf("SetHashChainLength: %v", err)
+	}
+
+	oldCert, oldKey, _ := writeTestSigningCertificate(
+		t, t.TempDir(), x509.KeyUsageDigitalSignature,
+	)
+	newCert, newKey, _ := writeTestSigningCertificate(
+		t, t.TempDir(), x509.KeyUsageDigitalSignature,
+	)
+	if err := Logger.SetSigningCertificate(
+		oldCert, oldKey, "urn:airgap:test:signer", "",
+	); err != nil {
+		t.Fatalf("SetSigningCertificate(old): %v", err)
+	}
+	oldKeyID := integrity.signer.keyID
+
+	rotation, err := Logger.RotateSigningCertificate(
+		newCert, newKey, "urn:airgap:test:signer", "",
+	)
+	if err != nil {
+		t.Fatalf("RotateSigningCertificate: %v", err)
+	}
+	if !rotation.Changed || !rotation.Authenticated {
+		t.Fatalf("rotation = %#v, want changed authenticated rotation", rotation)
+	}
+	if rotation.OldKeyID != oldKeyID || rotation.NewKeyID == oldKeyID {
+		t.Fatalf("rotation key IDs = old %q new %q", rotation.OldKeyID, rotation.NewKeyID)
+	}
+
+	records := decodeOTLPLines(t, buf.String())
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want rotation STATUS plus forced anchor", len(records))
+	}
+	status := records[0]
+	if status.eventName != EventLogSigningCertificateRotate {
+		t.Fatalf("rotation eventName = %q", status.eventName)
+	}
+	if status.body != string(rotation.Status) {
+		t.Fatalf("local body and downstream STATUS differ:\nlocal: %s\nstatus: %s",
+			status.body, rotation.Status)
+	}
+	var announcement SigningCertificateRotationAnnouncement
+	if err := json.Unmarshal([]byte(status.body), &announcement); err != nil {
+		t.Fatalf("rotation body is not JSON: %v", err)
+	}
+	if announcement.OldKeyID != rotation.OldKeyID ||
+		announcement.NewKeyID != rotation.NewKeyID ||
+		!strings.Contains(announcement.NewCertificatePEM, "BEGIN CERTIFICATE") {
+		t.Fatalf("rotation announcement = %#v", announcement)
+	}
+
+	anchor := records[1]
+	if anchor.eventName != EventLogAnchor {
+		t.Fatalf("second eventName = %q, want %q", anchor.eventName, EventLogAnchor)
+	}
+	if !recordSignatureVerifies(t, anchor, oldCert) {
+		t.Fatal("rotation anchor was not signed by the old certificate")
+	}
+	if recordSignatureVerifies(t, anchor, newCert) {
+		t.Fatal("rotation anchor unexpectedly verifies with the new certificate")
+	}
+	if integrity.signer.keyID != rotation.NewKeyID {
+		t.Fatalf("active signer = %q, want %q", integrity.signer.keyID, rotation.NewKeyID)
+	}
+}
+
+func TestRotateSigningCertificateRejectsCandidateAndKeepsOldSigner(t *testing.T) {
+	resetLogging(t)
+	oldCert, oldKey, _ := writeTestSigningCertificate(
+		t, t.TempDir(), x509.KeyUsageDigitalSignature,
+	)
+	newCert, _, _ := writeTestSigningCertificate(
+		t, t.TempDir(), x509.KeyUsageDigitalSignature,
+	)
+	_, unrelatedKey, _ := writeTestSigningCertificate(
+		t, t.TempDir(), x509.KeyUsageDigitalSignature,
+	)
+	if err := Logger.SetSigningCertificate(
+		oldCert, oldKey, "urn:airgap:test:signer", "",
+	); err != nil {
+		t.Fatalf("SetSigningCertificate(old): %v", err)
+	}
+	oldKeyID := integrity.signer.keyID
+
+	if _, err := Logger.RotateSigningCertificate(
+		newCert, unrelatedKey, "urn:airgap:test:signer", "",
+	); err == nil {
+		t.Fatal("mismatched certificate and key were accepted")
+	}
+	if integrity.signer == nil || integrity.signer.keyID != oldKeyID {
+		t.Fatalf("active signer changed after rejected rotation: %#v", integrity.signer)
+	}
+}
+
+func TestRotateSigningCertificateWithUnchangedKeyIsNoOp(t *testing.T) {
+	buf := resetLogging(t)
+	certPath, keyPath, _ := writeTestSigningCertificate(
+		t, t.TempDir(), x509.KeyUsageDigitalSignature,
+	)
+	if err := Logger.SetSigningCertificate(
+		certPath, keyPath, "urn:airgap:test:signer", "",
+	); err != nil {
+		t.Fatalf("SetSigningCertificate: %v", err)
+	}
+
+	rotation, err := Logger.RotateSigningCertificate(
+		certPath, keyPath, "urn:airgap:test:signer", "",
+	)
+	if err != nil {
+		t.Fatalf("RotateSigningCertificate: %v", err)
+	}
+	if rotation.Changed {
+		t.Fatalf("unchanged key reported a rotation: %#v", rotation)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("unchanged key emitted log records:\n%s", buf)
+	}
+}
+
+func TestReloadSigningCertificateReadsChangedConfiguration(t *testing.T) {
+	buf := resetLogging(t)
+	mustSetOTel(t)
+	if err := Logger.SetHashAlgorithm("SHA256"); err != nil {
+		t.Fatalf("SetHashAlgorithm: %v", err)
+	}
+	if err := Logger.SetHashChainLength(10); err != nil {
+		t.Fatalf("SetHashChainLength: %v", err)
+	}
+	oldCert, oldKey, _ := writeTestSigningCertificate(
+		t, t.TempDir(), x509.KeyUsageDigitalSignature,
+	)
+	newCert, newKey, _ := writeTestSigningCertificate(
+		t, t.TempDir(), x509.KeyUsageDigitalSignature,
+	)
+	if err := Logger.SetSigningCertificate(
+		oldCert, oldKey, "urn:airgap:test:signer", "",
+	); err != nil {
+		t.Fatalf("SetSigningCertificate(old): %v", err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "upstream.conf")
+	config := strings.Join([]string{
+		"log-signing-cert=" + newCert,
+		"log-signing-key=" + newKey,
+		"log-signer-id=urn:airgap:test:signer",
+		"log-signing-eku=",
+		"",
+	}, "\n")
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	rotation, err := Logger.ReloadSigningCertificate(configPath)
+	if err != nil {
+		t.Fatalf("ReloadSigningCertificate: %v", err)
+	}
+	if !rotation.Changed || !rotation.Authenticated {
+		t.Fatalf("rotation = %#v", rotation)
+	}
+	if len(decodeOTLPLines(t, buf.String())) != 2 {
+		t.Fatalf("reload output:\n%s", buf)
+	}
+}
+
+func TestReloadSigningCertificateWithoutSigningConfigurationIsNoOp(t *testing.T) {
+	resetLogging(t)
+	configPath := filepath.Join(t.TempDir(), "upstream.conf")
+	if err := os.WriteFile(configPath, []byte("id=test\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	rotation, err := Logger.ReloadSigningCertificate(configPath)
+	if err != nil {
+		t.Fatalf("ReloadSigningCertificate: %v", err)
+	}
+	if rotation.Changed || rotation.Authenticated || len(rotation.Status) != 0 {
+		t.Fatalf("unsigned reload = %#v, want no-op", rotation)
+	}
+}
+
+func recordSignatureVerifies(t *testing.T, record decodedRecord, certificatePath string) bool {
+	t.Helper()
+	certificate, err := x509.ParseCertificate(loadPEMCertificate(t, certificatePath))
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	publicKey, ok := certificate.PublicKey.(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("certificate key is not Ed25519")
+	}
+	checkpointHash, err := hex.DecodeString(record.attributes[AttrCheckpointHash])
+	if err != nil {
+		t.Fatalf("DecodeString(checkpoint): %v", err)
+	}
+	signature, err := base64.StdEncoding.DecodeString(record.attributes[AttrSignature])
+	if err != nil {
+		t.Fatalf("DecodeString(signature): %v", err)
+	}
+	return ed25519.Verify(publicKey, checkpointHash, signature)
 }
 
 func loadPEMCertificate(t *testing.T, path string) []byte {

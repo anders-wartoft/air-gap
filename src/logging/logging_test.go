@@ -312,6 +312,20 @@ func TestChainMatchesDocumentedFormula(t *testing.T) {
 		seqBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(seqBytes, seq)
 		h.Write(seqBytes)
+
+		timeNanos, err := strconv.ParseInt(record.timeNanos, 10, 64)
+		if err != nil {
+			t.Fatalf("record %d has an unparsable timestamp: %v", index, err)
+		}
+		binary.BigEndian.PutUint64(seqBytes, uint64(timeNanos))
+		h.Write(seqBytes)
+
+		severityBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(severityBytes, uint32(record.severityNo))
+		h.Write(severityBytes)
+		binary.BigEndian.PutUint32(severityBytes, uint32(len(record.severity)))
+		h.Write(severityBytes)
+		h.Write([]byte(record.severity))
 		h.Write(payloadHash)
 
 		want := hex.EncodeToString(h.Sum(nil))
@@ -330,6 +344,7 @@ func TestTamperedPayloadBreaksTheChain(t *testing.T) {
 	if err := Logger.SetFormat(FormatOTel); err != nil {
 		t.Fatalf("SetFormat(otel): %v", err)
 	}
+
 	if err := Logger.SetHashAlgorithm("SHA256"); err != nil {
 		t.Fatalf("SetHashAlgorithm: %v", err)
 	}
@@ -355,6 +370,43 @@ func TestTamperedPayloadBreaksTheChain(t *testing.T) {
 	// And the successor still commits to the original value.
 	if records[1].attributes[AttrChainPrev] != records[0].attributes[AttrChain] {
 		t.Fatal("the successor must commit to the original chain value")
+	}
+}
+
+func TestTimestampAndSeverityAreBoundIntoChainValue(t *testing.T) {
+	state := integrityState{}
+	if err := state.configureIntegrity("SHA256"); err != nil {
+		t.Fatalf("configureIntegrity: %v", err)
+	}
+
+	previous := []byte("previous-chain-value")
+	payload := sha256.Sum256([]byte("same body"))
+	baseline := state.advanceChain(previous, 7, 1_700_000_000_000_000_000, severityNumberInfo, "INFO", payload[:])
+
+	tests := []struct {
+		name       string
+		timeNanos  int64
+		severityNo int
+		severity   string
+	}{
+		{name: "timestamp", timeNanos: 1_700_000_000_000_000_001, severityNo: severityNumberInfo, severity: "INFO"},
+		{name: "severity number", timeNanos: 1_700_000_000_000_000_000, severityNo: severityNumberError, severity: "INFO"},
+		{name: "severity text", timeNanos: 1_700_000_000_000_000_000, severityNo: severityNumberInfo, severity: "ERROR"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := state.advanceChain(
+				previous,
+				7,
+				testCase.timeNanos,
+				testCase.severityNo,
+				testCase.severity,
+				payload[:],
+			)
+			if bytes.Equal(got, baseline) {
+				t.Fatalf("changing %s did not change the chain value", testCase.name)
+			}
+		})
 	}
 }
 
@@ -645,6 +697,70 @@ func TestSeverityMapping(t *testing.T) {
 	}
 }
 
+func TestEveryStampedRecordDeclaresTheIntegrityVersion(t *testing.T) {
+	buf := resetLogging(t)
+
+	if err := Logger.SetFormat(FormatOTel); err != nil {
+		t.Fatalf("SetFormat(otel): %v", err)
+	}
+	if err := Logger.SetHashAlgorithm("SHA256"); err != nil {
+		t.Fatalf("SetHashAlgorithm: %v", err)
+	}
+	if err := Logger.SetHashChainLength(2); err != nil {
+		t.Fatalf("SetHashChainLength: %v", err)
+	}
+
+	for i := 0; i < 4; i++ {
+		Logger.Info(Event(EventDiagnostic), "versioned record")
+	}
+
+	records := decodeOTLPLines(t, buf.String())
+	if len(records) < 5 {
+		t.Fatalf("expected application records and at least one anchor, got %d", len(records))
+	}
+
+	anchors := 0
+	for i, record := range records {
+		if got := record.attributes[AttrIntegrityVersion]; got != integrityVersion {
+			t.Fatalf("record %d declared integrity version %q, want %q", i, got, integrityVersion)
+		}
+		if record.body == anchorBody {
+			anchors++
+		}
+	}
+
+	if anchors == 0 {
+		t.Fatal("expected at least one anchor record to carry the integrity version")
+	}
+}
+
+func TestIntegrityVersionIsNotHashInput(t *testing.T) {
+	buf := resetLogging(t)
+
+	if err := Logger.SetFormat(FormatOTel); err != nil {
+		t.Fatalf("SetFormat(otel): %v", err)
+	}
+	if err := Logger.SetHashAlgorithm("SHA256"); err != nil {
+		t.Fatalf("SetHashAlgorithm: %v", err)
+	}
+
+	const body = "payload to be hashed"
+	Logger.Info(Event(EventDiagnostic), body)
+
+	records := decodeOTLPLines(t, buf.String())
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	// Adding the version attribute must not disturb the body-only digest, so
+	// logs written before the attribute existed stay verifiable.
+	expected := sha256.Sum256([]byte(body))
+	if got := records[0].attributes[AttrHash]; got != hex.EncodeToString(expected[:]) {
+		t.Fatalf("hash changed when the version attribute was added.\n got: %s\nwant: %s",
+			got, hex.EncodeToString(expected[:]))
+	}
+}
+
 func TestTextFormatCarriesIntegrityAttributes(t *testing.T) {
 	buf := resetLogging(t)
 
@@ -658,7 +774,7 @@ func TestTextFormatCarriesIntegrityAttributes(t *testing.T) {
 	Logger.Info(Event(EventDiagnostic), "text mode payload")
 
 	got := buf.String()
-	for _, key := range []string{AttrHashAlg, AttrHash, AttrSequence, AttrChain, AttrChainPrev} {
+	for _, key := range []string{AttrIntegrityVersion, AttrHashAlg, AttrHash, AttrSequence, AttrChain, AttrChainPrev} {
 		if !strings.Contains(got, key+"=") {
 			t.Fatalf("expected %s in text output, got %q", key, got)
 		}

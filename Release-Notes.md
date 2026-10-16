@@ -4,6 +4,98 @@
 
 ### Stable Kafka subscriptions during slow UDP processing
 
+- Every stamped log record now publishes `airgap.log.integrity.version=v1`, so
+  a verifier reads the hash, chain and checkpoint rules from the record instead
+  of knowing the format out of band. The value is the same one framed into the
+  signed checkpoint statement, and is outside every hash input, so existing
+  hashes and signatures stay valid and logs written before the attribute are
+  still verified as Version 1.
+- Fixed two bugs that made `tests/env/verify_signed_anchor.py` unusable on a
+  real exported window: it probed the anchor-only `airgap.log.anchor` attribute
+  on every record and aborted on the first ordinary record, and it wrote two
+  zero bytes after the checkpoint domain where the signer writes one, so the
+  checkpoint hash never matched. Both verifiers now reject a record declaring
+  an unimplemented format version instead of reinterpreting it.
+- Added `tests/env/verify_integrity_report.py`, an operator-facing verifier that
+  retrieves tagged case events through Kibana with API-key or basic
+  authentication, reports each event's declared format version, and checks
+  every available body hash and chain. It groups continuity checks by
+  run/segment, accepts declared chain restarts, accumulates malformed and
+  unsupported events instead of stopping at the first one, and writes a compact
+  terminal result plus an attachable full report when the query exceeds the
+  detail limit. Kibana requests now require an exact `hits.total` and fail
+  closed when `--size` truncates the matching case instead of issuing a green
+  report over a partial result. Report endings say `Overall result: ✅` or
+  `Overall result: ❌` instead of printing an unexplained bare icon. TC-36
+  covers the Kibana request, result truncation, independent chains, restart
+  handling, and tampering negative controls. Signed reports now verify
+  Ed25519 checkpoints through an independently trusted registry or CA bundle,
+  automatically fetch complete run/window evidence, and recursively verify
+  old-key-signed certificate transitions. Each positive case has a
+  matching negative control built by editing a message body: one edit leaves
+  the recorded hash untouched so the body-hash layer catches it, and one
+  recomputes the hash so only the chain value can still expose the edit.
+- Added authenticated log-signing certificate rotation for the Go services.
+  `SIGHUP` rereads changed signing paths atomically; a valid replacement is
+  announced in a locally hashed STATUS document, force-anchored with the old
+  key, then activated and sent downstream. Invalid candidates leave the old
+  signer active. `scripts/configure-log-signing.py` installs either self-signed
+  or CA-issued leaf/key paths atomically and can signal a live service. TC-37
+  covers CA trust, automatic evidence acquisition, rotation delegation, and
+  body/timestamp/severity/hash/signature negative controls. TC-37 now uses a real upstream process
+  to produce and rotate the signed OTLP chain, indexes the preserved records
+  into Elasticsearch 8.15.3, proves the tagged time-bounded selection directly
+  with the verifier's JSON query wrapper, and performs automatic evidence and
+  signature verification through Kibana 8.15.3. Separate real indices retain
+  the body, timestamp, severity, hash, and signature negative controls; no mock Kibana responses or
+  synthetic logger events remain in TC-37.
+- Version 1 chain values now bind each record's original `timeUnixNano`,
+  `severityNumber`, and `severityText` in addition to its sequence number and
+  body hash. Timestamp or severity edits therefore invalidate the chain and
+  any signed checkpoint covering it. The operator verifier now performs
+  certificate parsing, PKIX CA-path validation, public-key extraction, and
+  Ed25519 verification in-process through pinned `cryptography` and
+  `pyOpenSSL` dependencies instead of forking OpenSSL. Certificate validity is
+  evaluated at the protected event
+  time: a certificate that was valid then but has since expired remains a
+  successful historical verification and is reported with a non-failing 🧣
+  warning and summary warning count.
+- Published the normative Air-gap Log Integrity Profile for OpenTelemetry
+  Version 1, including exact integer, UTF-8, framing, chain, and checkpoint
+  encodings plus an explicit protected/unprotected field table. A deterministic
+  public test vector exposes every chain and checkpoint input byte,
+  intermediate digest, SPKI-derived key ID, and Ed25519 signature; both the Go
+  producer and Python verifier must reproduce it byte-for-byte. The format now
+  documents RFC 5848 as evaluated syslog-specific prior art, RFC 8785 as an
+  intentionally rejected whole-envelope canonicalization, COSE Sign1 as a
+  possible future versioned checkpoint container, and RFC 3161 as the external
+  trusted-time layer for deployments that require it.
+- `verify_integrity_report.py` now accepts `--eql` as an alternative to
+  `--query`, so an operator can paste a saved Event Query Language search
+  instead of rewriting it as a query-string expression. EQL queries go to
+  `<index>/_eql/search` with `@timestamp` and `event.category` configured, and
+  sequence results are rejected because every matching event must be verified
+  individually. New `--date-from` and `--date-to` bounds work with both
+  selection forms, so the date range no longer has to be embedded in the query
+  text. Date bounds apply only to the case query: automatic evidence
+  acquisition stays unbounded, so a signed window or certificate-rotation
+  record outside the operator's range is still fetched and verified. TC-37
+  proves the same case event, evidence, and signature through both a
+  query-string selection and a real EQL query.
+- Registered TC-36 in `tests/env/testcases/36.env`, so it runs through the
+  standard `run-testcase.sh` and `run-testcases.sh` dispatchers instead of
+  only working when its shell script is invoked directly.
+- New `tests/env/verify_log_chain.py` verifies Version 1 body hashes and
+  hash-chain links for an exported log without needing key material, and
+  `doc/Logging.md` now walks through investigating a single Kibana event:
+  identifying it, exporting its chain segment, saving it as JSON Lines, and
+  running the verifier. The verifier reports its hard-coded Version 1 format
+  and rejects records declaring a future schema instead of interpreting them
+  with Version 1 rules. The documented anchor body was corrected to the
+  constant `airgap log chain anchor`; the covered range lives in attributes,
+  so hashing the previously documented body with a range appended produced a
+  spurious mismatch.
+
 - Fixed the stale gzip compression test after `protocol.DecompressGzip` gained
   its decompressed-size limit parameter. The test now uses downstream's
   production default of 256 MiB and verifies that payloads exceeding an

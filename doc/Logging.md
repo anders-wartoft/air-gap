@@ -76,13 +76,24 @@ of:
 Version 1 is identified cryptographically by its domain-separation strings and
 the literal `v1` in the signed checkpoint statement. A verifier must reject an
 unknown domain or version instead of attempting best-effort verification.
-Version 1 does not emit `airgap.log.record.schema`; that attribute is reserved
-for the proposed canonical Version 2 record commitment.
 
-The proposed canonical-record design is **Version 2**. Version 2 is documented
-separately below and is not emitted. Version 1 records and signatures will
-remain verifiable with the Version 1 verifier after a future version is added;
-a verifier must never reinterpret a Version 1 record using Version 2 rules.
+Every stamped record also states its format explicitly in
+`airgap.log.integrity.version`, which carries `v1`. A verifier therefore reads
+the version from the record and selects its rules from it, instead of having to
+know out of band which version wrote the log. The same value is framed into the
+signed checkpoint statement, so the attribute and the signature cannot drift
+apart: rewriting the attribute makes a verifier apply rules that then fail,
+rather than letting it silently downgrade.
+
+The attribute is deliberately outside every hash input. Record hashes cover the
+body only, and the checkpoint statement frames the version explicitly, so logs
+written before the attribute existed keep verifying unchanged. A verifier must
+treat a missing `airgap.log.integrity.version` as Version 1, because no other
+version was ever emitted, and must reject any value it does not implement.
+
+Version 1 does not emit `airgap.log.record.schema`. Version 1 records and
+signatures must remain verifiable after a future format is added; a verifier
+must never reinterpret a Version 1 record using another version's rules.
 
 | Option | Environment variable | Default | Description |
 |---|---|---|---|
@@ -115,6 +126,50 @@ The signing options and signed checkpoints are currently implemented in the
 shared Go logger used by the Go binaries. Java dedup currently supports the
 OTLP semantic layout but does not yet emit hash-chain or signature attributes.
 
+### Installing and rotating a signing certificate
+
+The service does not need to issue its own certificate. An organization CA can
+issue an Ed25519 leaf certificate with `digitalSignature`, exactly one URI SAN
+for the signer identity, and the optional EKU required by local policy. A
+typical CA request starts with a locally generated PKCS#8 key and CSR:
+
+```sh
+openssl genpkey -algorithm ED25519 -out log-signing.key
+openssl req -new \
+  -key log-signing.key \
+  -out log-signing.csr \
+  -subj '/CN=Air-gap log signer stream-017' \
+  -addext 'subjectAltName=URI:urn:airgap:node:site-a:stream-017' \
+  -addext 'keyUsage=digitalSignature'
+```
+
+After the CA returns `log-signing.crt`, install the files with restrictive
+ownership and update the service configuration atomically:
+
+```sh
+sudo python3 scripts/configure-log-signing.py \
+  --config /etc/airgap/upstream.properties \
+  --certificate /etc/airgap/pki/log-signing.crt \
+  --key /etc/airgap/pki/log-signing.key \
+  --signer-id urn:airgap:node:site-a:stream-017 \
+  --eku 1.3.6.1.4.1.55555.29.1
+```
+
+At initial setup, restart the service after reviewing the configuration. To
+rotate a running service, point the same command at the replacement
+certificate and key and add either `--pid PID` or
+`--pid-file /run/airgap-upstream.pid`. The script writes the changed
+configuration with `fsync` plus an atomic rename and then sends `SIGHUP`.
+
+The service validates the complete candidate before changing keys. It keeps
+the old signer on any error. For a valid changed certificate it logs a
+`log.integrity.signing_certificate.rotate` STATUS document, immediately closes
+that window with an old-key signature, activates the new key, and sends the
+same JSON document through the role's downstream STATUS path. The document
+contains the new leaf certificate in its hashed body, so the old signature
+authenticates the exact replacement certificate. Reinstalling the unchanged
+certificate is a no-op.
+
 ### Version 1 record hash
 
 The hash input is exactly the UTF-8 byte sequence of the fully formatted log
@@ -131,10 +186,10 @@ spelling inside that embedded JSON changes the digest even when a JSON parser
 would consider the two objects semantically equivalent.
 
 Hashing only the message body is deliberate. A Collector, or any other
-processor between the file and its final destination, is allowed to and often
-will rewrite metadata, add resource attributes, or re-render the timestamp.
-Those legitimate rewrites do not invalidate the hash, while an edit to what the
-log actually said does.
+processor between the file and its final destination, may add resource or
+semantic attributes without invalidating the body hash. The chain separately
+protects the original event timestamp and severity because those fields are
+material evidence and must not be rewritten after emission.
 
 ### Version 1 chain
 
@@ -143,12 +198,78 @@ its hash. The chain is what makes edits expensive, because each record binds the
 one before it:
 
 ```python
-chain[k] = H( "airgap-log-chain-v1" || 0x00 || chain[k-1] || seq[k] || payloadHash[k] )
+chain[k] = H(
+    "airgap-log-chain-v1" || 0x00
+    || chain[k-1]
+    || seq[k]
+    || timeUnixNano[k]
+    || severityNumber[k]
+    || frame(severityText[k])
+    || payloadHash[k]
+)
 ```
 
-`seq` is an 8-byte big-endian sequence number and is part of the chain input, so
-reordering or deleting records is detectable even when two records have
-identical bodies, which is common in logs.
+`seq` and `timeUnixNano` are 8-byte big-endian integers, `severityNumber` is a
+4-byte big-endian integer, and `frame` is a 4-byte big-endian byte length
+followed by the UTF-8 severity text. These fields are part of the chain input,
+so reordering, deletion, timestamp edits, and severity edits are detectable
+even when two records have identical bodies, which is common in logs.
+
+### Air-gap Log Integrity Profile for OpenTelemetry Version 1
+
+This subsection is normative for records declaring
+`airgap.log.integrity.version=v1`. Implementations must construct exactly the
+bytes described here; JSON serialization, map order, locale, platform byte
+order, and Unicode normalization must not affect the result.
+
+The profile uses these primitives:
+
+| Primitive | Encoding |
+|---|---|
+| `UTF8(value)` | The exact UTF-8 bytes present in the OTLP string; no normalization or trailing NUL |
+| `U32(value)` | Four-byte unsigned big-endian integer |
+| `U64(value)` | Eight-byte unsigned big-endian integer |
+| `FRAME(bytes)` | `U32(len(bytes)) || bytes` |
+| `H(bytes)` | The algorithm named by `airgap.log.hash.alg` |
+
+Version 1 requires a non-negative OTLP `timeUnixNano` that fits in 64 bits and a
+non-negative `severityNumber` that fits in 32 bits. The payload and chain values
+are:
+
+```text
+payloadHash = H(UTF8(body.stringValue))
+
+chainInput =
+    UTF8("airgap-log-chain-v1") || 0x00
+    || chainPrevious
+    || U64(airgap.log.seq)
+    || U64(timeUnixNano)
+    || U32(severityNumber)
+    || FRAME(UTF8(severityText))
+    || payloadHash
+
+chainValue = H(chainInput)
+```
+
+`chainPrevious`, `payloadHash`, and `chainValue` are raw digest bytes in this
+formula. Their OTLP attributes use lowercase hexadecimal without a prefix.
+The domain's terminating `0x00` is a separator and is not part of its UTF-8
+text. The body hash deliberately remains independently useful; timestamp and
+severity protection comes from the chain.
+
+The Version 1 protection boundary is:
+
+| Data | Protection |
+|---|---|
+| `body.stringValue` | Directly protected by `airgap.log.hash`, then transitively by the chain and signed checkpoint |
+| `airgap.log.seq`, `timeUnixNano`, `severityNumber`, `severityText` | Directly protected by each chain step |
+| Previous chain value and record ordering | Directly protected by each chain step |
+| Integrity version, algorithms, run/segment/window IDs, service name and instance, process start, anchor range, signer and key IDs | Protected by the signed checkpoint statement |
+| `observedTimeUnixNano`, EventName, TraceId, SpanId, TraceFlags, semantic attributes, `service.version`, and other resource attributes | Outside Version 1; use them to find evidence, then confirm protected fields and body |
+
+Changing an unprotected search attribute cannot manufacture a valid body,
+chain, or signature, but Version 1 does not prove that the attribute itself is
+original.
 
 The chain starts from a genesis value bound to this particular process run:
 
@@ -165,11 +286,17 @@ is a foundation rather than a complete answer, but it rules out the cheap edit.
 
 ### Version 1 anchors
 
-Every `hash-chain` records the framework writes one extra record, an **anchor**:
+Every `hash-chain` records the framework writes one extra record, an **anchor**.
+Its body is exactly this constant string, with no range appended:
 
 ```text
-airgap log chain anchor: records 1..11
+airgap log chain anchor
 ```
+
+The covered range is carried in the `airgap.log.anchor.from` and
+`airgap.log.anchor.to` attributes rather than in the body, which keeps the
+anchor body byte-identical in every window. A verifier must hash the constant
+alone; appending the range produces a different digest and a spurious failure.
 
 The anchor carries the chain value for the window it closes, and the anchor is
 itself hashed and chained like any other record. That is the point of the
@@ -317,6 +444,7 @@ the record shape is non-standard and any OTLP consumer can read it.
 
 | Attribute | Type | Description |
 |---|---|---|
+| airgap.log.integrity.version | string | Integrity format that wrote the record, currently `v1`. Absent on logs written before the attribute existed, which are Version 1 |
 | airgap.log.hash.alg | string | Hash algorithm, for example `SHA256` |
 | airgap.log.hash | string | Hex digest of the record body |
 | airgap.log.seq | int | Sequence number, unique and monotonic for the life of the process |
@@ -338,23 +466,6 @@ the record shape is non-standard and any OTLP consumer can read it.
 | airgap.log.segment.id | string | Random identity for one uninterrupted chain segment. Chained records |
 | airgap.log.window.id | string | Random identity shared by all records and the anchor in one Version 1 window. Chained records |
 | airgap.log.signature.error | string | Explicit signing failure detail in place of a valid signature |
-
-The proposed Version 2 format described below is not yet emitted. It reserves
-these additional attributes:
-
-| Attribute | Type | Description |
-|---|---|---|
-| airgap.log.record.schema | string | Canonical record commitment version, initially `v2` |
-| airgap.log.checkpoint | bool | Present and `true` on the last application record in a completed window |
-| airgap.log.checkpoint.from | int | First sequence number in the window |
-| airgap.log.checkpoint.to | int | Last sequence number in the window |
-| airgap.log.checkpoint.first_prev | string | Chain value immediately before the first record in the window |
-| airgap.log.checkpoint.final_chain | string | Final chain value for the window |
-| airgap.log.checkpoint.hash | string | Hex digest of the canonical checkpoint statement |
-| airgap.log.signature.alg | string | Signature algorithm, initially `Ed25519` |
-| airgap.log.signature | string | Base64-encoded signature over the checkpoint hash |
-| airgap.log.signer.id | string | Stable identity of the machine or signing service |
-| airgap.log.key.id | string | Immutable identifier of the public key |
 
 ### Declared restarts
 
@@ -405,6 +516,11 @@ for line in open("upstream.log"):
     h.update(b"\x00")
     h.update(bytes.fromhex(attrs["airgap.log.chain.prev"]))
     h.update(seq.to_bytes(8, "big"))
+    h.update(int(record["timeUnixNano"]).to_bytes(8, "big"))
+    h.update(int(record["severityNumber"]).to_bytes(4, "big"))
+    severity = record["severityText"].encode()
+    h.update(len(severity).to_bytes(4, "big"))
+    h.update(severity)
     h.update(bytes.fromhex(attrs["airgap.log.hash"]))
     assert h.hexdigest() == attrs["airgap.log.chain"], f"chain value forged at {seq}"
 
@@ -414,23 +530,205 @@ for line in open("upstream.log"):
 Use the digest matching `airgap.log.hash.alg` rather than hardcoding SHA-256 if
 you run with a different algorithm.
 
-A complete verifier must additionally reject selectively unstamped records,
-verify sequence continuity, derive and verify each genesis value, enforce
-algorithm consistency, validate every anchor boundary and coverage interval,
-and require every anchor expected for a completed window. Even then, an
-unsigned local file cannot prove that its tail was not truncated or that an
-attacker with the whole file did not recompute the chain.
+A full-stream verifier with trusted process-start metadata must additionally
+derive and verify each genesis value and require every anchor expected for a
+completed window. Even then, an unsigned local file cannot prove that its tail
+was not truncated or that an attacker with the whole file did not recompute the
+chain.
+
+Rather than extending the snippet above, use `tests/env/verify_log_chain.py`,
+which rejects selectively unstamped records, verifies sequence continuity and
+algorithm consistency, and validates chain links, anchor boundaries, and
+exported anchor coverage. It is driven step by step in the next section. Its
+first trust boundary is stated there explicitly.
+
+## Verifying one event and its chain from Kibana
+
+This procedure starts from a single suspicious or disputed log event in Kibana
+and ends with a machine-checked verdict on that event. It needs no key
+material. Signature verification is a separate, stronger step described in
+[Verifying a signed window from Kibana](#verifying-a-signed-window-from-kibana).
+
+The chain is what makes the single event meaningful. Verifying one record in
+isolation only proves that its body matches its own digest, which an editor who
+rewrote both would also achieve. Exporting the surrounding segment proves that
+the record is still bound to its neighbours.
+
+### Step 1: Identify the event
+
+Open the event in **Kibana Discover** and expand it. Record these attributes:
+
+| Attribute | Why it is needed |
+|---|---|
+| airgap.log.seq | Identifies the event inside the run |
+| airgap.log.run.id | Scopes the export to one process execution |
+| airgap.log.segment.id | Scopes the export to one uninterrupted chain segment |
+| airgap.log.hash.alg | Selects the digest the verifier must use |
+
+If the event has `airgap.log.hash` but no `airgap.log.chain`, it was hashed
+before chaining was configured. Only the body hash can be checked; say so in
+the finding rather than implying chain evidence.
+
+### Step 2: Export the surrounding segment
+
+Export the whole chain segment, not just the one event. Use the segment rather
+than the window so the export survives an event that sits near a window
+boundary. The ingestion pipeline requirements in the signed-window section
+apply unchanged: the original OTLP line must be preserved in `event.original`,
+and CSV export must not be used.
+
+Open **Dev Tools > Console** and run, adjusting the index pattern and dropping
+`.keyword` if those fields are already mapped as `keyword`:
+
+```json
+GET logs-*/_search
+{
+  "size": 1000,
+  "track_total_hits": true,
+  "_source": ["event.original"],
+  "query": {
+    "bool": {
+      "filter": [
+        {"term": {"airgap.log.run.id.keyword": "RUN-ID-FROM-DISCOVER"}},
+        {"term": {"airgap.log.segment.id.keyword": "SEGMENT-ID-FROM-DISCOVER"}}
+      ]
+    }
+  },
+  "sort": [
+    {"airgap.log.seq": {"order": "asc", "unmapped_type": "long"}}
+  ]
+}
+```
+
+Check `hits.total.value` against the returned hit count. If the total is larger
+than `size`, raise `size` or page with `search_after`. A silently truncated
+response looks exactly like a log with records deleted from the end, and the
+verifier will correctly refuse to call it intact.
+
+### Step 3: Save the export as JSON Lines
+
+Use the response menu to copy the full JSON response and save it as
+`segment-search-response.json`, then extract the preserved OTLP records:
+
+```sh
+jq -r '.hits.hits[]._source["event.original"]' \
+  segment-search-response.json > segment.ndjson
+```
+
+Confirm the event under investigation survived the extraction:
+
+```sh
+grep -c '"airgap.log.seq"' segment.ndjson
+```
+
+### Step 4: Verify the hashes and the chain
+
+The verifier does not infer which fields to hash from the JSON. It reads
+`airgap.log.integrity.version` from the records and implements the rules for
+that version, here **Air-gap Log Integrity Format Version 1**, with the exact
+byte encodings and field order defined earlier in this document:
+
+| Value being verified | Version 1 input, in order |
+|---|---|
+| `airgap.log.hash` | UTF-8 bytes of `body.stringValue` only |
+| `airgap.log.chain` | UTF-8 `airgap-log-chain-v1`, one zero byte, previous chain bytes, `airgap.log.seq` and `timeUnixNano` as unsigned 8-byte big-endian values, `severityNumber` as unsigned 4-byte big-endian, the UTF-8 `severityText` prefixed by its unsigned 4-byte big-endian length, and the decoded `airgap.log.hash` bytes |
+| Genesis value | UTF-8 `airgap-log-chain-v1`, one zero byte, UTF-8 `genesis`, one zero byte, service name, one zero byte, instance ID, one zero byte, and process-start nanoseconds as unsigned 8-byte big-endian |
+| Signed checkpoint hash | The ordered and length-framed Version 1 checkpoint statement specified under [Version 1 signed checkpoints](#version-1-signed-checkpoints) |
+
+Thus the record hash itself is **not** calculated over several fields. It
+protects the message body. The chain combines that body hash with the sequence
+number, timestamp, severity, and previous chain value. The signed checkpoint
+then commits to the chain range and process identity.
+
+The format version is stated by each record in
+`airgap.log.integrity.version`, and is additionally separated cryptographically
+by the `airgap-log-chain-v1` domain string and the `v1` framed into a signed
+checkpoint. The script verifies only `v1`, rejects any other declared version
+rather than reinterpreting the record with Version 1 rules, and requires one
+version across the whole export. A record with no version attribute predates
+the attribute and is verified as Version 1, which the output states explicitly.
+It likewise rejects `airgap.log.record.schema`, which Version 1 does not emit.
+`airgap.log.hash.alg` selects SHA-256, SHA-384, SHA-512 or a SHA-3 variant; it
+is not the integrity format version.
+
+For the first record in `segment.ndjson`, the script takes the exported
+`airgap.log.chain.prev` as its starting boundary. It then proves every
+subsequent link relative to that value. It does **not** independently derive
+the process genesis: ordinary unsigned records do not carry the trusted
+process-start value needed to do so. A signed Version 1 checkpoint commits to
+the window's initial previous-chain value, final chain value, process identity,
+and start time; use `verify_signed_anchor.py` when an independently trusted
+boundary and authenticity are required.
+
+```sh
+python3 tests/env/verify_log_chain.py segment.ndjson --seq 1234
+```
+
+The script uses only the Python standard library. For a run with
+`hash=SHA256` and `hash-chain=5`, a good export reports:
+
+```text
+format:     Air-gap Log Integrity Format Version 1 (airgap-log-chain-v1)
+            declared by the log: yes, airgap.log.integrity.version=v1
+file:       segment.ndjson
+run.id:     dd5b59919b59f3f84555fd36493d5733
+segment.id: 055b07a6b2057108a1804ac9c643624e
+algorithm:  SHA256
+records:    14 (seq 0..13), 14 chained
+anchor:     covers seq 0..5: all covered records present
+anchor:     covers seq 6..11: all covered records present
+
+target seq 7 verified
+  body:  'sample record 7'
+  hash:  3ee54699f4f220f57326da3950d27be8b9cff68bfa3ef7c595a634ee4309d20d
+  chain: 34ec5a2cd3cc200b35b0d33515c0d9ddaaa80e8777654785c647751d7ea418bf
+  anchored in this export: yes
+
+OK: every body matches its digest and every chain link is intact.
+```
+
+The exit status is `0` on success and `1` on any verification failure, so the
+script can gate an automated evidence-collection job.
+
+### Step 5: Interpret the result
+
+The checks are layered, and the failure message identifies which layer caught
+the edit. These are the observed messages for the three realistic tampering
+attempts:
+
+| What was done to the export | Reported failure |
+|---|---|
+| Edited a message body | `body edited at seq 7: recorded 3ee546…, computed a419e8…` |
+| Edited a body and recomputed its `airgap.log.hash` | `chain value forged at seq 7: recorded 34ec5a…, computed c1e0a0…` |
+| Deleted a record | `sequence gap: expected 7, found 8; records were removed or the export is incomplete` |
+| Rewrote `airgap.log.integrity.version` to `v2` | `line 1 declares integrity format 'v2'; this verifier implements 'v1' only` |
+
+So an attacker must edit the body, recompute the digest, and recompute every
+chain value to the end of the segment. That is the intended cost.
+
+Two results are not failures but must still be read carefully. A record
+carrying `airgap.log.chain.restart=true` opens a new segment; the verifier
+accepts it at the first record and a restart appearing anywhere else is worth
+investigating. Records after the last anchor are chained but not yet anchored,
+which is normal at the tail of a running process and is reported as
+`anchored in this export: no`.
+
+Finally, a pass here is a statement about internal consistency. It does not
+prove the log was not truncated at the tail, nor that an attacker holding the
+whole file did not recompute the entire chain. Only a verified signature over
+an anchor proves that, which is the subject of the next section.
 
 ## Signatures
 
 ### Version 1 signed checkpoints
 
 Dedicated certificate loading and Ed25519 signatures on Version 1 anchor
-records are implemented. The Version 1 chain hashes only the body and
-therefore cannot prove that EventName, severity, timestamp, semantic
-attributes, or resource identity were unchanged. The signature does bind the
-anchor range, chain values, service identity, process start, signer identity,
-key identity, and hash algorithm.
+records are implemented. The body hash covers only the body, while every
+Version 1 chain step additionally binds `timeUnixNano`, `severityNumber`, and
+`severityText`. A signed anchor therefore proves the body, original event
+timestamp, and severity of every record in its window. EventName, semantic
+attributes, and resource attributes other than the checkpoint's service
+identity remain outside the per-record commitment.
 
 For each Version 1 anchor, the logger constructs the checkpoint statement in
 this exact order:
@@ -459,6 +757,13 @@ bytes. Strings are UTF-8. Sequence numbers and timestamps are unsigned
 eight-byte big-endian integers. Hash and chain values are decoded from their
 hex attributes before framing.
 
+The framed `v1` is the same value the record publishes in
+`airgap.log.integrity.version`, so a verifier can read the version from the
+record and still reconstruct the exact signed statement. Because the version is
+inside the signed bytes, altering the attribute cannot persuade a verifier to
+apply different rules undetected: the checkpoint hash, and therefore the
+signature, no longer matches.
+
 The configured hash algorithm hashes this statement. Ed25519 signs the raw
 checkpoint-hash bytes:
 
@@ -467,49 +772,60 @@ checkpointHash = H(checkpointStatementV1)
 signature      = Ed25519.sign(privateKey, checkpointHash)
 ```
 
-The Version 2 record commitment described below remains the next format
-version. It will add canonical hashes for those semantic fields before changing
-the checkpoint format.
+### Public Version 1 test vector
 
-### Proposed Version 2 windows
+The complete deterministic vector is
+[`src/logging/testdata/log-integrity-v1-test-vector.json`](../src/logging/testdata/log-integrity-v1-test-vector.json).
+It publishes:
 
-In Version 2, `hash-chain=10` means that ten application records form one
-window. The tenth record carries the checkpoint and signature; the framework
-does not add an eleventh anchor record. A random `airgap.log.window.id` is
-allocated before the first record and copied to all ten records, so a search
-does not have to infer window boundaries from timestamps or sequence
-arithmetic.
+- every logical chain and checkpoint field;
+- the exact UTF-8 body bytes and framed severity bytes;
+- the complete chain input and resulting digest;
+- the complete checkpoint statement and checkpoint hash;
+- a deterministic Ed25519 seed, raw public key, DER SubjectPublicKeyInfo, key
+  ID, signature bytes, and Base64 signature.
 
-The Version 2 record hash uses a versioned, length-prefixed binary encoding
-rather than JSON serialization. It commits to the run, segment, window,
-sequence, original timestamp, severity number, EventName, body, service
-identity, and all source semantic attributes. Attribute keys are sorted by
-their UTF-8 bytes and values retain their OTel type. `airgap.log.*` attributes
-are excluded to avoid a circular hash. Collector or Logstash enrichment
-outside the original LogRecord is not committed.
+The seed is intentionally public test material and must never be provisioned
+as a production key. Go unit tests reconstruct the vector through the
+production chain and checkpoint builders; Python verifier tests independently
+reconstruct and verify the same bytes. A format change that does not update the
+declared version therefore fails in both implementations.
 
-The final record carries a canonical checkpoint statement that binds:
+### Relationship to existing standards
 
-- record schema and hash algorithm;
-- signature algorithm, signer identity, and key identity;
-- run, segment, and window identities;
-- service name, instance, and version;
-- process start time;
-- first and last sequence number;
-- the chain value preceding the window; and
-- the final chain value.
+There is no OpenTelemetry standard for cryptographic log chaining or signed
+checkpoints. The OTel Logs Data Model supplies the field vocabulary; this
+profile defines the integrity boundary over those fields.
 
-The checkpoint hash is the configured hash of that statement. The signature is
-made over the checkpoint hash, not merely over the last payload hash:
+[RFC 5848](https://www.rfc-editor.org/rfc/rfc5848.html), Signed Syslog
+Messages, was evaluated as the closest protocol. It standardizes origin
+authentication, sequencing, replay resistance, missing-message detection,
+signature groups, and certificate blocks, but its wire format and verification
+rules are coupled to RFC 5424 syslog. Air-gap preserves OTLP LogRecords and
+therefore cannot emit RFC 5848 without translating to a different log format.
+Version 1 adopts the same high-level ideas of sequence-aware groups and
+periodic signatures but does not claim RFC 5848 compatibility.
 
-```text
-checkpointHash = H(canonicalCheckpointStatement)
-signature      = Ed25519.sign(privateKey, checkpointHash)
-```
+[RFC 8785](https://www.rfc-editor.org/rfc/rfc8785.html) JSON canonicalization
+was not used because signing an entire OTLP/JSON envelope would make collector
+metadata additions and permissible transport transformations invalidate the
+record. Version 1 instead commits to an explicit, stable field profile with
+fixed-width and length-framed encodings.
 
-This lets one signature authenticate every record in the completed window.
-Records in the current incomplete window remain provisionally chained until
-their checkpoint is produced.
+A future, explicitly versioned format may carry the checkpoint as
+`COSE_Sign1` from [RFC 9052](https://www.rfc-editor.org/rfc/rfc9052.html), with
+X.509 material represented according to
+[RFC 9360](https://www.rfc-editor.org/rfc/rfc9360.html). That would standardize
+the signature container and protected headers, but it would not replace the
+record-chain profile. A verifier must never reinterpret a Version 1 checkpoint
+as COSE.
+
+The protected OTLP timestamp proves the time asserted by the signing host. It
+does not prove that an independent trustworthy clock observed the checkpoint.
+Deployments requiring third-party proof of existence or long-term
+non-repudiation should timestamp checkpoint hashes using an RFC 3161 Time-Stamp
+Authority. [RFC 3161](https://www.rfc-editor.org/rfc/rfc3161.html) tokens are a
+future external evidence layer; they are not currently emitted by Air-gap.
 
 ### Signer and public-key identity
 
@@ -556,6 +872,18 @@ event. A deployment with an internal CA may use certificates instead, but the
 same rule applies: the verifier trusts the CA out of band and must validate the
 certificate identity and validity at the event time.
 
+Certificate expiry after the event does not invalidate historical evidence.
+`verify_integrity_report.py` checks the leaf and CA path at the protected
+anchor timestamp. If the leaf was valid then but is expired when the report is
+generated, the signature remains successful and the report adds:
+
+```text
+[certificate] 🧣 expired now, but was valid at the signed event time
+```
+
+The summary remains `PASS` and includes the warning count. A certificate that
+was not valid at the event timestamp still fails closed.
+
 The reference verifier below treats the registry file as already trusted. Its
 signature, distribution, audit trail, and revocation policy belong to the
 provisioning system and must be verified before using the file.
@@ -568,11 +896,127 @@ signing itself.
 
 ## Verifying a signed window from Kibana
 
-The export procedure applies to both implemented Version 1 signed anchors and
-the proposed Version 2 format. It deliberately exports the original OTLP
-records rather than a Discover CSV. CSV export can omit
-fields, flatten attributes, and convert 64-bit integers, any of which makes
-cryptographic reconstruction unreliable.
+`verify_integrity_report.py` automates the manual procedure below. The
+operator's `--query` selects only the case events. When the credentials file
+contains a trusted registry or CA bundle, the script obtains every selected
+event's run/window identity, fetches the complete signed window, and recursively
+fetches old-key-signed certificate-rotation windows when a new key is
+encountered:
+
+```json
+{
+  "kibana_url": "https://kibana.example.com",
+  "api_key": "...",
+  "ca_file": "/etc/airgap/pki/log-signing-ca.pem"
+}
+```
+
+`trust_registry` may be used instead of, or together with, `ca_file`. Relative
+paths are resolved beside the credentials file. Automatically fetched records
+are labelled `evidence` in the report; records returned by the case query are
+labelled `selected`. Every expansion query requires exact `hits.total`, and a
+missing record, ambiguous rotation, trust cycle, unknown key, incomplete
+window, invalid certificate, or bad signature fails closed. Normal use is:
+
+```sh
+python3 -m pip install -r tests/env/requirements-integrity-report.txt
+python3 tests/env/verify_integrity_report.py \
+  --credentials-file case-kibana.json \
+  --query 'tags:case-1234' \
+  --date-from 2026-10-10T10:00:00.000Z \
+  --date-to 2026-10-10T12:00:00.000Z \
+  --report-file case-1234-integrity.txt
+```
+
+The pinned `cryptography` and `pyOpenSSL` dependencies perform public-key
+parsing, PKIX CA-path validation at the event time, and Ed25519 verification
+inside the Python process. The report script does not create temporary key
+files or invoke the `openssl` executable.
+
+`--query` is an Elasticsearch **query-string** expression. It is not EQL, not
+KQL, and not a Dev Tools request body. The script builds the search body
+itself and substitutes the option value verbatim into the `query_string`
+clause:
+
+```json
+{
+  "size": 100,
+  "track_total_hits": true,
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "query_string": {
+            "query": "VALUE OF --query"
+          }
+        },
+        {
+          "range": {
+            "@timestamp": {
+              "gte": "VALUE OF --date-from",
+              "lte": "VALUE OF --date-to",
+              "format": "strict_date_optional_time_nanos"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "sort": [
+    {
+      "@timestamp": {
+        "order": "asc"
+      }
+    }
+  ]
+}
+```
+
+The `range` filter is added only when `--date-from` or `--date-to` is given;
+each bound is optional and inclusive.
+
+A JSON object passed to `--query` is treated as literal search text rather
+than as a query. Quote values that contain spaces or reserved characters.
+
+Operators who already have a saved EQL search can paste it into `--eql`
+instead of `--query`. The two options are mutually exclusive, and both accept
+`--date-from` and `--date-to`:
+
+```sh
+python3 tests/env/verify_integrity_report.py \
+  --credentials-file case-kibana.json \
+  --eql 'any where tags == "case-1234"' \
+  --date-from 2026-10-10T10:00:00.000Z \
+  --report-file case-1234-integrity.txt
+```
+
+`--eql` is sent to `<index>/_eql/search` with `@timestamp` as the timestamp
+field and `event.category` as the event-category field, and the date bounds
+are passed as the EQL `filter`. Sequence queries are rejected, because every
+matching event must be verifiable individually. Date bounds and the selection
+syntax apply only to the operator's case query: automatically fetched
+evidence always uses `query_string` searches without date bounds, so a signed
+window or certificate-rotation event that falls outside the operator's time
+range is still acquired and verified.
+
+TC-37 exercises both selection paths through Elasticsearch 8.15.3 and Kibana
+8.15.3. A real `airgap-upstream` process produces the OTLP records, rotates
+between two CA-issued Ed25519 signing certificates on `SIGHUP`, and completes
+signed windows with both keys. The test indexes `event.original` plus the
+searchable integrity fields, proves the case expression selects exactly one
+event directly in Elasticsearch, and then calls the verifier through Kibana
+with `--query --date-from` and again with a real `--eql` query.
+The verifier automatically fetches the selected event's complete window and
+the old-key-signed certificate-rotation window. Separate indices with changed
+body, hash, and signature values prove that the real query path fails closed.
+
+The remainder of this section documents the equivalent manual process and the
+index fields that automatic expansion requires.
+
+The export procedure deliberately exports the original OTLP records rather
+than a Discover CSV. CSV export can omit fields, flatten attributes, and
+convert 64-bit integers, any of which makes cryptographic reconstruction
+unreliable.
 
 The ingestion pipeline should:
 
@@ -637,372 +1081,19 @@ python3 tests/env/verify_signed_anchor.py window.ndjson trusted-log-keys.json
 
 The Version 1 verifier is also available as
 `tests/env/verify_signed_anchor.py`. It rejects unsupported fields and
-algorithms rather than silently weakening verification. The following embedded
-reference script documents the proposed Version 2 canonical-record verifier and
-is not compatible with Version 1 output:
-
-```python
-import base64
-import hashlib
-import json
-import struct
-import sys
-from datetime import datetime, timezone
-
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-RECORD_DOMAIN = b"airgap-log-record-v2\x00"
-CHAIN_DOMAIN = b"airgap-log-chain-v2\x00"
-CHECKPOINT_DOMAIN = b"airgap-log-checkpoint-v1\x00"
-
-
-def fail(message):
-    raise ValueError(message)
-
-
-def frame(value):
-    if isinstance(value, str):
-        value = value.encode("utf-8")
-    return len(value).to_bytes(4, "big") + value
-
-
-def u32(value):
-    return int(value).to_bytes(4, "big", signed=False)
-
-
-def u64(value):
-    return int(value).to_bytes(8, "big", signed=False)
-
-
-def digest(name, value):
-    algorithms = {
-        "SHA256": "sha256",
-        "SHA384": "sha384",
-        "SHA512": "sha512",
-        "SHA3-256": "sha3_256",
-        "SHA3-384": "sha3_384",
-        "SHA3-512": "sha3_512",
-    }
-    if name not in algorithms:
-        fail(f"unsupported hash algorithm: {name}")
-    return hashlib.new(algorithms[name], value).digest()
-
-
-def any_value(value):
-    if set(value) == {"stringValue"}:
-        return b"s" + frame(value["stringValue"])
-    if set(value) == {"intValue"}:
-        return b"i" + int(value["intValue"]).to_bytes(8, "big", signed=True)
-    if set(value) == {"boolValue"}:
-        return b"b" + (b"\x01" if value["boolValue"] else b"\x00")
-    if set(value) == {"doubleValue"}:
-        return b"f" + struct.pack(">d", float(value["doubleValue"]))
-    if set(value) == {"bytesValue"}:
-        return b"y" + frame(base64.b64decode(value["bytesValue"], validate=True))
-    fail(f"unsupported OTLP AnyValue: {value}")
-
-
-def attribute_map(items):
-    result = {}
-    for item in items:
-        key = item["key"]
-        if key in result:
-            fail(f"duplicate attribute: {key}")
-        result[key] = item["value"]
-    return result
-
-
-def scalar(attributes, key):
-    if key not in attributes:
-        fail(f"missing attribute: {key}")
-    value = attributes[key]
-    if "stringValue" in value:
-        return value["stringValue"]
-    if "intValue" in value:
-        return int(value["intValue"])
-    if "boolValue" in value:
-        return bool(value["boolValue"])
-    fail(f"attribute has unsupported scalar type: {key}")
-
-
-def unpack_envelope(envelope):
-    resource_logs = envelope.get("resourceLogs", [])
-    if len(resource_logs) != 1:
-        fail("each line must contain exactly one resourceLogs entry")
-    resource = attribute_map(
-        resource_logs[0].get("resource", {}).get("attributes", [])
-    )
-    scope_logs = resource_logs[0].get("scopeLogs", [])
-    if len(scope_logs) != 1 or len(scope_logs[0].get("logRecords", [])) != 1:
-        fail("each line must contain exactly one LogRecord")
-    record = scope_logs[0]["logRecords"][0]
-    return resource, record, attribute_map(record.get("attributes", []))
-
-
-def text_attribute(attributes, key):
-    value = scalar(attributes, key)
-    if not isinstance(value, str):
-        fail(f"attribute must be a string: {key}")
-    return value
-
-
-def canonical_semantic_attributes(attributes):
-    semantic = [
-        (key, value)
-        for key, value in attributes.items()
-        if not key.startswith("airgap.log.")
-    ]
-    semantic.sort(key=lambda item: item[0].encode("utf-8"))
-    return u32(len(semantic)) + b"".join(
-        frame(key) + any_value(value) for key, value in semantic
-    )
-
-
-def canonical_record(resource, record, attributes):
-    body = record.get("body", {})
-    if set(body) != {"stringValue"}:
-        fail("v2 requires a string body")
-    return b"".join(
-        [
-            RECORD_DOMAIN,
-            frame(text_attribute(attributes, "airgap.log.run.id")),
-            frame(text_attribute(attributes, "airgap.log.segment.id")),
-            frame(text_attribute(attributes, "airgap.log.window.id")),
-            u64(scalar(attributes, "airgap.log.seq")),
-            u64(record["timeUnixNano"]),
-            u32(record["severityNumber"]),
-            frame(record["eventName"]),
-            frame(body["stringValue"]),
-            frame(text_attribute(resource, "service.name")),
-            frame(text_attribute(resource, "service.instance.id")),
-            frame(text_attribute(resource, "service.version")),
-            canonical_semantic_attributes(attributes),
-        ]
-    )
-
-
-def canonical_checkpoint(resource, attributes):
-    return b"".join(
-        [
-            CHECKPOINT_DOMAIN,
-            frame(text_attribute(attributes, "airgap.log.record.schema")),
-            frame(text_attribute(attributes, "airgap.log.hash.alg")),
-            frame(text_attribute(attributes, "airgap.log.signature.alg")),
-            frame(text_attribute(attributes, "airgap.log.signer.id")),
-            frame(text_attribute(attributes, "airgap.log.key.id")),
-            frame(text_attribute(attributes, "airgap.log.run.id")),
-            frame(text_attribute(attributes, "airgap.log.segment.id")),
-            frame(text_attribute(attributes, "airgap.log.window.id")),
-            frame(text_attribute(resource, "service.name")),
-            frame(text_attribute(resource, "service.instance.id")),
-            frame(text_attribute(resource, "service.version")),
-            u64(scalar(attributes, "airgap.log.process.start_unix_nano")),
-            u64(scalar(attributes, "airgap.log.checkpoint.from")),
-            u64(scalar(attributes, "airgap.log.checkpoint.to")),
-            frame(bytes.fromhex(text_attribute(
-                attributes, "airgap.log.checkpoint.first_prev"
-            ))),
-            frame(bytes.fromhex(text_attribute(
-                attributes, "airgap.log.checkpoint.final_chain"
-            ))),
-        ]
-    )
-
-
-def load_records(path):
-    records = []
-    with open(path, encoding="utf-8") as source:
-        for line_number, line in enumerate(source, 1):
-            if not line.strip():
-                continue
-            try:
-                records.append(unpack_envelope(json.loads(line)))
-            except (KeyError, TypeError, ValueError) as error:
-                fail(f"{path}:{line_number}: {error}")
-    if not records:
-        fail("the export contains no records")
-    return records
-
-
-def parse_time(value):
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        fail(f"registry time has no timezone: {value}")
-    return parsed
-
-
-def trusted_key(path, key_id, signer_id, signing_time_unix_nano):
-    with open(path, encoding="utf-8") as source:
-        registry = json.load(source)
-    if registry.get("schema") != "airgap-log-trust-v1":
-        fail("unsupported trust-registry schema")
-    matches = [key for key in registry.get("keys", []) if key["key_id"] == key_id]
-    if len(matches) != 1:
-        fail(f"trusted registry has {len(matches)} entries for {key_id}")
-    entry = matches[0]
-    if entry["signer_id"] != signer_id:
-        fail("checkpoint signer does not match the trusted key owner")
-    if entry["algorithm"] != "Ed25519":
-        fail("registry entry is not an Ed25519 verification key")
-    if entry.get("status") not in {"active", "retired"}:
-        fail("key is revoked or has an unsupported registry status")
-    signing_time = datetime.fromtimestamp(
-        int(signing_time_unix_nano) / 1_000_000_000, timezone.utc
-    )
-    if not (
-        parse_time(entry["not_before"])
-        <= signing_time
-        < parse_time(entry["not_after"])
-    ):
-        fail("checkpoint was signed outside the key validity interval")
-    key = serialization.load_pem_public_key(entry["public_key_pem"].encode())
-    if not isinstance(key, Ed25519PublicKey):
-        fail("registry entry is not an Ed25519 public key")
-    der = key.public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    actual_id = "sha256:" + hashlib.sha256(der).hexdigest()
-    if actual_id != key_id:
-        fail("key ID does not match the registered public key")
-    return key, entry
-
-
-def verify(records, registry_path):
-    records.sort(key=lambda item: int(scalar(item[2], "airgap.log.seq")))
-    checkpoints = [
-        item for item in records
-        if item[2].get("airgap.log.checkpoint", {}).get("boolValue") is True
-    ]
-    if len(checkpoints) != 1 or checkpoints[0] is not records[-1]:
-        fail("window must end in exactly one checkpoint")
-
-    resource, checkpoint_record, checkpoint = checkpoints[0]
-    expected = {
-        "schema": "v2",
-        "run": text_attribute(checkpoint, "airgap.log.run.id"),
-        "segment": text_attribute(checkpoint, "airgap.log.segment.id"),
-        "window": text_attribute(checkpoint, "airgap.log.window.id"),
-        "algorithm": text_attribute(checkpoint, "airgap.log.hash.alg"),
-    }
-    if text_attribute(checkpoint, "airgap.log.record.schema") != expected["schema"]:
-        fail("unsupported record schema")
-
-    start = int(scalar(checkpoint, "airgap.log.checkpoint.from"))
-    end = int(scalar(checkpoint, "airgap.log.checkpoint.to"))
-    sequences = [int(scalar(item[2], "airgap.log.seq")) for item in records]
-    if sequences != list(range(start, end + 1)):
-        fail(f"missing, duplicate, or unexpected sequence: {sequences}")
-
-    previous = bytes.fromhex(text_attribute(
-        checkpoint, "airgap.log.checkpoint.first_prev"
-    ))
-    for item_resource, record, attributes in records:
-        for key in ["service.name", "service.instance.id", "service.version"]:
-            if text_attribute(item_resource, key) != text_attribute(resource, key):
-                fail(f"inconsistent resource attribute: {key}")
-        for key, expected_value in [
-            ("airgap.log.record.schema", expected["schema"]),
-            ("airgap.log.run.id", expected["run"]),
-            ("airgap.log.segment.id", expected["segment"]),
-            ("airgap.log.window.id", expected["window"]),
-            ("airgap.log.hash.alg", expected["algorithm"]),
-        ]:
-            if text_attribute(attributes, key) != expected_value:
-                fail(f"inconsistent {key}")
-
-        sequence = int(scalar(attributes, "airgap.log.seq"))
-        if bytes.fromhex(text_attribute(
-            attributes, "airgap.log.chain.prev"
-        )) != previous:
-            fail(f"broken chain before sequence {sequence}")
-
-        record_hash = digest(
-            expected["algorithm"],
-            canonical_record(item_resource, record, attributes),
-        )
-        if record_hash.hex() != text_attribute(attributes, "airgap.log.hash"):
-            fail(f"record commitment mismatch at sequence {sequence}")
-
-        chain = digest(
-            expected["algorithm"],
-            CHAIN_DOMAIN
-            + frame(expected["run"])
-            + frame(expected["segment"])
-            + u64(sequence)
-            + frame(previous)
-            + frame(record_hash),
-        )
-        if chain.hex() != text_attribute(attributes, "airgap.log.chain"):
-            fail(f"chain mismatch at sequence {sequence}")
-        previous = chain
-
-    if previous.hex() != text_attribute(
-        checkpoint, "airgap.log.checkpoint.final_chain"
-    ):
-        fail("final chain does not match the checkpoint")
-
-    checkpoint_hash = digest(
-        expected["algorithm"], canonical_checkpoint(resource, checkpoint)
-    )
-    if checkpoint_hash.hex() != text_attribute(
-        checkpoint, "airgap.log.checkpoint.hash"
-    ):
-        fail("checkpoint hash mismatch")
-
-    signature_algorithm = text_attribute(
-        checkpoint, "airgap.log.signature.alg"
-    )
-    if signature_algorithm != "Ed25519":
-        fail(f"unsupported signature algorithm: {signature_algorithm}")
-    key_id = text_attribute(checkpoint, "airgap.log.key.id")
-    signer_id = text_attribute(checkpoint, "airgap.log.signer.id")
-    key, registry_entry = trusted_key(
-        registry_path,
-        key_id,
-        signer_id,
-        checkpoint_record["timeUnixNano"],
-    )
-    signature = base64.b64decode(
-        text_attribute(checkpoint, "airgap.log.signature"), validate=True
-    )
-    try:
-        key.verify(signature, checkpoint_hash)
-    except InvalidSignature:
-        fail("invalid checkpoint signature")
-    print(
-        f"verified sequences {start}..{end}; "
-        f"signer={signer_id}; "
-        f"name={registry_entry.get('display_name', signer_id)}; "
-        f"key={key_id}"
-    )
-
-
-if __name__ == "__main__":
-    try:
-        if len(sys.argv) != 3:
-            fail("usage: verify_signed_window.py WINDOW.ndjson TRUSTED-KEYS.json")
-        verify(load_records(sys.argv[1]), sys.argv[2])
-    except (KeyError, TypeError, ValueError) as error:
-        raise SystemExit(f"verification failed: {error}") from error
-```
-
-The script proves that the exported source records form the signed window. It
-does not prove that Kibana displayed every indexed record in the wider stream,
-nor can it authenticate an incomplete window that has no checkpoint yet.
+algorithms rather than silently weakening verification. It proves that the
+exported source records form the signed window. It does not prove that Kibana
+displayed every indexed record in the wider stream, nor can it authenticate an
+incomplete window that has no checkpoint yet.
 
 ## Limitations
 
-**The hash covers the body, not the attributes.** Everything in [Semantic
-attributes](#semantic-attributes) sits outside the integrity hash and outside
-the chain. The hash input is defined as the body bytes alone, which is what
-keeps it reproducible and independent of OTLP encoding. The body still contains
-the formatted message, so nothing an operator reads is unprotected, but a
-consumer that relies only on attributes is relying on data the chain does not
-cover. Extending the hash to a canonical encoding of the attributes belongs
-with the signing work, where the extra format commitment can be made once.
+**The body hash does not cover semantic attributes.** Its input is the body
+bytes alone, which keeps it reproducible and independent of OTLP encoding. The
+Version 1 chain additionally protects `timeUnixNano`, `severityNumber`, and
+`severityText`, but EventName and other semantic attributes remain outside the
+commitment. A consumer that relies on those unprotected attributes must treat
+them as search aids and confirm the protected body when evidence matters.
 
 **Records written before the configuration is read are not stamped.** The
 version banner and the "Reading configuration from file" line are emitted before
