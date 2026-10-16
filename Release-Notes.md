@@ -15,6 +15,18 @@
   one-record Sarama channel. It verifies eight records arrive exactly once,
   consumer lag reaches zero, no subscription is abandoned, and neither
   upstream nor downstream restarts.
+- Log rotation now closes the previously opened log descriptor when handling a
+  reload, preventing deleted rotated logs from retaining disk space. Standard
+  logger output, including Sarama client records, is switched to the new file
+  before the old descriptor is released.
+- TC-35 verifies repeated rotation and reload cycles leave no descriptor
+  pointing to a rotated log and that post-reload application and Kafka client
+  records use the new log file. Its negative control runs a build with the
+  non-default `airgap_logrotate_leak` tag, which must still be detected as
+  leaking.
+- TC-34 and TC-35 now compose their common Kafka transfer topology from
+  `docker-compose.kafka-transfer.yml` plus a testcase-specific override,
+  reducing duplicated infrastructure while preserving isolated test behavior.
 
 ## 0.1.14-SNAPSHOT
 

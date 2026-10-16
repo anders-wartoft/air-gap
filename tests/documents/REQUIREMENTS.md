@@ -292,6 +292,28 @@ upstream warns at startup when it is not.
 5. Increasing the interval does not claim to increase throughput. Sustained
    overload remains observable as Kafka consumer lag.
 
+### REQ-8e — Log rotation releases replaced file descriptors
+
+> Reopening the log after logrotate must release the descriptor of the rotated
+> file, so that removing or compressing it frees the disk space immediately.
+
+* Implemented in: 0.1.15-SNAPSHOT
+* Covered by: TC-35
+
+1. On SIGHUP, upstream, downstream and resend reopen `logFileName` and close
+   the descriptor the reopen replaced. The same applies when a start-up path
+   configures the log file more than once.
+2. After a reload, the process must hold exactly one descriptor for the active
+   log file and none for any rotated file, including removed files that the
+   kernel reports as `(deleted)`.
+3. The replacement must not drop records. The new file receives every record
+   written after the reload, and the rotated file receives none.
+4. Kafka client records written through the standard logger must follow the
+   reopened file rather than the descriptor that was active when the Kafka
+   connection was established.
+5. A failure to close the replaced descriptor must be reported as an error
+   from the reopen, not silently ignored.
+
 ## REQ-9 — No log loss on restart
 
 > Air-gap must not lose logs on restart.

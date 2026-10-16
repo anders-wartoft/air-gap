@@ -36,6 +36,10 @@ var StdLogger = logger
 // records are written to this writer directly.
 var output io.Writer = os.Stderr
 
+// logFile is the file descriptor owned by SetLogFile. Other outputs, including
+// stderr and test writers, are not owned by the logging package.
+var logFile *os.File
+
 // emitMu serialises the whole emit path. Sequence numbers and chain values must
 // follow the order records actually reach the output, so the integrity state is
 // updated under the same lock that performs the write.
@@ -390,8 +394,16 @@ func (l *LoggerType) SetLogFile(filename string) error {
 
 	emitMu.Lock()
 	defer emitMu.Unlock()
+
+	previousLogFile := logFile
 	logger.SetOutput(f)
 	output = f
+	logFile = f
+	if previousLogFile != nil {
+		if err := closeReplacedLogFile(previousLogFile); err != nil {
+			return fmt.Errorf("close previous log file: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -400,6 +412,10 @@ func (l *LoggerType) SetLogFile(filename string) error {
 func setOutputForTest(w io.Writer) {
 	emitMu.Lock()
 	defer emitMu.Unlock()
+	if logFile != nil {
+		_ = logFile.Close()
+		logFile = nil
+	}
 	logger.SetOutput(w)
 	output = w
 }

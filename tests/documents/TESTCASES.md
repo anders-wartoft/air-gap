@@ -5445,3 +5445,84 @@ The configured processing interval reaches Sarama and covers a known,
 deterministic callback delay. Slow UDP processing produces ordinary Kafka lag
 while work is pending, rather than subscription abandonment, duplicate
 delivery, or process restart.
+
+## TC-35 — Log rotation closes replaced file descriptors
+
+Verify that reloading a service after logrotate closes the descriptor of the
+rotated file, and that later records, including Kafka client records, are
+written to the newly opened file.
+
+* Covers: REQ-8e
+* Implemented in: 0.1.15-SNAPSHOT
+* Runner: `./run-testcase.sh 35`
+
+### Setup
+
+```text
+producer (8 x 1 KiB records)
+  -> Kafka[source]
+  -> upstream (UDP, logFileName=/var/log/airgap/upstream.log)
+  -> downstream (logFileName=/var/log/airgap/downstream.log)
+  -> Kafka[transfer]
+```
+
+Both roles write to a dedicated log file, so every rotation can be observed
+through the descriptors of PID 1 inside the container:
+
+```properties
+logFileName=/var/log/airgap/upstream.log
+```
+
+### Automated procedure
+
+1. Build the Linux binaries, the load helper, and a downstream binary built
+   with the non-default `airgap_logrotate_leak` tag for the negative control.
+2. Start Kafka with `source`, `transfer` and `airgap-internal` topics, then
+   the UDP downstream and upstream.
+3. Produce eight 1 KiB records and wait for group `tc35-Rotate` to reach lag
+   zero, so both roles have an active Kafka client.
+4. Require exactly one descriptor per process for the active log file.
+5. Repeat three times for both roles, exactly as nightly logrotate does:
+   rename the live log, send SIGHUP to PID 1, wait for the reload record, then
+   compress the rotated file.
+6. Require exactly one descriptor for the active log and none for any rotated
+   file, including compressed and removed files reported as `(deleted)`.
+7. Require the post-reload record `SIGHUP handling completed` in the new log.
+8. Start a second upstream in the same consumer group to force a rebalance,
+   then require `[SARAMA]` records in the new log while the digest of the
+   rotated file stays unchanged.
+9. Require upstream and downstream to remain running with zero restarts.
+
+### Expected result
+
+```text
+transfer before rotation: lag 0
+descriptors before rotation: upstream=1 downstream=1
+descriptors after 3 rotations: upstream=1 downstream=1
+rotated-log descriptors: upstream=0 downstream=0
+application records after reload: present
+Kafka client records after rotation: present
+rotated log after reload: unchanged
+process survival: both running with zero restarts
+```
+
+### Negative control
+
+The negative control runs once, with a downstream binary built using the
+non-default `airgap_logrotate_leak` tag. That build keeps the replaced
+descriptor open, reproducing the reported defect. After a single rotation and
+reload it must retain a descriptor to the rotated file:
+
+```text
+negative control: 1 retained
+```
+
+If the control ever reports `0 retained`, the descriptor checks above prove
+nothing and the test fails.
+
+### What it proves
+
+A reload releases the rotated file, so logrotate reclaims its disk space
+immediately rather than at the next service restart. Application records and
+Kafka client records both follow the reopened file, and repeated rotations do
+not accumulate descriptors.

@@ -1,0 +1,52 @@
+services:
+  downstream:
+    volumes:
+      - downstream-logs:/var/log/airgap
+    environment:
+      AIRGAP_CONFIG: /airgap/config/downstream-airgap-35-docker.properties
+
+  upstream:
+    volumes:
+      - upstream-logs:/var/log/airgap
+    environment:
+      AIRGAP_CONFIG: /airgap/config/upstream-airgap-35-docker.properties
+
+  upstream-b:
+    image: airgap-testenv-kafka-transfer:local
+    hostname: upstream-b
+    profiles: ["rebalance"]
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+      - ../../config/testcases:/airgap/config:ro
+      - upstream-b-logs:/var/log/airgap
+    environment:
+      AIRGAP_CONFIG: /airgap/config/upstream-airgap-35b-docker.properties
+    command: ["upstream"]
+    restart: "no"
+
+  # Negative control. Runs a binary built with the non-default
+  # airgap_logrotate_leak tag, which keeps the replaced descriptor open.
+  downstream-leak:
+    image: airgap-testenv-kafka-transfer:local
+    hostname: downstream-leak
+    profiles: ["leak-control"]
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${TC35_LEAK_BIN:?TC35_LEAK_BIN is required}:/airgap/bin:ro
+      - ../../config/testcases:/airgap/config:ro
+      - downstream-leak-logs:/var/log/airgap
+    environment:
+      AIRGAP_CONFIG: /airgap/config/downstream-airgap-35-docker.properties
+    command: ["downstream"]
+    restart: "no"
+
+volumes:
+  upstream-logs:
+  upstream-b-logs:
+  downstream-logs:
+  downstream-leak-logs:

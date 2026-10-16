@@ -21,6 +21,27 @@ The container image is deliberately minimal — an OS plus `iproute` / `ping` /
 `ps`. The upstream / downstream / create / resend binaries and the dedup jar
 are **not** baked in; they are bind-mounted from the host build directory.
 
+### Standalone testcase Compose overrides
+
+Standalone testcases with the same single-Kafka transfer topology compose a
+shared base with a small testcase override:
+
+```bash
+TC_WORK=/tmp/tc34 docker compose \
+  -f docker-compose.kafka-transfer.yml \
+  -f docker-compose.tc34.yml \
+  config
+```
+
+The base owns Kafka, topic initialization, the standard upstream/downstream
+services, and the producer. The override selects testcase configuration and
+adds only testcase-specific services, profiles, or volumes. Keep the base file
+first: relative paths and merge behavior are resolved from that model. Validate
+each merged model with `docker compose ... config` when changing either file.
+
+TC-34 and TC-35 use this convention. Their runners set `TC_WORK` and invoke
+both files automatically.
+
 ## Topology
 
 The Kafka layout mirrors the real deployment: each cluster is a two-broker

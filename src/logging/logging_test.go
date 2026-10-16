@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -153,6 +155,35 @@ func TestTextFormatIsUnchangedWhenIntegrityDisabled(t *testing.T) {
 	}
 	if strings.Contains(got, "airgap.log.") {
 		t.Fatalf("integrity attributes must not appear when hashing is off, got %q", got)
+	}
+}
+
+func TestSetLogFileClosesPreviousFile(t *testing.T) {
+	resetLogging(t)
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "stream.log")
+	if err := Logger.SetLogFile(logPath); err != nil {
+		t.Fatalf("SetLogFile(first): %v", err)
+	}
+	first := logFile
+	if first == nil {
+		t.Fatal("SetLogFile must track the owned file")
+	}
+
+	rotatedPath := filepath.Join(dir, "stream.log.1")
+	if err := os.Rename(logPath, rotatedPath); err != nil {
+		t.Fatalf("rotate log file: %v", err)
+	}
+	if err := Logger.SetLogFile(logPath); err != nil {
+		t.Fatalf("SetLogFile(second): %v", err)
+	}
+
+	if _, err := first.WriteString("must fail after rotation"); err == nil {
+		t.Fatal("the rotated log file descriptor remained open")
+	}
+	if logFile == first {
+		t.Fatal("SetLogFile retained the previous file descriptor")
 	}
 }
 

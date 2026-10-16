@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -61,8 +60,7 @@ func ConfigureSaramaLogger(errorCallback ...func(string)) {
 	}
 
 	sarama.Logger = log.New(&saramaLogWriter{
-		originalWriter: logging.StdLogger.Writer(),
-		errorCallback:  callback,
+		errorCallback: callback,
 	}, "[SARAMA] ", log.LstdFlags)
 }
 
@@ -70,8 +68,7 @@ func ConfigureSaramaLogger(errorCallback ...func(string)) {
 // mode it routes Sarama through the application logger so third-party records
 // cannot corrupt an otherwise line-delimited OTLP/JSON stream.
 type saramaLogWriter struct {
-	originalWriter io.Writer
-	errorCallback  func(string)
+	errorCallback func(string)
 }
 
 func (w *saramaLogWriter) Write(p []byte) (n int, err error) {
@@ -92,7 +89,7 @@ func (w *saramaLogWriter) Write(p []byte) (n int, err error) {
 		return len(p), nil
 	}
 
-	return w.originalWriter.Write(p)
+	return logging.StdLogger.Writer().Write(p)
 }
 
 func SetVerbose(enabled bool) {
