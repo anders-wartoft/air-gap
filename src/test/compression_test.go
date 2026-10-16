@@ -2,10 +2,13 @@ package test
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"sitia.nu/airgap/src/protocol"
 )
+
+const productionMaximumDecompressSize = 256 * 1024 * 1024
 
 func compressionTest(data []byte, t *testing.T) {
 	// Compress using protocol.CompressGzip
@@ -15,7 +18,7 @@ func compressionTest(data []byte, t *testing.T) {
 	}
 
 	// Decompress and check round-trip
-	decompressed, err := protocol.DecompressGzip(compressed, len(data))
+	decompressed, err := protocol.DecompressGzip(compressed, productionMaximumDecompressSize)
 	if err != nil {
 		t.Fatalf("Decompression failed: %v", err)
 	}
@@ -31,6 +34,18 @@ func compressionTest(data []byte, t *testing.T) {
 	}
 	compressionRate := 1.0 - float64(compLen)/float64(origLen)
 	t.Logf("Original size: %d bytes, Compressed size: %d bytes, Compression rate: %.2f%%", origLen, compLen, compressionRate*100)
+}
+
+func TestGzipDecompressionSizeLimit(t *testing.T) {
+	const maximumSize = 1024
+	compressed, err := protocol.CompressGzip([]byte(strings.Repeat("a", maximumSize+1)))
+	if err != nil {
+		t.Fatalf("Compression failed: %v", err)
+	}
+
+	if _, err := protocol.DecompressGzip(compressed, maximumSize); err == nil {
+		t.Fatal("Decompression succeeded despite exceeding the maximum return size")
+	}
 }
 
 func TestGzipCompressionAndRate(t *testing.T) {

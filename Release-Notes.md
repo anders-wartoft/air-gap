@@ -4,6 +4,11 @@
 
 ### Stable Kafka subscriptions during slow UDP processing
 
+- Fixed the stale gzip compression test after `protocol.DecompressGzip` gained
+  its decompressed-size limit parameter. The test now uses downstream's
+  production default of 256 MiB and verifies that payloads exceeding an
+  explicit limit are rejected, so `go test ./...` compiles and runs
+  `src/test` again.
 - **New `kafkaMaxProcessingTimeMs`** configures Sarama's
   `Consumer.MaxProcessingTime` and defaults to 30 seconds. Upstream processes a
   Kafka record synchronously through rate limiting, memory admission,
