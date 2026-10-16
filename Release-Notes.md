@@ -27,6 +27,15 @@
 - TC-34 and TC-35 now compose their common Kafka transfer topology from
   `docker-compose.kafka-transfer.yml` plus a testcase-specific override,
   reducing duplicated infrastructure while preserving isolated test behavior.
+- The dedup build now produces one universal fat JAR with all dependency
+  natives and 13 platform-specific JARs covering every RocksDB native
+  platform. Each platform JAR contains only its matching RocksDB, zstd, Snappy
+  and LZ4 libraries; unmapped RocksDB platforms or missing codec libraries
+  fail the build. The AMD64 package uses the roughly 22.5 MB `linux-amd64`
+  variant instead of the roughly 84 MB universal JAR and is now correctly
+  marked AMD64 instead of `noarch`. The README describes how to choose between
+  the universal and platform JARs, including the startup failure seen when the
+  JAR does not match the host.
 
 ## 0.1.14-SNAPSHOT
 

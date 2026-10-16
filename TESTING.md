@@ -42,6 +42,25 @@ cd java-streams && mvn test
 
 This runs JUnit 5 tests for `GapDetector`, `GapDetectorSerialization`, and `PartitionDedupApp`.
 
+Build the universal fat JAR and every platform-specific fat JAR with:
+
+```bash
+cd java-streams && mvn clean package
+```
+
+Build all JARs and create the verified Linux AMD64 package alias with:
+
+```bash
+make build-java
+tests/scripts/verify-dedup-native-libraries.sh \
+  java-streams/target/air-gap-deduplication-fat-*.jar
+```
+
+The Maven tests verify that all RocksDB platforms produce a JAR containing
+exactly the matching RocksDB, zstd, Snappy and LZ4 libraries, and reject an
+unmapped RocksDB platform. The production verifier additionally enforces a
+40 MiB maximum for the Linux AMD64 JAR.
+
 ## Make shortcuts
 
 ```bash

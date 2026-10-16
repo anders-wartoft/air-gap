@@ -1370,7 +1370,8 @@ own stack,
 [docker-compose.tc9-dedup-restart.yml](../env/docker-compose.tc9-dedup-restart.yml)
 (single-node KRaft Kafka, topic-init, one dedup with `restart: "no"` so that
 any self-termination is immediately visible), and does not touch the main
-TC-9 environment.
+TC-9 environment. The dedup service runs as `linux/amd64`, matching the
+platform-specific production JAR even when Docker itself runs on ARM64.
 
 The test asserts, in order:
 

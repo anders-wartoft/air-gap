@@ -42,9 +42,15 @@ docker run --rm \
     maven:latest \
     mvn clean package -DskipTests
 
-# Check if build was successful
-JAR_FILE="$JAVA_STREAMS_DIR/target/air-gap-deduplication-fat-0.1.5-SNAPSHOT.jar"
-if [[ -f "$JAR_FILE" ]]; then
+# Check if build was successful. Platform JARs have a linux-, macos- or
+# windows- suffix; the unsuffixed artifact is the universal fat JAR.
+JAR_FILE="$(find "$JAVA_STREAMS_DIR/target" -maxdepth 1 -type f \
+    -name 'air-gap-deduplication-fat-*.jar' \
+    ! -name '*-linux-*.jar' \
+    ! -name '*-macos-*.jar' \
+    ! -name '*-windows-*.jar' \
+    -print -quit)"
+if [[ -n "$JAR_FILE" && -f "$JAR_FILE" ]]; then
     jar_size=$(du -h "$JAR_FILE" | cut -f1)
     log_info "Build successful!"
     log_info "Fat JAR: $JAR_FILE (Size: $jar_size)"

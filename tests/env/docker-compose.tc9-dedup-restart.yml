@@ -77,6 +77,7 @@ services:
 
   dedup:
     image: ${DEDUP_IMAGE:-eclipse-temurin:17-jre-noble}
+    platform: linux/amd64
     hostname: dedup
     networks:
       - airgap-tc9-dedup-restart
@@ -118,7 +119,7 @@ services:
       - -c
       - |
         set -eu
-        JAR=$$(ls /airgap/dedup-jar/air-gap-deduplication-fat-*.jar 2>/dev/null | head -1)
+        JAR=$$(ls /airgap/dedup-jar/air-gap-deduplication-fat-*-linux-amd64.jar 2>/dev/null | head -1)
         if [ -z "$$JAR" ]; then
           echo "[dedup] no fat jar under /airgap/dedup-jar/. Build it with: make build-java" >&2
           exit 2

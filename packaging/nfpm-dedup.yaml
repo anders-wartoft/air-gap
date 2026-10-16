@@ -1,5 +1,5 @@
 name: ${PACKAGE_NAME}
-arch: noarch
+arch: amd64
 platform: linux
 version: ${VERSION}
 release: ${RELEASE}

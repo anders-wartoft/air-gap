@@ -1181,6 +1181,71 @@ cd java-streams
 mvn clean package
 ```
 
+### Choosing the right air-gap-deduplication-fat JAR
+
+The deduplication application stores its state in RocksDB and reads compressed
+Kafka records through zstd, Snappy and LZ4. All four libraries ship compiled
+native code, one build per operating system and CPU architecture. A single JAR
+holding every native library is about 80 MiB, so the build also produces one
+JAR per platform, each about 20-23 MiB:
+
+- `air-gap-deduplication-fat-<version>.jar` - the universal JAR, contains the
+  native libraries for every supported platform.
+- `air-gap-deduplication-fat-<version>-<platform>.jar` - contains only the four
+  native libraries for that platform.
+
+Available platform suffixes:
+
+| Suffix | Operating system | Architecture | C library |
+| --- | --- | --- | --- |
+| `linux-amd64` | Linux | x86_64 | glibc |
+| `linux-amd64-musl` | Linux | x86_64 | musl |
+| `linux-x86` | Linux | x86 (32-bit) | glibc |
+| `linux-x86-musl` | Linux | x86 (32-bit) | musl |
+| `linux-arm64` | Linux | aarch64 | glibc |
+| `linux-arm64-musl` | Linux | aarch64 | musl |
+| `linux-ppc64le` | Linux | ppc64le | glibc |
+| `linux-ppc64le-musl` | Linux | ppc64le | musl |
+| `linux-s390x` | Linux | s390x | glibc |
+| `linux-s390x-musl` | Linux | s390x | musl |
+| `macos-amd64` | macOS | x86_64 | - |
+| `macos-arm64` | macOS | aarch64 (Apple Silicon) | - |
+| `windows-amd64` | Windows | x86_64 | - |
+
+Pick the JAR that matches the host that runs the deduplicator, not the host that
+built it:
+
+- RHEL, Rocky Linux, AlmaLinux, Debian or Ubuntu on a normal server:
+  `linux-amd64`. This is the variant the RPM, DEB and APK packages install as
+  `/opt/airgap/dedup/air-gap-deduplication-fat.jar`.
+- Alpine Linux, or any container built `FROM alpine`: the matching `-musl`
+  variant.
+- A developer machine with Apple Silicon: `macos-arm64`.
+- Use the universal JAR only when one artifact has to run on several different
+  platforms, or when the target platform is not known in advance. It works
+  everywhere, at the cost of roughly 60 MiB of unused native libraries.
+
+To determine what a host needs, run:
+
+```bash
+uname -s -m                      # operating system and architecture
+ldd --version 2>&1 | head -n 1   # prints "musl libc" on musl systems
+```
+
+If the wrong JAR is used, RocksDB fails during class initialization and the
+application exits at startup:
+
+```text
+java.lang.RuntimeException: librocksdbjni-linux-aarch64.so was not found inside JAR
+...
+java.lang.NoClassDefFoundError: Could not initialize class org.rocksdb.DBOptions
+```
+
+The remedy is to switch to the JAR matching `uname -m`, or to the universal
+JAR. See [doc/Deduplication.md](doc/Deduplication.md) for the build details and
+[TESTING.md](TESTING.md) for the verification performed on the packaged
+variant.
+
 ## Java Application Packaging
 
 The project includes production-ready system packages for major Linux distributions using [nfpm](https://nfpm.goreleaser.com/):

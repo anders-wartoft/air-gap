@@ -118,6 +118,7 @@
         </dependencies>
         <executions>
           <execution>
+            <id>shade-fat-jar</id>
             <phase>package</phase>
             <goals>
               <goal>shade</goal>
@@ -158,6 +159,27 @@
           </execution>
         </executions>
       </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>build-native-platform-jars</id>
+            <phase>package</phase>
+            <goals>
+              <goal>java</goal>
+            </goals>
+            <configuration>
+              <mainClass>nu.sitia.airgap.build.NativeJarVariants</mainClass>
+              <classpathScope>test</classpathScope>
+              <arguments>
+                <argument>${project.build.directory}/${project.artifactId}-fat-${project.version}.jar</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
-  </project>
+</project>

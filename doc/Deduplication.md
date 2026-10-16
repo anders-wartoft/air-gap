@@ -281,10 +281,46 @@ Before we create the new window, we check if we already have MAX_WINDOWS windows
 
 ## Build
 
-To build the thin and fat JAR: run `mvn clean package` from the java-streams directory (output in java-streams/target/), or just run make in the root directory.
-The fat JAR will contain all dependencies and is runnable with java -jar target/java-streams-fat-<version>.jar.
+Run `mvn clean package` from the `java-streams` directory (output in
+`java-streams/target/`), or run `make build-java` in the repository root. Each
+build produces:
 
-The make file in the root will also perform a `mvn clean package` when building the golang applications.
+* one universal fat JAR containing every native library supplied by RocksDB,
+  zstd, Snappy and LZ4; and
+* one smaller fat JAR for each RocksDB native platform, containing only the
+  matching native libraries.
+
+The generated platform suffixes are:
+
+```text
+linux-amd64
+linux-amd64-musl
+linux-x86
+linux-x86-musl
+linux-arm64
+linux-arm64-musl
+linux-ppc64le
+linux-ppc64le-musl
+linux-s390x
+linux-s390x-musl
+macos-amd64
+macos-arm64
+windows-amd64
+```
+
+The build fails if RocksDB adds or removes a platform without a corresponding
+mapping, or if any mapped platform lacks its RocksDB, zstd, Snappy or LZ4
+library. The universal JAR remains unchanged while each platform JAR contains
+exactly four native libraries.
+
+`make build-java` packages the `linux-amd64` variant as
+`air-gap-deduplication-fat.jar`. It verifies that the four required libraries
+are present, that no other native libraries are included, and that the
+platform JAR is no larger than 40 MiB. A generated JAR is runnable with:
+
+```sh
+java -jar java-streams/target/air-gap-deduplication-fat-<version>-<platform>.jar
+```
 
 ## Configuration
 
