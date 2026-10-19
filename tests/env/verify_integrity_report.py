@@ -842,7 +842,11 @@ def verify_checkpoint_signature(result: EventResult, trusted: TrustedKey) -> Non
     verify_ed25519(trusted.public_key_pem, checkpoint, signature)
 
 
-def verify_signature(result: EventResult, trusted_keys: Dict[str, TrustedKey]) -> None:
+def verify_signature(
+    result: EventResult,
+    trusted_keys: Dict[str, TrustedKey],
+    resolution_errors: Optional[Dict[str, str]] = None,
+) -> None:
     attributes = result.attributes
     present = signature_fields_present(attributes)
     if not present:
@@ -860,6 +864,10 @@ def verify_signature(result: EventResult, trusted_keys: Dict[str, TrustedKey]) -
         signer_id = str(value_of(attributes, "airgap.log.signer.id"))
         trusted = trusted_keys.get(key_id)
         if trusted is None:
+            if resolution_errors and key_id in resolution_errors:
+                raise VerificationFailure(
+                    f"no trusted key for {key_id}: {resolution_errors[key_id]}"
+                )
             raise VerificationFailure(f"no trusted key for {key_id}")
         if trusted.signer_id != signer_id:
             raise VerificationFailure(
@@ -1077,7 +1085,13 @@ def expand_kibana_evidence(
     size: int,
     trusted_keys: Dict[str, TrustedKey],
     ca_file: Optional[str],
-) -> Tuple[List[Dict[str, Any]], int]:
+) -> Tuple[List[Dict[str, Any]], int, Dict[str, str]]:
+    """Fetch windows and resolve signing keys, degrading gracefully.
+
+    Returns the deduplicated hits, the number of selected events, and a map
+    of key ID to the reason its trust could not be resolved, for example
+    because the certificate-rotation event aged out of Elasticsearch.
+    """
     ordered: List[Dict[str, Any]] = []
     known: Dict[str, Dict[str, Any]] = {}
 
@@ -1112,6 +1126,7 @@ def expand_kibana_evidence(
         add_hits(window_hits)
 
     resolving: List[str] = []
+    resolution_errors: Dict[str, str] = {}
 
     def trust_anchor_from_ca(results: Iterable[EventResult], key_id: str) -> None:
         if not ca_file or key_id in trusted_keys:
@@ -1158,86 +1173,121 @@ def expand_kibana_evidence(
         )
 
     def authorize_key(key_id: str) -> None:
-        if key_id in trusted_keys:
+        """Resolve trust for key_id without aborting the report.
+
+        Rotation events can age out to cold storage or be deleted before an
+        investigation runs. When trust cannot be established the key stays
+        untrusted and the reason is recorded in resolution_errors, so the
+        affected windows fail their signature checks with an explanation
+        while every other event is still verified and reported.
+        """
+        if key_id in trusted_keys or key_id in resolution_errors:
             return
         if key_id in resolving:
             cycle = " -> ".join(resolving + [key_id])
-            raise VerificationFailure(f"certificate-rotation trust cycle: {cycle}")
+            resolution_errors[key_id] = f"certificate-rotation trust cycle: {cycle}"
+            return
         resolving.append(key_id)
         try:
-            query = (
-                'airgap.log.signing.new.key.id:'
-                f'"{query_string_value(key_id)}"'
-            )
-            rotation_hits = kibana_request(url, credentials, query, index, size)
-            announcements: List[Tuple[Dict[str, Any], EventResult]] = []
-            parsed = [
-                verify_hit(index_number, hit)
-                for index_number, hit in enumerate(rotation_hits, start=1)
-            ]
-            for result in parsed:
-                try:
-                    document = json.loads(str(result.body))
-                except (TypeError, json.JSONDecodeError):
-                    continue
-                if (
-                    isinstance(document, dict)
-                    and document.get("schema")
-                    == "airgap-log-signing-certificate-rotation-v1"
-                    and document.get("new_key_id") == key_id
-                ):
-                    announcements.append((document, result))
-            if len(announcements) != 1:
-                raise VerificationFailure(
-                    f"expected one certificate rotation announcing {key_id}, "
-                    f"found {len(announcements)}"
-                )
-            announcement, announcement_result = announcements[0]
-            old_key_id = str(announcement.get("old_key_id", ""))
-            if not old_key_id:
-                raise VerificationFailure("certificate rotation has no old_key_id")
-            trust_anchor_from_ca(parsed, old_key_id)
-            authorize_key(old_key_id)
-            verified = validate_signed_window(rotation_hits, trusted_keys)
-            anchors = [
-                result
-                for result in verified
-                if optional_value(result.attributes, "airgap.log.anchor", False) is True
-            ]
-            anchor_key_id = str(value_of(anchors[0].attributes, "airgap.log.key.id"))
-            if anchor_key_id != old_key_id:
-                raise VerificationFailure(
-                    f"rotation was signed by {anchor_key_id}, expected {old_key_id}"
-                )
-            signer_id = str(announcement.get("signer_id", ""))
-            serial = str(announcement.get("new_certificate_serial", ""))
-            certificate = str(announcement.get("new_certificate_pem", ""))
-            if announcement_result.time_unix_nano is None:
-                raise VerificationFailure(
-                    "certificate rotation has no timeUnixNano for certificate validity"
-                )
-            material = certificate_public_key(
-                certificate,
-                signer_id,
-                serial,
-                record_time(announcement_result.time_unix_nano),
-            )
-            actual_key_id = public_key_id(material.public_key_pem)
-            if actual_key_id != key_id:
-                raise VerificationFailure(
-                    f"announced certificate key ID is {actual_key_id}, expected {key_id}"
-                )
-            trusted_keys[key_id] = TrustedKey(
-                key_id=key_id,
-                signer_id=signer_id,
-                public_key_pem=material.public_key_pem,
-                source=f"old-key-signed rotation from {old_key_id}",
-                certificate_not_before=material.not_before,
-                certificate_not_after=material.not_after,
-            )
-            add_hits(rotation_hits)
+            authorize_key_or_raise(key_id)
+        except VerificationFailure as exc:
+            resolution_errors[key_id] = str(exc)
         finally:
             resolving.pop()
+
+    def authorize_key_or_raise(key_id: str) -> None:
+        if key_id in trusted_keys:
+            return
+        query = (
+            'airgap.log.signing.new.key.id:'
+            f'"{query_string_value(key_id)}"'
+        )
+        rotation_hits = kibana_request(url, credentials, query, index, size)
+        announcements: List[Tuple[Dict[str, Any], EventResult]] = []
+        parsed = [
+            verify_hit(index_number, hit)
+            for index_number, hit in enumerate(rotation_hits, start=1)
+        ]
+        for result in parsed:
+            try:
+                document = json.loads(str(result.body))
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(document, dict)
+                and document.get("schema")
+                == "airgap-log-signing-certificate-rotation-v1"
+                and document.get("new_key_id") == key_id
+            ):
+                announcements.append((document, result))
+        if not announcements:
+            raise VerificationFailure(
+                f"no certificate-rotation event announcing {key_id} found in "
+                "Elasticsearch (it may have aged out to cold storage or been "
+                "deleted); supply the key via --trust-registry or trust the "
+                "issuing CA via --ca-file"
+            )
+        if len(announcements) != 1:
+            raise VerificationFailure(
+                f"ambiguous certificate rotation: {len(announcements)} events "
+                f"announce {key_id}; refusing to choose between them"
+            )
+        announcement, announcement_result = announcements[0]
+        old_key_id = str(announcement.get("old_key_id", ""))
+        if not old_key_id:
+            raise VerificationFailure("certificate rotation has no old_key_id")
+        trust_anchor_from_ca(parsed, old_key_id)
+        authorize_key(old_key_id)
+        if old_key_id not in trusted_keys:
+            reason = resolution_errors.get(old_key_id)
+            detail = f": {reason}" if reason else ""
+            raise VerificationFailure(
+                f"old signing key {old_key_id} could not be trusted{detail}"
+            )
+        try:
+            verified = validate_signed_window(rotation_hits, trusted_keys)
+        except VerificationFailure as exc:
+            raise VerificationFailure(
+                f"certificate-rotation window for {key_id} did not verify "
+                f"({exc}); it may have partially aged out of Elasticsearch"
+            ) from exc
+        anchors = [
+            result
+            for result in verified
+            if optional_value(result.attributes, "airgap.log.anchor", False) is True
+        ]
+        anchor_key_id = str(value_of(anchors[0].attributes, "airgap.log.key.id"))
+        if anchor_key_id != old_key_id:
+            raise VerificationFailure(
+                f"rotation was signed by {anchor_key_id}, expected {old_key_id}"
+            )
+        signer_id = str(announcement.get("signer_id", ""))
+        serial = str(announcement.get("new_certificate_serial", ""))
+        certificate = str(announcement.get("new_certificate_pem", ""))
+        if announcement_result.time_unix_nano is None:
+            raise VerificationFailure(
+                "certificate rotation has no timeUnixNano for certificate validity"
+            )
+        material = certificate_public_key(
+            certificate,
+            signer_id,
+            serial,
+            record_time(announcement_result.time_unix_nano),
+        )
+        actual_key_id = public_key_id(material.public_key_pem)
+        if actual_key_id != key_id:
+            raise VerificationFailure(
+                f"announced certificate key ID is {actual_key_id}, expected {key_id}"
+            )
+        trusted_keys[key_id] = TrustedKey(
+            key_id=key_id,
+            signer_id=signer_id,
+            public_key_pem=material.public_key_pem,
+            source=f"old-key-signed rotation from {old_key_id}",
+            certificate_not_before=material.not_before,
+            certificate_not_after=material.not_after,
+        )
+        add_hits(rotation_hits)
 
     for window_hits in list(windows.values()):
         preliminary = [
@@ -1247,10 +1297,13 @@ def expand_kibana_evidence(
         for result in preliminary:
             if optional_value(result.attributes, "airgap.log.anchor", False) is True:
                 key_id = str(value_of(result.attributes, "airgap.log.key.id"))
-                trust_anchor_from_ca(preliminary, key_id)
+                try:
+                    trust_anchor_from_ca(preliminary, key_id)
+                except VerificationFailure as exc:
+                    resolution_errors.setdefault(key_id, str(exc))
                 authorize_key(key_id)
 
-    return ordered, selected_count
+    return ordered, selected_count, resolution_errors
 
 
 def load_events_from_file(path: str) -> List[Dict[str, Any]]:
@@ -1428,6 +1481,7 @@ def main() -> int:
         )
 
     trusted_keys: Dict[str, TrustedKey] = {}
+    resolution_errors: Dict[str, str] = {}
     ca_file: Optional[str] = args.ca_file
     selected_count: Optional[int] = None
     selected_identities: set[str] = set()
@@ -1476,7 +1530,7 @@ def main() -> int:
                 ca_path = Path(args.credentials_file).resolve().parent / ca_path
             ca_file = str(ca_path)
         if trust_registry or ca_file:
-            hits, selected_count = expand_kibana_evidence(
+            hits, selected_count, resolution_errors = expand_kibana_evidence(
                 hits,
                 kibana_url,
                 credentials,
@@ -1508,7 +1562,7 @@ def main() -> int:
         result.selected = hit_identity(hit) in selected_identities
     verify_chain_continuity(results)
     for result in results:
-        verify_signature(result, trusted_keys)
+        verify_signature(result, trusted_keys, resolution_errors)
     overall_ok = all(result.ok for result in results)
     full_report = detailed_report(results, source, selected_count)
 

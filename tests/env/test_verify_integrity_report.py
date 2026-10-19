@@ -1,9 +1,11 @@
 import hashlib
+import json
 import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -70,6 +72,137 @@ class ChainMetadataTests(unittest.TestCase):
                 changed, changed.attributes, changed.body, "v1"
             )
             self.assertFalse(changed.ok)
+
+
+class MissingRotationEvidenceTests(unittest.TestCase):
+    """Rotation events may age out of Elasticsearch before an investigation.
+
+    expand_kibana_evidence must not abort when rotation evidence is missing
+    or unusable: the key stays untrusted, the reason is recorded, and the
+    affected anchor's signature check fails with that reason while every
+    other event is still verified and reported.
+    """
+
+    @staticmethod
+    def anchor_hit(key_id: str) -> dict:
+        return {
+            "_id": f"anchor-{key_id}",
+            "_source": {
+                "airgap.log.run.id": "run-1",
+                "airgap.log.window.id": "win-1",
+                "airgap.log.anchor": True,
+                "airgap.log.key.id": key_id,
+                "airgap.log.signer.id": "urn:airgap:test",
+                "airgap.log.seq": 10,
+                "airgap.log.signature": "AAAA",
+                "airgap.log.signature.alg": "Ed25519",
+                "body": "airgap log chain anchor",
+                "timeUnixNano": "1700000000000000000",
+                "severityNumber": 9,
+                "severityText": "INFO",
+            },
+        }
+
+    @staticmethod
+    def rotation_hit(key_id: str, suffix: str) -> dict:
+        document = {
+            "schema": "airgap-log-signing-certificate-rotation-v1",
+            "event": "log.integrity.signing_certificate.rotate",
+            "signer_id": "urn:airgap:test",
+            "old_key_id": "sha256:old",
+            "new_key_id": key_id,
+            "new_certificate_serial": "1",
+            "new_certificate_pem": (
+                "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
+            ),
+        }
+        return {
+            "_id": f"rotation-{suffix}",
+            "_source": {"body": json.dumps(document)},
+        }
+
+    def expand(self, selected, rotation_hits, trusted_keys):
+        def fake_request(
+            url, credentials, query, index, size, date_from=None, date_to=None
+        ):
+            if "airgap.log.signing.new.key.id" in query:
+                return rotation_hits
+            return list(selected)
+
+        with mock.patch.object(verifier, "kibana_request", fake_request):
+            return verifier.expand_kibana_evidence(
+                selected,
+                "http://kibana:5601",
+                {"api_key": "x"},
+                "logs-*",
+                100,
+                trusted_keys,
+                None,
+            )
+
+    def test_missing_rotation_event_degrades_instead_of_aborting(self) -> None:
+        key_id = "sha256:" + "ab" * 32
+        trusted_keys: dict = {}
+        selected = [self.anchor_hit(key_id)]
+
+        hits, selected_count, errors = self.expand(selected, [], trusted_keys)
+
+        self.assertEqual(selected_count, 1)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(trusted_keys, {})
+        self.assertIn(key_id, errors)
+        self.assertIn("aged out", errors[key_id])
+        self.assertIn("--trust-registry", errors[key_id])
+
+        result = verifier.verify_hit(1, selected[0])
+        verifier.verify_signature(result, trusted_keys, errors)
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any(
+                "no trusted key" in line and "aged out" in line
+                for line in result.lines
+            ),
+            result.lines,
+        )
+
+    def test_ambiguous_rotation_event_degrades_instead_of_aborting(self) -> None:
+        key_id = "sha256:" + "cd" * 32
+        trusted_keys: dict = {}
+        selected = [self.anchor_hit(key_id)]
+        rotations = [self.rotation_hit(key_id, "a"), self.rotation_hit(key_id, "b")]
+
+        _, _, errors = self.expand(selected, rotations, trusted_keys)
+
+        self.assertEqual(trusted_keys, {})
+        self.assertIn(key_id, errors)
+        self.assertIn("ambiguous", errors[key_id])
+
+    def test_cycle_degrades_instead_of_aborting(self) -> None:
+        key_id = "sha256:" + "ef" * 32
+        trusted_keys: dict = {}
+        selected = [self.anchor_hit(key_id)]
+        # The rotation announcing key_id claims to be signed by key_id
+        # itself: a trust cycle that must be reported, not hung or aborted.
+        first = self.rotation_hit(key_id, "a")
+        first["_source"]["body"] = json.dumps(
+            {
+                "schema": "airgap-log-signing-certificate-rotation-v1",
+                "event": "log.integrity.signing_certificate.rotate",
+                "signer_id": "urn:airgap:test",
+                "old_key_id": key_id,
+                "new_key_id": key_id,
+                "new_certificate_serial": "1",
+                "new_certificate_pem": (
+                    "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
+                ),
+            }
+        )
+
+        _, _, errors = self.expand(selected, [first], trusted_keys)
+
+        self.assertEqual(trusted_keys, {})
+        self.assertIn(key_id, errors)
+        self.assertIn("trust cycle", errors[key_id])
 
 
 class PublicTestVectorTests(unittest.TestCase):

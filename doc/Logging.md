@@ -916,7 +916,16 @@ paths are resolved beside the credentials file. Automatically fetched records
 are labelled `evidence` in the report; records returned by the case query are
 labelled `selected`. Every expansion query requires exact `hits.total`, and a
 missing record, ambiguous rotation, trust cycle, unknown key, incomplete
-window, invalid certificate, or bad signature fails closed. Normal use is:
+window, invalid certificate, or bad signature fails closed.
+
+Failures while resolving signing keys do not abort the report. Rotation events
+can age out to cold storage or be deleted before an investigation runs. When
+trust for a key cannot be established, the key stays untrusted and the
+affected windows fail their signature checks with the reason and the
+remediation (supply the key via `--trust-registry`, or trust the issuing CA
+via `--ca-file`), while every other event is still verified and reported.
+Failing closed still means what it says: evidence that cannot be
+authenticated is never reported as passed. Normal use is:
 
 ```sh
 python3 -m pip install -r tests/env/requirements-integrity-report.txt
