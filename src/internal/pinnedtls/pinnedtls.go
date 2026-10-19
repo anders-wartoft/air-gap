@@ -123,9 +123,17 @@ func loadTrust(dir, role string) (map[string]Entry, error) {
 		if err := decoder.Decode(new(any)); err != io.EOF {
 			return nil, fmt.Errorf("trailing content in trust entry %s", name)
 		}
-		if entry.Version != 1 || entry.Peer == "" || strings.ContainsAny(entry.Peer, "\r\n\t") ||
-			entry.Role != role {
-			return nil, fmt.Errorf("invalid version, peer, or role in trust entry %s", name)
+		// A well-formed entry for the other endpoint role is deliberately
+		// ignored, so one shared directory can hold both client and server
+		// trust. An entry without a role is malformed and fails closed.
+		if entry.Role != role {
+			if entry.Role != "" {
+				continue
+			}
+			return nil, fmt.Errorf("missing role in trust entry %s", name)
+		}
+		if entry.Version != 1 || entry.Peer == "" || strings.ContainsAny(entry.Peer, "\r\n\t") {
+			return nil, fmt.Errorf("invalid version or peer in trust entry %s", name)
 		}
 		block, rest := pem.Decode([]byte(entry.PublicKey))
 		if block == nil || block.Type != "PUBLIC KEY" || len(bytes.TrimSpace(rest)) != 0 {

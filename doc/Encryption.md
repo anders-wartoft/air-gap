@@ -185,6 +185,10 @@ written manually. `tcpTLSTrustedKeysDir` names a directory, not an individual
 JSON file: the application loads every valid, non-hidden `*.json` entry in
 that directory. The JSON authorizes the remote peer's public key; each
 application still needs its own local `.crt` and `.key` to authenticate itself.
+Each side loads only the entries matching its expected peer role (`"server"`
+on upstream, `"client"` on downstream) and silently ignores well-formed
+entries for the other role, so both sides may point `tcpTLSTrustedKeysDir`
+at one shared directory holding both client and server entries.
 
 On upstream, keep the local client identity and install the JSON generated
 by downstream:
@@ -240,8 +244,10 @@ support `--property=value` overrides and environment variables:
 Public entries and directories must not be group/other-writable; use mode
 0600 entries and mode 0700 directories. Private key files must have no
 group/other permissions. Symlink entries, malformed JSON/keys, mismatched
-fingerprints, wrong roles, unknown JSON fields, and unrecognized directory
-entries are rejected. Hidden and `*.tmp` files are ignored for staging.
+fingerprints, entries without a role, unknown JSON fields, and unrecognized
+directory entries are rejected. Entries carrying the other endpoint's role
+are ignored rather than rejected. Hidden and `*.tmp` files are ignored for
+staging.
 Maximums: 16 KiB per identity/trust file, 2,000 JSON entries per trust store,
 and 4,096 total directory entries including staged files. An existing empty
 trust directory loads successfully but denies every peer. Missing or

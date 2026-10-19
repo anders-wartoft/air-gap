@@ -51,6 +51,8 @@ trap 'exit 129' HUP
 
 mkdir -m 700 "$TC27_WORK_DIR/client" "$TC27_WORK_DIR/server" \
     "$TC27_WORK_DIR/clients" "$TC27_WORK_DIR/servers" \
+    "$TC27_WORK_DIR/shared" \
+    "$TC27_WORK_DIR/wrong-upstream" "$TC27_WORK_DIR/wrong-downstream" \
     "$TC27_WORK_DIR/provision-to-downstream" "$TC27_WORK_DIR/provision-to-upstream"
 compose build
 compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$TC27_WORK_DIR/client:/keys" \
@@ -86,6 +88,15 @@ done
 # Only the first identities are provisioned; the second remain untrusted controls.
 install -m 600 "$TC27_WORK_DIR/provision-to-downstream/client-1.json" "$TC27_WORK_DIR/clients/client-1.json"
 install -m 600 "$TC27_WORK_DIR/provision-to-upstream/server-1.json" "$TC27_WORK_DIR/servers/server-1.json"
+
+# One directory holding both roles proves each side ignores the other role;
+# wrong-role-only directories feed the negative phases.
+install -m 600 "$TC27_WORK_DIR/provision-to-downstream/client-1.json" "$TC27_WORK_DIR/shared/client-1.json"
+install -m 600 "$TC27_WORK_DIR/provision-to-upstream/server-1.json" "$TC27_WORK_DIR/shared/server-1.json"
+install -m 600 "$TC27_WORK_DIR/provision-to-downstream/client-1.json" "$TC27_WORK_DIR/wrong-upstream/client-1.json"
+install -m 600 "$TC27_WORK_DIR/provision-to-downstream/client-2.json" "$TC27_WORK_DIR/wrong-upstream/client-2.json"
+install -m 600 "$TC27_WORK_DIR/provision-to-upstream/server-1.json" "$TC27_WORK_DIR/wrong-downstream/server-1.json"
+install -m 600 "$TC27_WORK_DIR/provision-to-upstream/server-2.json" "$TC27_WORK_DIR/wrong-downstream/server-2.json"
 CLIENT="$(cat "$TC27_WORK_DIR/client/client-1.fingerprint")"
 SERVER="$(cat "$TC27_WORK_DIR/server/server-1.fingerprint")"
 UNKNOWN_CLIENT="$(cat "$TC27_WORK_DIR/client/client-2.fingerprint")"
@@ -190,3 +201,27 @@ restart_pair
 wait_delivery "Trusted keys restored: application delivery recovers"
 assert_contains upstream-a "Pinned TLS authenticated server peer=server-1 fingerprint=$SERVER" "Restored server authenticated"
 assert_contains downstream "Pinned TLS authenticated client peer=client-1 fingerprint=$CLIENT" "Restored client authenticated"
+
+echo "TC-27: one shared trust directory holds both roles"
+export TC27_UPSTREAM_TRUST_DIR=shared TC27_DOWNSTREAM_TRUST_DIR=shared
+restart_pair
+wait_delivery "Shared trust directory data path"
+assert_contains upstream-a "Pinned TLS authenticated server peer=server-1 fingerprint=$SERVER" "Upstream ignores the client entry in the shared directory"
+assert_contains downstream "Pinned TLS authenticated client peer=client-1 fingerprint=$CLIENT" "Downstream ignores the server entry in the shared directory"
+
+echo "TC-27: upstream with only client-role entries must not deliver"
+export TC27_UPSTREAM_TRUST_DIR=wrong-upstream TC27_DOWNSTREAM_TRUST_DIR=clients
+restart_pair
+wait_for upstream-a "untrusted server key $SERVER" "Upstream rejects the server when only client entries are present"
+assert_no_delivery "Upstream with only client-role entries denies application data"
+
+echo "TC-27: downstream with only server-role entries must not deliver"
+export TC27_UPSTREAM_TRUST_DIR=servers TC27_DOWNSTREAM_TRUST_DIR=wrong-downstream
+restart_pair
+wait_for downstream "untrusted client key $CLIENT" "Downstream rejects the client when only server entries are present"
+assert_no_delivery "Downstream with only server-role entries denies application data"
+
+echo "TC-27: restore per-side trust directories and prove final recovery"
+export TC27_UPSTREAM_TRUST_DIR=servers TC27_DOWNSTREAM_TRUST_DIR=clients
+restart_pair
+wait_delivery "Per-side trust directories restored: application delivery recovers"

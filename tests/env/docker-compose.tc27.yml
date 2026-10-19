@@ -9,7 +9,7 @@ services:
       - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
       - ../../config/testcases:/airgap/config:ro
       - ${TC27_WORK_DIR:?Run through run-testcase.sh 27}/client:/airgap/identity:ro
-      - ${TC27_WORK_DIR}/servers:/airgap/trusted:ro
+      - ${TC27_WORK_DIR}/${TC27_UPSTREAM_TRUST_DIR:-servers}:/airgap/trusted:ro
     environment:
       AIRGAP_CONFIG: /airgap/config/upstream-pinned-27-docker.properties
       AIRGAP_UPSTREAM_TCP_TLS_CERT_FILE: /airgap/identity/client-${TC27_CLIENT_KEY:-1}.crt
@@ -26,7 +26,7 @@ services:
       - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
       - ../../config/testcases:/airgap/config:ro
       - ${TC27_WORK_DIR}/server:/airgap/identity:ro
-      - ${TC27_WORK_DIR}/clients:/airgap/trusted:ro
+      - ${TC27_WORK_DIR}/${TC27_DOWNSTREAM_TRUST_DIR:-clients}:/airgap/trusted:ro
     environment:
       AIRGAP_CONFIG: /airgap/config/downstream-pinned-27-docker.properties
       AIRGAP_DOWNSTREAM_TCP_TLS_CERT_FILE: /airgap/identity/server-${TC27_SERVER_KEY:-1}.crt

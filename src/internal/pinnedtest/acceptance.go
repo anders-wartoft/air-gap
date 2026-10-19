@@ -265,21 +265,16 @@ func Authentication(t *testing.T, factory Factory, server bool) {
 		}
 	})
 	t.Run("TC27_03_04_05_13_trust_validation", func(t *testing.T) {
-		for _, scenario := range []string{"mismatched_fingerprint", "wrong_role", "malformed", "private_key", "symlink", "missing_directory"} {
+		for _, scenario := range []string{"mismatched_fingerprint", "malformed", "private_key", "symlink", "missing_directory"} {
 			t.Run(scenario, func(t *testing.T) {
 				dir := t.TempDir()
 				entry(t, dir, "peer", role, peer)
 				path := filepath.Join(dir, "peer.json")
 				switch scenario {
-				case "mismatched_fingerprint", "wrong_role", "private_key":
+				case "mismatched_fingerprint", "private_key":
 					e := trustEntry{1, "peer", role, peer.publicPEM, peer.fingerprint}
 					if scenario == "mismatched_fingerprint" {
 						e.Fingerprint = unknown.fingerprint
-					} else if scenario == "wrong_role" {
-						e.Role = "server"
-						if !server {
-							e.Role = "client"
-						}
 					} else {
 						data, err := os.ReadFile(peer.keyPath)
 						if err != nil {
@@ -308,6 +303,31 @@ func Authentication(t *testing.T, factory Factory, server bool) {
 					t.Fatal("invalid trust input accepted")
 				}
 			})
+		}
+	})
+	t.Run("TC27_13_other_role_ignored", func(t *testing.T) {
+		// An entry for the other endpoint role is deliberately ignored, so one
+		// shared directory can serve both sides. The store then simply does
+		// not authorize the peer, exactly like an empty store.
+		dir := t.TempDir()
+		other := "server"
+		if !server {
+			other = "client"
+		}
+		data, err := json.Marshal(trustEntry{1, "peer", other, peer.publicPEM, peer.fingerprint})
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(dir, "peer.json"), data)
+		config, err := build(t, factory, properties(local, dir, server))
+		if err != nil {
+			t.Fatalf("other-role entry must be ignored, not rejected: %v", err)
+		}
+		if config == nil {
+			t.Fatal("nil TLS configuration")
+		}
+		if err := exchange(config, peer, server); err == nil {
+			t.Fatal("peer authorized by an entry for the other endpoint role")
 		}
 	})
 	t.Run("TC27_05_staging_file_ignored", func(t *testing.T) {

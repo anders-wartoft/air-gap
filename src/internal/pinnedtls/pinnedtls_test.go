@@ -41,6 +41,40 @@ func install(t *testing.T, dir, name string, entry Entry) string {
 	return path
 }
 
+func TestTrustIgnoresOtherEndpointRole(t *testing.T) {
+	entry := fixtureEntry(t) // role "client"
+	serverEntry := Entry{
+		Version: 1, Peer: "receiver", Role: "server",
+		PublicKey: entry.PublicKey, Fingerprint: entry.Fingerprint,
+	}
+
+	dir := t.TempDir()
+	install(t, dir, "client", entry)
+	install(t, dir, "server", serverEntry)
+
+	clientPins, err := loadTrust(dir, "client")
+	if err != nil || len(clientPins) != 1 {
+		t.Fatalf("client role did not load exactly its own entry: %v, %d", err, len(clientPins))
+	}
+	if clientPins[entry.Fingerprint].Role != "client" {
+		t.Fatal("client load kept a server-role entry")
+	}
+	serverPins, err := loadTrust(dir, "server")
+	if err != nil || len(serverPins) != 1 {
+		t.Fatalf("server role did not load exactly its own entry: %v, %d", err, len(serverPins))
+	}
+	if serverPins[entry.Fingerprint].Role != "server" {
+		t.Fatal("server load kept a client-role entry")
+	}
+
+	broken := entry
+	broken.Role = ""
+	install(t, dir, "broken", broken)
+	if _, err := loadTrust(dir, "client"); err == nil {
+		t.Fatal("entry without role accepted")
+	}
+}
+
 func TestTrustDuplicatesAndPermissions(t *testing.T) {
 	entry := fixtureEntry(t)
 	t.Run("duplicates", func(t *testing.T) {
