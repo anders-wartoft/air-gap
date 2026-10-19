@@ -129,6 +129,7 @@ func Check(t *testing.T, config any, expected map[string]string) {
 
 func Capture(t *testing.T, level string, run func()) string {
 	t.Helper()
+	logging.Logger.FlushRepeated()
 	oldOutput := logging.StdLogger.Writer()
 	oldLevel := logging.Logger.GetLogLevel()
 	defer logging.StdLogger.SetOutput(oldOutput)

@@ -1,0 +1,31 @@
+services:
+  downstream:
+    platform: linux/amd64
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-tc38:local
+    volumes:
+      - ${TC38_WORK:?Run through run-testcase.sh 38}:/airgap/work
+      - ../../config/testcases:/airgap/config:ro
+    entrypoint: ["/airgap/work/downstream"]
+    command: ["/airgap/config/downstream-airgap-38-docker.properties"]
+    environment:
+      AIRGAP_LOG_REPEAT_INTERVAL: "0"
+    restart: "no"
+
+  upstream:
+    platform: linux/amd64
+    image: airgap-testenv-tc38:local
+    volumes:
+      - ${TC38_WORK}:/airgap/work
+      - ../../config/testcases:/airgap/config:ro
+    entrypoint: ["/airgap/work/upstream"]
+    command: ["/airgap/config/upstream-airgap-38-docker.properties"]
+    environment:
+      AIRGAP_LOG_REPEAT_INTERVAL: ${TC38_REPEAT_INTERVAL:-2000}
+      AIRGAP_UPSTREAM_LOG_FILE_NAME: /airgap/work/${TC38_PHASE:-enabled}.jsonl
+      AIRGAP_UPSTREAM_TCP_TLS_CERT_FILE: ${TC38_CLIENT_CERT:-}
+      AIRGAP_UPSTREAM_TCP_TLS_KEY_FILE: ${TC38_CLIENT_KEY:-}
+    restart: "no"

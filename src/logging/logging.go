@@ -69,6 +69,7 @@ func (l *LoggerType) SetFormat(format string) error {
 
 	emitMu.Lock()
 	defer emitMu.Unlock()
+	resetRepetitionLocked(time.Now())
 	logFormat = normalized
 	return nil
 }
@@ -85,6 +86,7 @@ func (l *LoggerType) GetFormat() string {
 func (l *LoggerType) SetHashAlgorithm(algorithm string) error {
 	emitMu.Lock()
 	defer emitMu.Unlock()
+	resetRepetitionLocked(time.Now())
 	return integrity.configureIntegrity(algorithm)
 }
 
@@ -93,6 +95,7 @@ func (l *LoggerType) SetHashAlgorithm(algorithm string) error {
 func (l *LoggerType) SetHashChainLength(length int) error {
 	emitMu.Lock()
 	defer emitMu.Unlock()
+	resetRepetitionLocked(time.Now())
 	return integrity.configureChainLength(length)
 }
 
@@ -175,6 +178,13 @@ func emit(level LogLevel, attrs Attrs, body string) {
 	defer emitMu.Unlock()
 
 	now := time.Now()
+	if suppressRepeatedLocked(now, level, attrs, body) {
+		return
+	}
+	writeEventLocked(now, level, body, attrs)
+}
+
+func writeEventLocked(now time.Time, level LogLevel, body string, attrs Attrs) {
 	writeRecord(now, level, body, attrs, nil)
 
 	if integrity.anchorDue() {
@@ -215,13 +225,17 @@ func format(spec string, v []interface{}) string {
 
 // ProductionWarning is always visible without changing the configured threshold.
 func (l *LoggerType) ProductionWarning(phase, setting string, value interface{}, risk string) {
-	emit(WARN, Event(EventConfigProductionWarning,
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	now := time.Now()
+	resetRepetitionLocked(now)
+	writeEventLocked(now, WARN, fmt.Sprintf("[PRODUCTION-CONFIG] phase=%s setting=%s value=%v risk=%s",
+		phase, setting, value, risk), Event(EventConfigProductionWarning,
 		Str("airgap.config.phase", phase),
 		Str("airgap.config.setting", setting),
 		Str("airgap.config.value", fmt.Sprintf("%v", value)),
 		Str("airgap.config.risk", risk),
-	), fmt.Sprintf("[PRODUCTION-CONFIG] phase=%s setting=%s value=%v risk=%s",
-		phase, setting, value, risk))
+	))
 }
 
 // Quick check to see if we can log in some level
@@ -405,6 +419,7 @@ func (l *LoggerType) SetLogFile(filename string) error {
 	defer emitMu.Unlock()
 
 	previousLogFile := logFile
+	resetRepetitionLocked(time.Now())
 	logger.SetOutput(f)
 	output = f
 	logFile = f
@@ -421,6 +436,7 @@ func (l *LoggerType) SetLogFile(filename string) error {
 func setOutputForTest(w io.Writer) {
 	emitMu.Lock()
 	defer emitMu.Unlock()
+	resetRepetitionLocked(time.Now())
 	if logFile != nil {
 		_ = logFile.Close()
 		logFile = nil

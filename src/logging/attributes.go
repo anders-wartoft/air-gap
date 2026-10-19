@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"time"
 
 	"sitia.nu/airgap/src/version"
 )
@@ -41,6 +42,9 @@ var serviceVersion = version.GitVersion
 
 // SetServiceVersion overrides service.version for this process.
 func SetServiceVersion(v string) {
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	resetRepetitionLocked(time.Now())
 	resourceMu.Lock()
 	serviceVersion = strings.TrimSpace(v)
 	resourceMu.Unlock()

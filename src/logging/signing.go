@@ -459,6 +459,7 @@ func (l *LoggerType) RotateSigningCertificate(
 	}
 
 	now := time.Now()
+	resetRepetitionLocked(now)
 	writeRecord(
 		now,
 		INFO,

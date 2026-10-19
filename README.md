@@ -745,6 +745,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | generateNewSymmetricKeyEvery | AIRGAP_UPSTREAM_GENERATE_NEW_SYMMETRIC_KEY_EVERY | | How often should we change the encryption key (symmetric key)? |
 | logFileName | AIRGAP_UPSTREAM_LOG_FILE_NAME | | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
 | logFormat | AIRGAP_UPSTREAM_LOG_FORMAT | text | `text` for the usual one line per record, or `otel` for OpenTelemetry Logs as OTLP/JSON. See [Logging.md](doc/Logging.md) |
+| (environment only) | AIRGAP_LOG_REPEAT_INTERVAL | 10000 | Milliseconds between summaries of repeated application log records; `0` disables suppression. Shared by all Go services. See [Logging.md](doc/Logging.md#repeated-messages) |
 | hash | AIRGAP_UPSTREAM_LOG_HASH | none | Hash the payload of every log record and record the digest as an attribute. `none`, `SHA256`, `SHA384`, `SHA512`, `SHA3-256`, `SHA3-384` or `SHA3-512`. See [Logging.md](doc/Logging.md) |
 | hash-chain | AIRGAP_UPSTREAM_LOG_HASH_CHAIN | 0 | Chain each log record to the one before it and write an anchor record every N records, so that edits and deletions become detectable. `0` disables chaining. See [Logging.md](doc/Logging.md) |
 | sendingThreads | AIRGAP_UPSTREAM_SENDING_THREADS | {"now": 0} | How many times, and when, whould we send each event? |
@@ -760,7 +761,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | inputFilterRules | AIRGAP_UPSTREAM_INPUT_FILTER_RULES | | Path to file containing ordered allow/deny regex rules, or inline comma-separated rules. Format: `action:regex_pattern` where action is `allow` or `deny`. Rules evaluated in order, first match wins. Matched events are sent with **empty payload** (not dropped) so the gap-detector sees every sequence ID. The deduplicator discards zero-length events before writing to the clean topic. See [InputFilter.md](doc/InputFilter.md) for details |
 | inputFilterDefaultAction | AIRGAP_UPSTREAM_INPUT_FILTER_DEFAULT_ACTION | allow | Default action when no filter rules match: `allow` or `deny`. Use `deny` for allowlist approach, `allow` for blocklist approach |
 | inputFilterTimeout | AIRGAP_UPSTREAM_INPUT_FILTER_TIMEOUT | 100 | Regex match timeout in milliseconds for input filter rules. Protects against ReDoS attacks. Increase for complex patterns or large payloads |
-| tcpRetryInterval | AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL | 1000 | (TCP only) Milliseconds to wait between send retries when the downstream is unreachable |
+| tcpRetryInterval | AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL | 1000 | (TCP only) Milliseconds between send retries and minimum interval between connection attempts per adapter |
 | tcpRetryTimes | AIRGAP_UPSTREAM_TCP_RETRY_TIMES | 0 | (TCP only) Maximum number of send retries. `0` means retry indefinitely (no message loss). Set to a positive integer to give up after that many attempts |
 | tcpRetryErrorLevel | AIRGAP_UPSTREAM_TCP_RETRY_ERROR_LEVEL | WARN | (TCP only) Log level used for each retry attempt message. Valid values: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | tcpTLSEnabled | AIRGAP_UPSTREAM_TCP_TLS_ENABLED | false | (TCP only) Enable TLS 1.2+ on the TCP connection. Requires `tcpTLSCAFile`. Set to `true` to encrypt the TCP transport |
@@ -857,6 +858,7 @@ The property privateKeyFiles should point to one or more private key files that 
 | privateKeyFiles | AIRGAP_DOWNSTREAM_PRIVATE_KEY_FILES | | Glob covering all private key files to load |
 | logFileName | AIRGAP_DOWNSTREAM_LOG_FILE_NAME | | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
 | logFormat | AIRGAP_DOWNSTREAM_LOG_FORMAT | text | `text` for the usual one line per record, or `otel` for OpenTelemetry Logs as OTLP/JSON. See [Logging.md](doc/Logging.md) |
+| (environment only) | AIRGAP_LOG_REPEAT_INTERVAL | 10000 | Milliseconds between summaries of repeated application log records; `0` disables suppression. Shared by all Go services. See [Logging.md](doc/Logging.md#repeated-messages) |
 | hash | AIRGAP_DOWNSTREAM_LOG_HASH | none | Hash the payload of every log record and record the digest as an attribute. `none`, `SHA256`, `SHA384`, `SHA512`, `SHA3-256`, `SHA3-384` or `SHA3-512`. See [Logging.md](doc/Logging.md) |
 | hash-chain | AIRGAP_DOWNSTREAM_LOG_HASH_CHAIN | 0 | Chain each log record to the one before it and write an anchor record every N records, so that edits and deletions become detectable. `0` disables chaining. See [Logging.md](doc/Logging.md) |
 | certFile | AIRGAP_DOWNSTREAM_CERT_FILE | | For TLS to Kafka, add a certificate pem encoded file here |

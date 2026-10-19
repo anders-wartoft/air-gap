@@ -169,9 +169,21 @@ When `transport=tcp`, upstream retries failed sends according to three configura
 
 | Property | Env variable | Default | Description |
 | --- | --- | --- | --- |
-| `tcpRetryInterval` | `AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL` | `1000` | Milliseconds to wait between retry attempts |
+| `tcpRetryInterval` | `AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL` | `1000` | Milliseconds between send retries; also the minimum interval between TCP connection attempts per adapter |
 | `tcpRetryTimes` | `AIRGAP_UPSTREAM_TCP_RETRY_TIMES` | `0` | Max retries; `0` = infinite (never give up) |
 | `tcpRetryErrorLevel` | `AIRGAP_UPSTREAM_TCP_RETRY_ERROR_LEVEL` | `WARN` | Log level for per-attempt retry messages (`DEBUG`/`INFO`/`WARN`/`ERROR`) |
+
+The connection cooldown applies across messages and concurrent sending threads,
+not just within one failed-send retry loop. This also bounds reconnects when a
+TLS 1.3 peer rejects authentication after the client's dial initially succeeds.
+An attempt during the cooldown returns a send error to the normal retry loop;
+it does not open another socket. Healthy established connections have no extra
+delay. Certificate-rotation control exchanges are not subject to this send-path
+cooldown.
+
+To summarize repeated application log messages independently of retry timing,
+set `AIRGAP_LOG_REPEAT_INTERVAL` (default 10000 ms; `0` disables it).
+See [Logging](Logging.md#repeated-messages).
 
 **Default behaviour (recommended for production):**
 

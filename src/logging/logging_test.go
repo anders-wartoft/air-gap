@@ -21,6 +21,9 @@ import (
 func resetLogging(t *testing.T) *bytes.Buffer {
 	t.Helper()
 
+	if err := Logger.SetRepeatInterval(0); err != nil {
+		t.Fatal(err)
+	}
 	buf := &bytes.Buffer{}
 	setOutputForTest(buf)
 
@@ -50,6 +53,7 @@ func resetLogging(t *testing.T) *bytes.Buffer {
 	Logger.ClearSigningCertificate()
 
 	t.Cleanup(func() {
+		_ = Logger.SetRepeatInterval(defaultRepeatInterval)
 		setOutputForTest(bytes.NewBuffer(nil))
 		Logger.SetLogLevel("INFO")
 		_ = Logger.SetFormat(FormatText)

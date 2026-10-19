@@ -46,6 +46,21 @@ TC-36 and TC-37 build `Dockerfile.integrity-report`, which pins the in-process
 Python cryptography dependencies used by the operator verifier; neither test
 depends on the host's OpenSSL executable or LibreSSL behavior.
 
+TC-38 runs just the real upstream and downstream in an isolated Compose network,
+using the random source and command sink instead of Kafka. It checks JSON repeat
+attributes with suppression enabled/disabled, missing-client-certificate retry
+spacing, and successful delivery after installing a valid client certificate:
+
+```bash
+./run-testcase.sh 38
+```
+
+It builds current Linux AMD64 binaries into a temporary directory and requires
+host Go, Python 3, OpenSSL, and Docker Compose. Failure artifacts are retained;
+`-pause` leaves its isolated containers and files available for inspection.
+TC-38 prints green PASS/red FAIL checks, including explicit sender rate-limiting
+and log rate-limiting results. Set `NO_COLOR=1` for plain output.
+
 ## Topology
 
 The Kafka layout mirrors the real deployment: each cluster is a two-broker

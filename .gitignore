@@ -15,3 +15,4 @@ plan/
 **/pom.xml.versionsBackup
 .github/
 tests/chaos-testing/out/
+tests/env/__pycache__/

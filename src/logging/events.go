@@ -94,6 +94,7 @@ const (
 
 	// Log integrity. The anchor record closes a hash chain window.
 	EventLogAnchor                   = "log.integrity.anchor"
+	EventLogRepeat                   = "log.repeat"
 	EventLogSigningCertificateRotate = "log.integrity.signing_certificate.rotate"
 
 	// Operational reporting that does not belong to a single domain.

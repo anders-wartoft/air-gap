@@ -138,15 +138,18 @@ func (u *UDPAdapter) Close() error {
 
 // TCPAdapter implements TransportClient for TCP connections
 type TCPAdapter struct {
-	conn       net.Conn
-	addr       string
-	mu         sync.Mutex
-	err        error
-	tlsConfig  *tls.Config // nil for plain TCP
-	pinned     bool
-	pinManager *pinnedtls.Manager
-	generation uint64
-	closed     bool
+	conn          net.Conn
+	addr          string
+	mu            sync.Mutex
+	err           error
+	tlsConfig     *tls.Config // nil for plain TCP
+	pinned        bool
+	pinManager    *pinnedtls.Manager
+	generation    uint64
+	closed        bool
+	dialMu        sync.Mutex
+	lastDial      time.Time
+	retryInterval time.Duration
 	// TLS cert hot-reload: original params stored so ReloadTLSConfig can rebuild on SIGHUP
 	tlsCAFile          string
 	tlsCertFile        string
@@ -371,15 +374,16 @@ func parseCipherSuites(csv string) ([]uint16, error) {
 // It doesn't fail if connection is not immediately available - it will attempt
 // to connect lazily on first message send.
 func NewTCPAdapter(address string, tlsConfig *tls.Config) (*TCPAdapter, error) {
-	return newTCPAdapter(address, tlsConfig, nil)
+	return newTCPAdapter(address, tlsConfig, nil, time.Second)
 }
 
-func newTCPAdapter(address string, tlsConfig *tls.Config, manager *pinnedtls.Manager) (*TCPAdapter, error) {
+func newTCPAdapter(address string, tlsConfig *tls.Config, manager *pinnedtls.Manager, retryInterval time.Duration) (*TCPAdapter, error) {
 	adapter := &TCPAdapter{
-		addr:       address,
-		tlsConfig:  tlsConfig,
-		pinManager: manager,
-		pinned:     manager != nil,
+		addr:          address,
+		tlsConfig:     tlsConfig,
+		pinManager:    manager,
+		pinned:        manager != nil,
+		retryInterval: retryInterval,
 	}
 
 	// Try to connect immediately, but don't fail if it's not available yet
@@ -531,7 +535,17 @@ const dialTimeout = 10 * time.Second
 
 // dial opens a new connection to t.addr, using TLS if configured.
 func (t *TCPAdapter) dial() (net.Conn, error) {
-	return t.dialConfig(t.tlsConfig)
+	return t.dialLimited(t.tlsConfig)
+}
+
+func (t *TCPAdapter) dialLimited(config *tls.Config) (net.Conn, error) {
+	t.dialMu.Lock()
+	defer t.dialMu.Unlock()
+	if remaining := t.retryInterval - time.Since(t.lastDial); remaining > 0 {
+		return nil, fmt.Errorf("TCP reconnect to %s deferred for %s by tcpRetryInterval", t.addr, remaining.Round(time.Millisecond))
+	}
+	t.lastDial = time.Now()
+	return t.dialConfig(config)
 }
 
 func (t *TCPAdapter) dialConfig(config *tls.Config) (net.Conn, error) {
@@ -610,7 +624,7 @@ func (t *TCPAdapter) ensureConnected() bool {
 	}
 	t.mu.Unlock()
 
-	conn, err := t.dialConfig(config)
+	conn, err := t.dialLimited(config)
 	if err != nil {
 		t.mu.Lock()
 		t.err = err

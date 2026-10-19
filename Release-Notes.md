@@ -1,5 +1,37 @@
 # Release Notes
 
+## 0.1.16-SNAPSHOT
+
+### Bounded TCP reconnects and repeated-log summaries
+
+- TCP connection attempts now respect `tcpRetryInterval` (default 1000 ms)
+  across messages and concurrent sending threads, including TLS 1.3 connections
+  rejected after the client initially completes its handshake. Misconfigured
+  peers can no longer bypass the send retry delay through rapid reconnects.
+- The shared Go application logger now combines repeated records, including
+  interleaved repeats, into `Message repeated N times: <original text>`
+  summaries. The package reads `AIRGAP_LOG_REPEAT_INTERVAL` at startup
+  (milliseconds; default 10000; `0` disables suppression), without application
+  configuration or call-site changes. The cache holds at most 1024 entries and
+  expires idle entries. Counts flush on timer expiry, eviction, and log-file,
+  format, or service-identity changes. Summaries preserve severity and
+  participate in log integrity; fatal records and mandatory production warnings
+  remain unsuppressed. Records with changing bodies/attributes and direct
+  third-party text output are not combined. Counts still pending at process exit
+  are not guaranteed a final summary.
+- JSON repeat records retain the original event body, name, severity, and
+  semantic attributes instead of replacing them with a summary event. The
+  integer `airgap.repeat.count` attribute is present only when the represented
+  occurrence count differs from one; timestamps and integrity stamps remain
+  fresh. Text logs keep the human-readable repeat summary.
+- Removed tracked Python bytecode under `tests/env/__pycache__/` and ignored
+  that cache directory.
+- Added TC-38, an isolated Docker end-to-end test with real upstream/downstream
+  services: missing-client-certificate mTLS failures must respect the configured
+  reconnect interval, repeated JSON events retain original semantics and carry
+  integer repeat counts, interval `0` disables suppression, and supplying the
+  client certificate restores authentication and payload delivery.
+
 ## 0.1.15-SNAPSHOT
 
 ### Stable Kafka subscriptions during slow UDP processing

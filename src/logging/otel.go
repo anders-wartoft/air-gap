@@ -82,6 +82,9 @@ func resourceInstanceID() string {
 
 // SetServiceName overrides service.name for this process.
 func SetServiceName(name string) {
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	resetRepetitionLocked(time.Now())
 	resourceMu.Lock()
 	serviceName = strings.TrimSpace(name)
 	resourceMu.Unlock()
@@ -91,12 +94,13 @@ func SetServiceName(name string) {
 // the running binary. Changing it restarts the hash chain, because the genesis
 // value is bound to the service identity.
 func (l *LoggerType) SetInstanceID(id string) {
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	resetRepetitionLocked(time.Now())
 	resourceMu.Lock()
 	serviceInstance = strings.TrimSpace(id)
 	resourceMu.Unlock()
 
-	emitMu.Lock()
-	defer emitMu.Unlock()
 	integrity.resetChain()
 }
 

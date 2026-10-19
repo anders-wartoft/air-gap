@@ -2,13 +2,14 @@
 
 All Go binaries (`upstream`, `downstream`, `resend`, `create`, `gaps`,
 `multiDownstream`) share one logging framework. It can write plain text, which
-is the default and unchanged from earlier releases, or OpenTelemetry Logs, and
+is the default, or OpenTelemetry Logs, and
 it can stamp every record with a hash and a hash chain so that later tampering
 becomes detectable. Java dedup supports the same OTLP/JSON envelope through its
 optional `log4j2-otel.xml` configuration; its existing `log4j2.xml`
 PatternLayout remains the default.
 
 - [Output format](#output-format)
+- [Repeated messages](#repeated-messages)
 - [Log integrity](#log-integrity)
 - [Attribute reference](#attribute-reference)
 - [Illustrative chain-link verification](#illustrative-chain-link-verification)
@@ -56,6 +57,61 @@ property to `-Dlog4j.configurationFile=/etc/airgap/log4j2-otel.xml`. The
 package installs this beside the unchanged default
 `/etc/airgap/log4j2.xml`. Dedup's layout uses `service.name=dedup` and
 `INSTANCE_ID` as `service.instance.id`, falling back to `dedup`.
+
+## Repeated messages
+
+The Go application logger writes the first message immediately and keeps a
+bounded map of message text, severity, attributes, repeat count, and last
+emission time. Repeats are combined even when other messages occur between
+them. Every 10 seconds it writes a summary at the original severity:
+
+```text
+[WARN] Connection unavailable
+[WARN] Message repeated 1234 times: Connection unavailable
+```
+
+The count is the number of additional calls suppressed since the original
+message or previous summary, not a cumulative total. Each summary includes the
+original text so it remains unambiguous with interleaved messages. Counts are
+flushed when the interval expires (even if no more messages arrive), on cache
+eviction, and before changing the log file, format, or service identity.
+
+| Environment variable | Default | Description |
+|---|---|---|
+| AIRGAP_LOG_REPEAT_INTERVAL | 10000 | Summary interval in milliseconds; `0` disables suppression |
+
+For example, set `AIRGAP_LOG_REPEAT_INTERVAL=30000` before starting any Go
+service. The logging package reads this shared environment variable once at
+process startup; no application configuration or call-site changes are needed.
+Negative, fractional, overflowing, empty, and nonnumeric values fail startup
+with an explicit error. An unset variable uses the default.
+
+The map holds at most 1024 entries; the least recently seen entry is evicted
+when full, flushing its pending count first. Entries idle for one interval
+expire automatically. Pending counts can be lost if the process exits before
+the next summary; callers needing an explicit final flush can use
+`logging.Logger.FlushRepeated()`.
+
+Only records with the same body, severity, and ordered semantic attributes are
+combined. Changing IDs, retry counts, or remote ports therefore keeps records
+distinct. FATAL records and
+mandatory production-configuration warnings are never suppressed. Direct
+third-party text output (including Sarama's historical text writer) bypasses
+the application logger and is not suppressed.
+
+OTLP repeat records preserve the original body, event name, severity, resource,
+and semantic attributes. The integer attribute `airgap.repeat.count` gives the
+number of suppressed calls represented by that record and is only present when
+it differs from `1`. Its absence means one occurrence, including on the initial
+record. For example, the initial record followed by a repeat record with count
+`5` represents six calls. Timestamps and integrity stamps are fresh for each
+emitted record. Text output retains the human-readable summary above.
+Repeat records participate in hashing, chaining, and signed checkpoints just
+like ordinary records. Suppressed calls are not separate integrity records.
+
+Log suppression is not a connection-attempt rate limit. TCP reconnects use
+`tcpRetryInterval` (default 1000 ms), including reconnects across messages and
+concurrent senders. See [Transport Configuration](Transport%20Configuration.md#tcp-retry-configuration).
 
 ## Log integrity
 

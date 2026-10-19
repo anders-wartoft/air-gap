@@ -909,7 +909,7 @@ func Main(build string) {
 				), "Pinned TLS idle aging: role=server purged=%v; disk unchanged, SIGHUP restores pins", fingerprints)
 			})
 		}
-		adapter, errTCP := newTCPAdapter(address, tcpTLSConfig, manager)
+		adapter, errTCP := newTCPAdapter(address, tcpTLSConfig, manager, time.Duration(config.tcpRetryInterval)*time.Millisecond)
 		if errTCP != nil {
 			if manager != nil {
 				manager.StopAging()

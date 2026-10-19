@@ -5845,3 +5845,63 @@ through the configured CA, follows an old-key-authenticated certificate
 transition, and rejects changed contents, hashes, or signatures. A running
 service can adopt a CA-issued replacement on `SIGHUP` without an
 unauthenticated gap in its local log chain.
+
+## TC-38 — Repeated JSON logs and failed-mTLS reconnect rate
+
+### Purpose
+
+Reproduce a misconfigured mutual-TLS deployment using the actual upstream and
+downstream binaries, not generated logger fixtures. Verify that failed
+connections do not spin, repeated events remain machine-readable, and valid
+credentials restore delivery.
+
+### Run
+
+```bash
+cd tests/env
+./run-testcase.sh 38
+# Optional: retain the isolated containers and artifacts.
+./run-testcase.sh 38 -pause
+```
+
+Requires host Go, Python 3, OpenSSL, and Docker Compose. The runner builds current
+Linux AMD64 binaries, creates a one-day test identity in a temporary directory,
+and starts `docker-compose.tc38.yml` with a unique project name. No Kafka,
+external ports, existing certificates, or other running test stacks are used.
+
+### Procedure and assertions
+
+1. Start a TLS 1.3 downstream requiring a client certificate; start the random
+   upstream without one. No unauthenticated random payload may be delivered.
+2. Set `tcpRetryInterval=300`. Downstream handshake-failure timestamps must be
+   at least 270 ms apart (30 ms scheduling/network tolerance), with at least
+   eight observed failures across the two failing phases.
+3. With `AIRGAP_LOG_REPEAT_INTERVAL=2000`, require a real, stable upstream
+   server-authentication event to acquire an OTLP integer `airgap.repeat.count`
+   greater than one, despite interleaved retry diagnostics. The initial event
+   must omit the count; repeated events must preserve body, event name,
+   severity, and original semantic attributes.
+4. Recreate the upstream with interval `0`. Require at least five individual
+   server-authentication events and no repeat-count attributes anywhere in its
+   JSON log. This negative control proves suppression is configurable.
+5. Recreate the upstream with a valid client certificate and key. Require
+   downstream client-authentication evidence and actual `Random message`
+   payload output.
+
+### Expected result
+
+```text
+PASS: downstream observed repeated missing-client-certificate failures
+PASS: Log rate limiting: repeated events grouped at the 2000 ms interval
+PASS: Sender rate limiting: 300 ms reconnect interval respected (30 ms timing tolerance)
+PASS: unauthenticated clients delivered no random messages
+PASS: corrected client certificate authenticates and real payload delivery resumes
+PASS: TC-38 repeated JSON logs and failed-mTLS reconnect rate
+```
+
+On success the runner removes its own isolated containers and temporary files.
+Checks and the final verdict are green on success and red on failure, including
+explicit sender rate-limiting and log rate-limiting checks. `NO_COLOR=1` disables
+ANSI colors.
+On failure it tears down the containers but preserves logs, binaries, and test
+credentials at the printed artifact path. `-pause` preserves both.
