@@ -95,6 +95,25 @@
   constant `airgap log chain anchor`; the covered range lives in attributes,
   so hashing the previously documented body with a range appended produced a
   spurious mismatch.
+- `verify_integrity_report.py` no longer aborts when signing-key trust cannot
+  be resolved — for example when a certificate-rotation event has aged out to
+  cold storage or been deleted before an investigation runs. The affected key
+  stays untrusted, the affected windows fail their signature checks with the
+  reason and the remediation (supply the key via `--trust-registry`, or trust
+  the issuing CA via `--ca-file`), and every other event is still verified
+  and reported. Ambiguous rotations and trust cycles degrade the same way.
+  Evidence that cannot be authenticated is never reported as passed.
+- Pinned TLS trust directories now ignore well-formed entries for the other
+  endpoint role instead of rejecting the whole directory: upstream skips
+  `"client"` entries and downstream skips `"server"` entries, so both sides
+  can point `tcpTLSTrustedKeysDir` at one shared directory holding both
+  roles. Role-less entries, malformed entries, fingerprint mismatches, and
+  conflicting peer bindings still fail closed, and an ignored entry grants
+  nothing: a peer whose only entry carries the other role is denied exactly
+  as with an empty store. TC-27 now mounts one shared directory on both
+  containers and adds negative phases proving that upstream with only client
+  entries and downstream with only server entries reject the peer by its
+  exact fingerprint while both services remain running.
 
 - Fixed the stale gzip compression test after `protocol.DecompressGzip` gained
   its decompressed-size limit parameter. The test now uses downstream's
