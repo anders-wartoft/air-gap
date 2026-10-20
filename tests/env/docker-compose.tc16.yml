@@ -1,0 +1,142 @@
+# Native Linux host networking: the UDP sender uses the host's diode route
+# and permanent neighbour entry, without Docker bridge/NAT/ARP in between.
+x-broker: &broker
+  image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+  network_mode: host
+  environment: &kafka-env
+    KAFKA_PROCESS_ROLES: broker,controller
+    KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+    KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+    KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+    KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    KAFKA_LOG_DIRS: /var/lib/kafka/data
+    KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+
+x-app: &app
+  build:
+    context: .
+    args:
+      BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
+  image: airgap-testenv-tc16:local
+  network_mode: host
+  working_dir: /airgap
+  volumes:
+    - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
+    - ../../config:/airgap/config:ro
+
+x-lg: &lg
+  image: ${LG_IMAGE:-eclipse-temurin:17-jre-noble}
+  network_mode: host
+  volumes:
+    - ./bin:/airgap/lg-bin:ro
+    - ../../config:/airgap/config:ro
+    - ./lg-entrypoint.sh:/airgap/lg-entrypoint.sh:ro
+  entrypoint: ["/bin/sh", "/airgap/lg-entrypoint.sh"]
+
+services:
+  kafka-us-1:
+    <<: *broker
+    environment:
+      <<: *kafka-env
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_REST_LISTENERS: http://127.0.0.1:29082
+      KAFKA_REST_BOOTSTRAP_SERVERS: 127.0.0.1:29092
+      KAFKA_LISTENERS: PLAINTEXT://127.0.0.1:29092,CONTROLLER://127.0.0.1:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:29092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:29093,2@127.0.0.1:28093
+    volumes: [us-1:/var/lib/kafka/data]
+  kafka-us-2:
+    <<: *broker
+    environment:
+      <<: *kafka-env
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 2
+      KAFKA_REST_LISTENERS: http://127.0.0.1:28082
+      KAFKA_REST_BOOTSTRAP_SERVERS: 127.0.0.1:28092
+      KAFKA_LISTENERS: PLAINTEXT://127.0.0.1:28092,CONTROLLER://127.0.0.1:28093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:28092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:29093,2@127.0.0.1:28093
+    volumes: [us-2:/var/lib/kafka/data]
+  kafka-ds-1:
+    <<: *broker
+    environment:
+      <<: *kafka-env
+      CLUSTER_ID: RlJ4Qk9VNk9yTTlDQ2xLZA
+      KAFKA_NODE_ID: 1
+      KAFKA_REST_LISTENERS: http://127.0.0.1:39082
+      KAFKA_REST_BOOTSTRAP_SERVERS: 127.0.0.1:39092
+      KAFKA_LISTENERS: PLAINTEXT://127.0.0.1:39092,CONTROLLER://127.0.0.1:39093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:39092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:39093,2@127.0.0.1:38093
+    volumes: [ds-1:/var/lib/kafka/data]
+  kafka-ds-2:
+    <<: *broker
+    environment:
+      <<: *kafka-env
+      CLUSTER_ID: RlJ4Qk9VNk9yTTlDQ2xLZA
+      KAFKA_NODE_ID: 2
+      KAFKA_REST_LISTENERS: http://127.0.0.1:38082
+      KAFKA_REST_BOOTSTRAP_SERVERS: 127.0.0.1:38092
+      KAFKA_LISTENERS: PLAINTEXT://127.0.0.1:38092,CONTROLLER://127.0.0.1:38093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:38092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:39093,2@127.0.0.1:38093
+    volumes: [ds-2:/var/lib/kafka/data]
+
+  upstream:
+    <<: *app
+    environment:
+      AIRGAP_CONFIG: /airgap/config/testcases/upstream-airgap-16-staged.properties
+      AIRGAP_UPSTREAM_NIC: ${TC16_NIC:-lo}
+      AIRGAP_UPSTREAM_TARGET_IP: ${TC16_TARGET_IP:-127.0.0.1}
+      AIRGAP_UPSTREAM_EPS: ${TC16_EPS:-50000}
+    command: ["upstream"]
+  downstream:
+    <<: *app
+    environment:
+      AIRGAP_CONFIG: /airgap/config/testcases/downstream-airgap-16-staged.properties
+      AIRGAP_DOWNSTREAM_NIC: ${TC16_NIC:-lo}
+    command: ["downstream"]
+  dedup:
+    image: ${DEDUP_IMAGE:-eclipse-temurin:17-jre-noble}
+    platform: linux/${TC16_ARCH:-amd64}
+    network_mode: host
+    environment:
+      BOOTSTRAP_SERVERS: 127.0.0.1:39092,127.0.0.1:38092
+      APPLICATION_ID: tc16-dedup
+      RAW_TOPICS: tc16-transfer
+      CLEAN_TOPIC: tc16-dedup
+      GAP_TOPIC: tc16-gaps
+      STATE_DIR_CONFIG: /tmp/tc16-state
+      WINDOW_SIZE: "1000"
+      MAX_WINDOWS: "500"
+      GAP_EMIT_INTERVAL_SEC: "60"
+      PERSIST_INTERVAL_MS: "10000"
+    volumes:
+      - ../../java-streams/target:/airgap/dedup-jar:ro
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        set -- /airgap/dedup-jar/air-gap-deduplication-fat-*-linux-${TC16_ARCH:-amd64}.jar
+        [ "$$#" -eq 1 ] && [ -f "$$1" ] || { echo "Expected one matching dedup JAR; run make build-java" >&2; exit 2; }
+        exec java -jar "$$1"
+  lg-producer:
+    <<: *lg
+    environment:
+      LG_CONFIG: /airgap/config/testcases/upstream-lg-16-staged.properties
+      LG_ARGS: -l ${TC16_COUNT:-1000000}
+  lg-sink:
+    <<: *lg
+    environment:
+      LG_CONFIG: /airgap/config/testcases/downstream-lg-16-staged.properties
+      LG_SED: s|^client-id=.*|client-id=${TC16_VERIFY_GROUP:-tc16-verifier}|
+
+volumes:
+  us-1:
+  us-2:
+  ds-1:
+  ds-2:

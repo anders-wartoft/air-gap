@@ -173,25 +173,26 @@ The runner's exit code fails the job automatically; `when: always` preserves
 reports and logs even on a failing batch. Avoid `|| true` on the runner command,
 which would hide test failures.
 
-### Manual TC-16 and future split-machine setup
+### Staged TC-16: one or two Linux machines
 
 TC-16 declares `TC_MANUAL_REASON` in its manifest. The batch runner always
 reports it as skipped (`-1` / JUnit skipped); it does not launch the benchmark.
-Direct interactive execution remains unchanged:
+Direct execution uses a dedicated staged benchmark stack:
 
 ```bash
-./tests/env/run-testcase.sh 16           # default all-on-one-machine stack
-./tests/env/run-testcase.sh 16 down-only # existing generic downstream role
-./tests/env/run-testcase.sh 16 up-only   # existing generic upstream role
+./tests/env/run-testcase.sh 16       # all phases on one machine (loopback)
+./tests/env/run-testcase.sh TC-16-DS # machine 2: start first
+./tests/env/run-testcase.sh TC-16-US # machine 1: prefill Kafka, then send
 ```
 
-The proposed `TC-16-DS` / `TC-16-US` workflow is not implemented by this change.
-The intended future workflow is to start downstream Kafka, receiver, dedup,
-and statistics collection on one host; configure static ARP/routes and start
-upstream Kafka/generation on another; prefill Kafka before starting the upstream
-application; then measure downstream throughput from the first received event.
-Current generic role selection does not implement that staged producer/app
-startup or first-event statistics protocol.
+Generation, UDP transfer, deduplication and verification are separate phases.
+DS starts only its Kafka cluster and receiver initially; dedup and the
+LogGenerator verifier start after their input backlogs are complete.
+LogGenerator **1.1-9+** is required for `--from-beginning true`.
+This stack uses native Linux host networking so the sender uses the host's
+static ARP/routes. It retains containers, Kafka data and timing evidence.
+See [TC-16: separate US/DS instructions](TC-16.md) for prerequisites, commands,
+one-machine operation, static ARP examples, measurement limitations and reset.
 
 Runner/report regressions can be tested without Docker:
 

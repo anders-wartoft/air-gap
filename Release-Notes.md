@@ -2,6 +2,22 @@
 
 ## 0.1.16-SNAPSHOT
 
+### Staged UDP performance benchmark (TC-16)
+
+- `run-testcase.sh 16` now isolates generation, UDP transfer, deduplication and
+  sequence verification. `TC-16-DS` and `TC-16-US` run the respective halves on
+  two native Linux Docker hosts; DS starts only its Kafka cluster and receiver
+  initially, while US pre-fills Kafka before starting the sender.
+- The dedicated host-network stack uses the Linux host's static ARP/routes,
+  retains timing/progress/log evidence, and fails on missing or duplicate
+  events without imposing a machine-dependent throughput threshold.
+- Verification requires LogGenerator 1.1-9+ and uses `from-beginning=true`
+  after dedup has stopped. Fresh verifier groups prevent stale committed
+  offsets from producing a false PASS on repeated verification.
+- Added separate machine instructions in [the TC-16 guide](tests/env/TC-16.md)
+  and deterministic orchestration/loss/duplicate regression tests. Batch
+  testcase selections continue reporting TC-16 as manual/skipped.
+
 ### Downstream Kafka startup recovery
 
 - Downstream now retries transient Kafka producer startup failures indefinitely
@@ -24,12 +40,11 @@
   `--junit PATH` reports (individually or together), plus `--log-dir DIR` for
   retained logs. JSON records each selected case's status, process exit code,
   duration, and skip reason; JUnit exposes failures and manual skips in CI.
-- TC-16 is explicitly manual in batch runs (`-1` / skipped) while direct
-  execution remains unchanged. Batch exit codes are `0` with no failures
+- TC-16 is explicitly manual in batch runs (`-1` / skipped). Batch exit codes are `0` with no failures
   (skips allowed), `1` for testcase failures, and `2` for usage/setup/report
   errors. Explicit nonexistent case selections are now rejected.
-- Documented CI usage, report formats, and the separately planned split-host
-  TC-16 benchmark workflow.
+- Documented CI usage and report formats; the split-host TC-16 benchmark
+  workflow is documented separately above.
 
 ### Bounded TCP reconnects and repeated-log summaries
 

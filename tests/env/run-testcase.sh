@@ -63,6 +63,22 @@ cd "$HERE"
 # shellcheck source=lib/report.sh
 source "$HERE/lib/report.sh"
 
+# TC-16 owns its staged stack; the generic runner starts all roles at once.
+case "${1-}" in
+    16|TC-16|16-US|TC-16-US|16-DS|TC-16-DS)
+        tc16_mode=all
+        case "$1" in *-US) tc16_mode=us ;; *-DS) tc16_mode=ds ;; esac
+        shift
+        case "${1-}" in
+            up-only) tc16_mode=us; shift ;;
+            down-only) tc16_mode=ds; shift ;;
+            all) tc16_mode=all; shift ;;
+        esac
+        [[ $# -eq 0 ]] || { echo "TC-16 accepts only a side; configure it with TC16_* environment variables" >&2; exit 2; }
+        exec bash "$HERE/tc16-performance.sh" "$tc16_mode"
+        ;;
+esac
+
 usage() {
     sed -n '2,33p' "$0"
     exit 1

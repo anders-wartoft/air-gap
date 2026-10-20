@@ -2584,7 +2584,10 @@ Kafka.
 Measure sustained EPS and loss on the chosen host.
 
 * Covers: REQ-11
-* Runner: `./run-testcase.sh 16`
+* Runner: `./run-testcase.sh 16` (one Linux machine), or `TC-16-DS` /
+  `TC-16-US` (two Linux machines).
+* Current staged procedure: [TC-16 guide](../env/TC-16.md), including separate
+  instructions for each machine, static ARP/routes and timing interpretation.
 
 **Not chain-safe — intentionally manual-only.** Unlike TC-1 through
 TC-15, TC-16 is a performance *benchmark*, not a correctness check.
@@ -2618,10 +2621,20 @@ chain-unsafe/SKIP and that's by design, not a gap to fill.
 
 The manifest explicitly marks this benchmark manual, so including TC-16 in
 a CI selection yields JSON code `-1` / JUnit skipped without launching it.
-Running it directly defaults to the one-machine setup. A future `TC-16-DS` /
-`TC-16-US` workflow with prefilled upstream Kafka, delayed application startup,
-and first-event downstream statistics is planned separately; these aliases
-and staging semantics are not implemented yet.
+Running it directly uses a dedicated one-machine staged setup. `TC-16-DS`
+starts only downstream Kafka and the UDP receiver initially. `TC-16-US`
+pre-fills upstream Kafka using LogGenerator and starts the sender only after
+generation finishes. DS measures raw backlog completion, stops the receiver,
+starts and measures dedup, stops dedup, then verifies every sequence ID using
+LogGenerator 1.1-9+ with `--from-beginning true`. Missing/duplicate events fail
+the delivery check; throughput has no fixed pass threshold. Timing is sampled,
+not an exact first-packet timestamp. See the guide above.
+
+**Legacy standalone baseline / manual tuning reference.**
+
+The historical commands below are for individual native binaries, not the
+staged Compose runner. For current reproducible performance tests use the
+[TC-16 guide](../env/TC-16.md).
 
 **Setup.**
 
