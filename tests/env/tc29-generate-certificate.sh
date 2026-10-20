@@ -12,12 +12,12 @@ rm -f \
     "$CERT_DIR/signer.crt" "$CERT_DIR/signer.key" "$CERT_DIR/signer.pub" \
     "$CERT_DIR/wrong.crt" "$CERT_DIR/wrong.key" "$CERT_DIR/wrong.pub"
 
-go run ./lib/tc29_integrity.go generate \
+go run ./lib/tc29integrity generate \
     --dir "$CERT_DIR" \
     --name signer \
     --signer-id urn:airgap:test:tc29
 
-go run ./lib/tc29_integrity.go generate \
+go run ./lib/tc29integrity generate \
     --dir "$CERT_DIR" \
     --name wrong \
     --signer-id urn:airgap:test:tc29

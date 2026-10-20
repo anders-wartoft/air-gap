@@ -31,6 +31,16 @@
   reconnect interval, repeated JSON events retain original semantics and carry
   integer repeat counts, interval `0` disables suppression, and supplying the
   client certificate restores authentication and payload delivery.
+- Moved the standalone TC-29 and TC-37 helper programs into separate packages
+  (`tests/env/lib/tc29integrity` and `tests/env/lib/tc37fixture`) so
+  `go vet ./...` and `go test ./...` no longer fail on duplicate `main` and
+  `fatalf` declarations.
+- Fixed an intermittent `UDP_callback` failure in the pinned-TLS tests: probes
+  are now sent from an unconnected UDP socket, so datagrams sent before the
+  downstream binds are retried instead of failing with `connection refused`.
+- Disabled repeated-log suppression in the pinned-TLS application test harness,
+  which uses individual log records to synchronize reloads. Repeated SIGHUP
+  completion messages can no longer be delayed beyond the test timeout.
 
 ## 0.1.15-SNAPSHOT
 

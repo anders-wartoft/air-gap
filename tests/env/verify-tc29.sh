@@ -19,7 +19,7 @@ mkdir -p "$WORK"
 docker logs "${PROJECT}-upstream-a-1" >"$WORK/upstream.log" 2>&1 || rc=1
 docker logs "${PROJECT}-downstream-1" >"$WORK/downstream.log" 2>&1 || rc=1
 
-go build -o "$WORK/tc29-integrity" ./lib/tc29_integrity.go
+go build -o "$WORK/tc29-integrity" ./lib/tc29integrity
 
 tamper_hash() {
     python3 - "$1" "$2" <<'PY'

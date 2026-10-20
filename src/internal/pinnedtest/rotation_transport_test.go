@@ -53,14 +53,21 @@ func TestPinnedTLSRotationPlaintextAndUDPReject(t *testing.T) {
 		// Exercise the existing receiver through an actual UDP datagram.
 		down := h.start(t, "downstream", "transport=udp\ntarget=cmd\nmtu=1500\n")
 		down.wait(t, "Downstream version:", 0)
-		conn, err := net.Dial("udp", h.address)
+		// The startup log precedes the UDP bind. An unconnected socket does not
+		// surface ICMP port-unreachable as ECONNREFUSED, so early datagrams are
+		// dropped and resent by the loop below.
+		target, err := net.ResolveUDPAddr("udp", h.address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, err := net.ListenUDP("udp", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer conn.Close()
 		deadline := time.Now().Add(3 * time.Second)
 		for {
-			if _, err := conn.Write(frame.Bytes()); err != nil {
+			if _, err := conn.WriteToUDP(frame.Bytes(), target); err != nil {
 				t.Fatal(err)
 			}
 			if bytes.Contains([]byte(down.read(t)), []byte("Pinned rotation rejected on non-control transport")) {

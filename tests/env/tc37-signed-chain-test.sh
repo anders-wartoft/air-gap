@@ -118,7 +118,7 @@ docker build --quiet \
   -f "${HERE}/Dockerfile.integrity-report" \
   -t "${VERIFIER_IMAGE}" \
   "${HERE}" >/dev/null
-go run "${HERE}/lib/tc37_fixture.go" --output "${WORK}"
+go run "${HERE}/lib/tc37fixture" --output "${WORK}"
 mkdir -p "${ROOT}/target/linux-amd64"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
   -o "${ROOT}/target/linux-amd64/upstream" "${ROOT}/src/cmd/upstream"

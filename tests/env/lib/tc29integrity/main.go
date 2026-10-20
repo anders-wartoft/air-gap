@@ -82,7 +82,7 @@ type parsedRecord struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: tc29_integrity.go generate|verify [options]")
+		fatalf("usage: tc29integrity generate|verify [options]")
 	}
 	switch os.Args[1] {
 	case "generate":

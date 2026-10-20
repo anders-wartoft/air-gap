@@ -85,6 +85,8 @@ func (h *applicationHarness) startWithEnvironment(t *testing.T, role, configurat
 			cmd.Env = append(cmd.Env, item)
 		}
 	}
+	// Lifecycle tests use individual log records to synchronize reloads.
+	cmd.Env = append(cmd.Env, "AIRGAP_LOG_REPEAT_INTERVAL=0")
 	cmd.Env = append(cmd.Env, environment...)
 	cmd.Stdout, cmd.Stderr = output, output
 	if err := cmd.Start(); err != nil {

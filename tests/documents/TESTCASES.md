@@ -4982,7 +4982,7 @@ cases for both sides:
   that a structurally valid but modified signature is rejected.
 
 The independent certificate generator and verifier are implemented in
-[tc29_integrity.go](../env/lib/tc29_integrity.go). They use only the Go
+[tc29integrity/main.go](../env/lib/tc29integrity/main.go). They use only the Go
 standard library and do not reuse production hash-chain or signing functions.
 
 ### Expected result
