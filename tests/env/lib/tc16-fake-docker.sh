@@ -17,7 +17,11 @@ command="$1"; shift
 service="${*: -1}"
 case "$command" in
     ps)
-        [[ "$1" != -aq ]] || echo "$2"
+        if [[ "$1" == -aq ]]; then
+            echo "$2"
+        elif [[ "${FAKE_ALREADY_RUNNING:-0}" == 1 ]]; then
+            echo downstream
+        fi
         ;;
     up)
         touch "$FAKE_STATE/$service"

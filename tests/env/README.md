@@ -194,6 +194,18 @@ static ARP/routes. It retains containers, Kafka data and timing evidence.
 See [TC-16: separate US/DS instructions](TC-16.md) for prerequisites, commands,
 one-machine operation, static ARP examples, measurement limitations and reset.
 
+Already in `tests/env`? Omit the `tests/env/` prefix and do not `cd tests/env`
+again. `TC-16-DS` only waits for traffic: start `TC-16-US` separately, or use
+`./run-testcase.sh 16` to orchestrate both halves on one machine.
+After Ctrl-C, containers remain running. Reset is a script subcommand, not
+a shell command (these delete the respective TC-16 Kafka data):
+
+```bash
+# From tests/env, after stopping any active TC-16 runner:
+bash tc16-performance.sh reset-ds
+bash tc16-performance.sh reset-us
+```
+
 Runner/report regressions can be tested without Docker:
 
 ```bash

@@ -27,6 +27,12 @@ before() { [[ "$(line "$1")" -lt "$(line "$2")" ]] || { echo "Ordering failed: $
 
 run_case 0 16
 grep -q 'TC-16 PASS' "$WORK/result"
+if [[ -z "${NO_COLOR-}" ]]; then
+    grep -Fq $'\033[0;32m─── TC-16 (all): PASS' "$WORK/result"
+fi
+grep -q 'Unique delivered sequence IDs, expected 10, 10' "$WORK/result"
+grep -q 'Duplicate sequence IDs, expected 0, 0' "$WORK/result"
+grep -q 'Next expected sequence ID, expected 11, 11' "$WORK/result"
 before 'up .*lg-producer$' 'up .*upstream$'
 before 'stop .*downstream$' 'up .*dedup$'
 before 'stop .*upstream$' 'up .*dedup$'
@@ -39,6 +45,9 @@ rm "$FAKE_STATE/upstream" "$FAKE_STATE/lg-producer"
 export FAKE_DROP=1
 run_case 1 16
 grep -q 'transfer timed out' "$WORK/result"
+if [[ -z "${NO_COLOR-}" ]]; then
+    grep -Fq $'\033[0;31m─── TC-16 (all): FAIL' "$WORK/result"
+fi
 if grep -qE 'up .*dedup$|up .*lg-sink$' "$FAKE_STATE/calls"; then
     echo "Dedup/verification started despite lost records" >&2; exit 1
 fi
@@ -52,12 +61,15 @@ rc=0
 bash "$WORK/env/tc16-performance.sh" verify > "$WORK/result" 2>&1 || rc=$?
 [[ "$rc" == 1 ]]
 grep -q 'verification failed' "$WORK/result"
+grep -q 'TC-16 (verify): FAIL' "$WORK/result"
+grep -q 'Duplicate sequence IDs, expected 0, 1' "$WORK/result"
 unset FAKE_DUPLICATES
 echo "PASS: extra arguments and duplicate verification fail explicitly"
 
 : > "$FAKE_STATE/calls"
 rm "$FAKE_STATE/upstream" "$FAKE_STATE/lg-producer"
 run_case 0 TC-16-US
+grep -q 'sender startup only; delivery verification runs on DS: PASS' "$WORK/result"
 if grep -qE 'up .*downstream$|up .*dedup$|up .*lg-sink$|up .*kafka-ds' "$FAKE_STATE/calls"; then
     echo "US alias started downstream workloads" >&2; exit 1
 fi
@@ -78,6 +90,28 @@ run_case 1 TC-16-DS
 grep -q 'received 11 raw records, expected 10' "$WORK/result"
 unset FAKE_REMOTE FAKE_EXTRA
 echo "PASS: excess raw records fail immediately"
+
+for service in downstream dedup lg-sink; do rm -f "$FAKE_STATE/$service"; done
+run_case 1 TC-16-DS
+grep -q 'DS does not generate or send events' "$WORK/result"
+grep -q 'no raw Kafka records arrived' "$WORK/result"
+grep -q 'transfer timed out: current=0' "$WORK/result"
+echo "PASS: DS without a sender explains the zero-record timeout"
+
+export FAKE_ALREADY_RUNNING=1
+run_case 1 TC-16-DS
+grep -q 'bash .*tc16-performance.sh.* reset-ds' "$WORK/result"
+grep -q 'deletes this side' "$WORK/result"
+unset FAKE_ALREADY_RUNNING
+echo "PASS: retained stack error prints the complete destructive reset command"
+
+for service in upstream lg-producer downstream dedup lg-sink; do rm -f "$FAKE_STATE/$service"; done
+NO_COLOR=1 run_case 0 16
+grep -q 'TC-16 (all): PASS' "$WORK/result"
+if grep -Fq $'\033[' "$WORK/result"; then
+    echo "NO_COLOR output contains ANSI escapes" >&2; exit 1
+fi
+echo "PASS: colored success/failure summaries and NO_COLOR output"
 
 rm "$WORK/env/bin/LogGenerator-1.1-9.jar"
 touch "$WORK/env/bin/LogGenerator-1.1-6.jar"

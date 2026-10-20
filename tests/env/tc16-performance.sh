@@ -3,6 +3,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
+source "$HERE/lib/report.sh"
 cd "$HERE"
 export COMPOSE_PROGRESS=plain
 
@@ -64,6 +65,11 @@ capture() {
         fi
     done
     echo "TC-16: exit=$rc; artifacts=$RESULTS; containers/data retained (explicit reset required)"
+    local label="TC-16 ($MODE)"
+    if [[ "$MODE" == us ]]; then
+        label="$label sender startup only; delivery verification runs on DS"
+    fi
+    report_summary "$label" "$rc" || true
     exit "$rc"
 }
 case "$MODE" in reset-*|stop-us) ;; *) trap capture EXIT ;; esac
@@ -113,7 +119,7 @@ create_topic() {
 prepare() {
     local side="$1" services
     services="$(compose "$side" ps --services --status running)"
-    [[ -z "$services" ]] || die "$side stack is already running; use reset-$side before a fresh run"
+    [[ -z "$services" ]] || die "$side stack is already running; for a fresh run execute: bash \"$HERE/tc16-performance.sh\" reset-$side (deletes this side's TC-16 Kafka data)"
     compose "$side" up -d --no-deps "kafka-$side-1" "kafka-$side-2"
     wait_brokers "$side"
     create_topic "$side" tc16-transfer
@@ -132,6 +138,10 @@ prepare() {
             sleep 1
         done
         echo "TC-16-DS READY: UDP/1234; waiting for $TC16_COUNT events. Start TC-16-US now."
+        if [[ "$MODE" == ds ]]; then
+            echo "TC-16-DS does not generate or send events. Leave this terminal running and start TC-16-US on machine 1."
+            echo "For an automatic single-machine run, reset both TC-16 sides first, then run: ./run-testcase.sh 16"
+        fi
     fi
 }
 wait_job() {
@@ -211,7 +221,13 @@ wait_phase() {
                 tee -a "$RESULTS/timing.txt"
             return
         fi
-        (( SECONDS < deadline )) || die "$phase timed out: current=$count end=$end lag=$lag; no success inferred from an idle topic"
+        if (( SECONDS >= deadline )); then
+            if [[ "$phase" == transfer && "$count" == 0 ]]; then
+                echo "TC-16: no raw Kafka records arrived. Confirm TC-16-US finished generation and started upstream; DS alone produces no traffic." >&2
+                echo "TC-16: if upstream is running, check its logs, target IP, UDP/1234 firewall and route; Docker Desktop is not native Linux host networking." >&2
+            fi
+            die "$phase timed out: current=$count end=$end lag=$lag; no success inferred from an idle topic"
+        fi
         previous="$sampled"
         sleep "$TC16_POLL"
     done
@@ -242,6 +258,15 @@ verify() {
     unique="$(sed -nE 's/.*Number of unique received numbers: ([0-9]+).*/\1/p' "$RESULTS/lg-sink.log" | tail -1)"
     duplicates="$(sed -nE 's/.*Duplicate detection found: ([0-9]+).*/\1/p' "$RESULTS/lg-sink.log" | tail -1)"
     next="$(sed -nE 's/.*Next expected number: ([0-9]+).*/\1/p' "$RESULTS/lg-sink.log" | tail -1)"
+    local check_rc=0
+    [[ "$unique" == "$TC16_COUNT" ]] || check_rc=1
+    report_check "Unique delivered sequence IDs" "$TC16_COUNT" "${unique:-missing summary}" "$check_rc" || true
+    check_rc=0
+    [[ "$duplicates" == 0 ]] || check_rc=1
+    report_check "Duplicate sequence IDs" "0" "${duplicates:-missing summary}" "$check_rc" || true
+    check_rc=0
+    [[ "$next" == "$((TC16_COUNT+1))" ]] || check_rc=1
+    report_check "Next expected sequence ID" "$((TC16_COUNT+1))" "${next:-missing summary}" "$check_rc" || true
     [[ "$unique" == "$TC16_COUNT" && "$duplicates" == 0 && "$next" == "$((TC16_COUNT+1))" ]] ||
         die "verification failed: unique=$unique duplicates=$duplicates next=$next; expected $TC16_COUNT,0,$((TC16_COUNT+1)); see lg-sink.log"
     metric "verification (including shutdown)" "$(( $(now) - started ))"
