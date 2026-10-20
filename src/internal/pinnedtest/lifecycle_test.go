@@ -154,6 +154,21 @@ func TestPinnedTLSLifecycleDownstream(t *testing.T) {
 	server, a, a2, b := newIdentity(t, nil, false), newIdentity(t, nil, false),
 		newIdentity(t, nil, false), newIdentity(t, nil, false)
 
+	t.Run("commented_properties_survive_SIGHUP", func(t *testing.T) {
+		dir := t.TempDir()
+		entry(t, dir, "a", "client", a)
+		comments := "# Managed configuration\n# privateKeyFiles=\n" +
+			"  # tcpTLSAuthMode=invalid\n\t# unknownSetting=value\n"
+		down := h.start(t, "downstream", comments+properties(server, dir, true)+
+			"target=cmd # test output\nmtu=1500\t# frame size\nid=tcp#1 # instance\n")
+		down.wait(t, "TLS TCP listener started", 0)
+		conn := requireDial(t, h.address, pinnedClient(a, server, nil))
+		requireProbe(t, down, conn, "before-commented-reload")
+		requireReloadSuccess(t, down.reload(t))
+		requireProbe(t, down, conn, "after-commented-reload")
+		requireProbe(t, down, requireDial(t, h.address, pinnedClient(a, server, nil)), "fresh-after-commented-reload")
+	})
+
 	t.Run("TC27_05_staged_addition_requires_SIGHUP", func(t *testing.T) {
 		dir := t.TempDir()
 		entry(t, dir, "a", "client", a)
@@ -461,6 +476,17 @@ func TestPinnedTLSLifecycleUpstream(t *testing.T) {
 	h := newApplicationHarness(t)
 	server, a, a2 := newIdentity(t, nil, false), newIdentity(t, nil, false), newIdentity(t, nil, false)
 	source := "source=random\npayloadSize=1400\neps=10\n"
+	t.Run("commented_properties_survive_SIGHUP", func(t *testing.T) {
+		dir := t.TempDir()
+		entry(t, dir, "server", "server", server)
+		frames := runPeerServer(t, h.address, server, a)
+		comments := "  # eps=invalid\n# privateKeyFiles=\n"
+		up := h.start(t, "upstream", comments+properties(a, dir, false)+source+
+			"id=tcp#1 # instance\neps=10\t# events per second\n")
+		waitClientKey(t, frames, a)
+		requireReloadSuccess(t, up.reload(t))
+		waitClientKey(t, frames, a)
+	})
 	t.Run("TC27_08_active_identity_switch_reconnects", func(t *testing.T) {
 		dir := t.TempDir()
 		entry(t, dir, "server", "server", server)

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"sitia.nu/airgap/src/internal/pinnedtls"
+	"sitia.nu/airgap/src/internal/properties"
 	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/protocol"
 )
@@ -230,7 +231,10 @@ func readConfigurationFile(fileName string, result TransferConfiguration, strict
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := properties.StripComment(scanner.Text())
+		if line == "" {
+			continue
+		}
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
 			continue

@@ -41,6 +41,19 @@
 - Disabled repeated-log suppression in the pinned-TLS application test harness,
   which uses individual log records to synchronize reloads. Repeated SIGHUP
   completion messages can no longer be delayed beyond the test timeout.
+- Fixed downstream pinned-TLS SIGHUP reloads rejecting commented properties
+  such as `# privateKeyFiles=` as unknown configuration keys. Startup and reload
+  now explicitly skip blank lines and full-line `#` comments, including indented
+  comments; uncommented unknown keys remain rejected during reload.
+- All application properties readers now share whitespace-delimited inline
+  comment handling, including TLS validation and log-signing reloads. A `#`
+  starts a comment at the beginning of a line or after a space/tab; embedded
+  hashes such as `id=tcp#1` remain literal. Values containing a literal space/tab
+  followed by `#` now require an environment or CLI override; quoting and
+  backslash escaping are not introduced. Input-filter files are unchanged.
+- Added TC-39, an isolated Docker regression for properties comments and
+  pinned-TLS SIGHUP reloads in both roles, including literal embedded hashes,
+  unknown-key rejection, and payload delivery on existing and new connections.
 
 ## 0.1.15-SNAPSHOT
 

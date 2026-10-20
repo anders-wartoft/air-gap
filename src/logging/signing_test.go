@@ -308,10 +308,10 @@ func TestReloadSigningCertificateReadsChangedConfiguration(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "upstream.conf")
 	config := strings.Join([]string{
-		"log-signing-cert=" + newCert,
-		"log-signing-key=" + newKey,
+		"log-signing-cert=" + newCert + "  # new certificate",
+		"log-signing-key=" + newKey + "\t# new key",
 		"log-signer-id=urn:airgap:test:signer",
-		"log-signing-eku=",
+		"log-signing-eku= # no required EKU",
 		"",
 	}, "\n")
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {

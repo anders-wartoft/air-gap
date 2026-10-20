@@ -5905,3 +5905,45 @@ explicit sender rate-limiting and log rate-limiting checks. `NO_COLOR=1` disable
 ANSI colors.
 On failure it tears down the containers but preserves logs, binaries, and test
 credentials at the printed artifact path. `-pause` preserves both.
+
+## TC-39 — Properties comments and pinned-TLS SIGHUP
+
+### Purpose
+
+Reproduce the downstream reload failure caused by `# privateKeyFiles=` and
+verify consistent comment handling in real upstream and downstream processes.
+Use pinned mutual TLS to exercise strict configuration rereading, not just
+log-file reopening.
+
+### Run
+
+```bash
+cd tests/env
+./run-testcase.sh 39
+# Optional: retain containers and artifacts.
+./run-testcase.sh 39 -pause
+```
+
+Requires host Go and Docker Compose. The runner builds Linux AMD64 binaries in
+a temporary directory and generates fresh client/server identities and trust
+entries using those binaries. It uses an isolated Compose network with no
+published ports, Kafka, or deployment credentials.
+
+### Procedure and assertions
+
+1. Start both roles with full-line comments (including `# privateKeyFiles=`),
+   indented comments, and inline comments after spaces and tabs. Require real
+   random payload delivery and the exact instance ID `tcp#1` in startup logs.
+2. Send SIGHUP to each role. Require completion and successful pinned-TLS reload
+   without TLS or signing reload errors. Require new payload after both reloads.
+3. Add an uncommented unknown setting to downstream. Require a specific strict
+   reload error and continued payload on the active connection.
+4. Restore the valid configuration and require a successful reload.
+5. Restart upstream to establish a fresh TLS connection and require new payload.
+
+### Expected result
+
+All checks and the final TC-39 verdict pass (green; red on failure).
+`NO_COLOR=1` disables colors. Successful runs remove their containers and
+temporary files. Failed runs tear down containers but retain artifacts at the
+printed path; `-pause` retains both containers and artifacts.

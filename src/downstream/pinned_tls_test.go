@@ -3,6 +3,7 @@ package downstream
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"sitia.nu/airgap/src/internal/pinnedtest"
@@ -53,6 +54,7 @@ func TestPinnedTLSConfigurationPrecedence(t *testing.T) {
 	if c.tcpTLSAuthMode != "ca" {
 		t.Fatal("CA mode must remain the default")
 	}
+
 	t.Setenv("AIRGAP_DOWNSTREAM_TCP_TLS_AUTH_MODE", "pinned")
 	t.Setenv("AIRGAP_DOWNSTREAM_TCP_TLS_TRUSTED_KEYS_DIR", "/environment")
 	c = overrideConfiguration(c)
@@ -63,4 +65,39 @@ func TestPinnedTLSConfigurationPrecedence(t *testing.T) {
 	if c.tcpTLSAuthMode != "ca" || c.tcpTLSTrustedKeysDir != "" {
 		t.Fatal("command-line settings did not override environment")
 	}
+}
+
+func TestConfigurationComments(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		mode := "startup"
+		if strict {
+			mode = "reload"
+		}
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "downstream.properties")
+			contents := "# Managed configuration\n\n  \t\n# privateKeyFiles=\n" +
+				"  # tcpTLSAuthMode=invalid\n\t# unknownSetting=value\n" +
+				"  id=tcp#1  # TCP output\n tcpTLSAuthMode=pinned\t# TLS mode\n"
+			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			config, err := readConfigurationFile(path, defaultConfiguration(), strict)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if config.id != "tcp#1" || config.tcpTLSAuthMode != "pinned" {
+				t.Fatalf("active settings not parsed: id=%q, mode=%q", config.id, config.tcpTLSAuthMode)
+			}
+		})
+	}
+	t.Run("reload_rejects_uncommented_unknown_key", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "downstream.properties")
+		if err := os.WriteFile(path, []byte("unknownSetting=value\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := readConfigurationFile(path, defaultConfiguration(), true)
+		if err == nil || !strings.Contains(err.Error(), "unknown configuration key: unknownSetting") {
+			t.Fatalf("expected unknown-key error, got %v", err)
+		}
+	})
 }

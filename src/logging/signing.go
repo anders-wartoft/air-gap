@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"sitia.nu/airgap/src/internal/properties"
 )
 
 const (
@@ -512,8 +514,8 @@ func (l *LoggerType) ReloadSigningCertificate(configPath string) (SigningCertifi
 	}
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		line := properties.StripComment(scanner.Text())
+		if line == "" {
 			continue
 		}
 		parts := strings.SplitN(line, "=", 2)

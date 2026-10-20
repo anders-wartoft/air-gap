@@ -1,0 +1,26 @@
+services:
+  downstream:
+    platform: linux/amd64
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
+    image: airgap-testenv-tc39:local
+    volumes:
+      - ${TC39_WORK:?Run through run-testcase.sh 39}:/airgap/work
+    entrypoint: ["/airgap/work/downstream"]
+    command: ["/airgap/work/downstream.properties"]
+    environment:
+      AIRGAP_LOG_REPEAT_INTERVAL: "0"
+    restart: "no"
+
+  upstream:
+    platform: linux/amd64
+    image: airgap-testenv-tc39:local
+    volumes:
+      - ${TC39_WORK}:/airgap/work
+    entrypoint: ["/airgap/work/upstream"]
+    command: ["/airgap/work/upstream.properties"]
+    environment:
+      AIRGAP_LOG_REPEAT_INTERVAL: "0"
+    restart: "no"

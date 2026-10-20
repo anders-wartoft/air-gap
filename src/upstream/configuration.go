@@ -14,6 +14,7 @@ import (
 	"sitia.nu/airgap/src/filter"
 	"sitia.nu/airgap/src/inputfilter"
 	"sitia.nu/airgap/src/internal/pinnedtls"
+	"sitia.nu/airgap/src/internal/properties"
 	"sitia.nu/airgap/src/logging"
 )
 
@@ -186,8 +187,8 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
+		line := properties.StripComment(scanner.Text())
+		if line == "" {
 			continue
 		}
 		parts := strings.SplitN(line, "=", 2)

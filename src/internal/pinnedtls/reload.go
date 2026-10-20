@@ -6,6 +6,8 @@ import (
 	"os"
 	"reflect"
 	"strings"
+
+	"sitia.nu/airgap/src/internal/properties"
 )
 
 // ValidateReloadFile checks syntax and local permissions before application
@@ -30,8 +32,8 @@ func ValidateReloadFile(path string) error {
 	line := 0
 	for scanner.Scan() {
 		line++
-		text := strings.TrimSpace(scanner.Text())
-		if text == "" || strings.HasPrefix(text, "#") {
+		text := properties.StripComment(scanner.Text())
+		if text == "" {
 			continue
 		}
 		key, _, ok := strings.Cut(text, "=")

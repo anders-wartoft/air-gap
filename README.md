@@ -73,6 +73,28 @@ The first topic may contain duplicates but the one from the deduplicator should 
 
 ## Getting started
 
+### Properties file comments
+
+Application properties files use `key=value`. A `#` starts a comment at the
+beginning of a line (after optional indentation) or immediately after a space
+or tab. Everything after that comment marker is ignored. Other `#` characters
+are literal:
+
+```properties
+# Full-line comment
+id=tcp#1
+targetPort=1234  # Destination port
+```
+
+These rules apply to upstream, downstream, resend, create, and gaps properties
+files, including SIGHUP TLS and log-signing reloads. Command-line arguments,
+environment values, and input-filter rule files are not affected.
+
+Quotes and backslashes do not escape comment markers. Existing properties
+values containing a literal space/tab followed by `#` will now be truncated
+there; supply such values through a supported environment or command-line
+override instead.
+
 ### Very simple use case
 
 To enable users to get started without Kafka and without hardware diode, use the following properties files:

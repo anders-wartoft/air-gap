@@ -61,6 +61,20 @@ host Go, Python 3, OpenSSL, and Docker Compose. Failure artifacts are retained;
 TC-38 prints green PASS/red FAIL checks, including explicit sender rate-limiting
 and log rate-limiting results. Set `NO_COLOR=1` for plain output.
 
+TC-39 tests properties comments in real upstream/downstream containers using
+pinned mutual TLS, a random source, and a command sink (no Kafka):
+
+```bash
+./run-testcase.sh 39
+```
+
+It verifies full-line and space/tab-delimited inline comments, literal embedded
+hashes (`id=tcp#1`), successful SIGHUP reloads in both roles, rejection of an
+uncommented unknown setting, and payload delivery over existing and fresh
+connections. Requires host Go and Docker Compose; it generates temporary TLS
+identities using the application binaries. Checks are green/red (`NO_COLOR=1`
+disables colors). Failure artifacts are retained; `-pause` retains containers.
+
 ## Topology
 
 The Kafka layout mirrors the real deployment: each cluster is a two-broker
