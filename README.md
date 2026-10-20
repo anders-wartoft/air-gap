@@ -897,6 +897,7 @@ The property privateKeyFiles should point to one or more private key files that 
 | numReceivers | AIRGAP_DOWNSTREAM_NUM_RECEIVERS | 1 | Number of UDP receivers to start that concurrently binds to the targetPort |
 | channelBufferSize | AIRGAP_DOWNSTREAM_CHANNEL_BUFFER_SIZE | 16384 | Size of the buffered Go channel used between the UDP socket reader goroutines and the worker goroutines in the UDP receiver. It determines how many UDP packets can be queued in memory between being read from the socket and being processed. |
 | batchSize | AIRGAP_DOWNSTREAM_BATCH_SIZE | 32 | How many messages are grouped together and sent to Kafka in a single batch |
+| kafkaRetryInterval | AIRGAP_DOWNSTREAM_KAFKA_RETRY_INTERVAL | 5000 | Positive milliseconds to wait between failed Kafka producer startup attempts. Temporary network/broker/not-ready errors retry indefinitely at WARN level; identifiable configuration, TLS certificate, and authentication/authorization errors remain fatal. Also accepts `--kafkaRetryInterval=N`. |
 | readBufferMultiplier | AIRGAP_DOWNSTREAM_READ_BUFFER_MULTIPLIER | 16 | Size of the user-space buffer allocated for each UDP socket read operation. The buffer size is calculated as: `buffer size = mtu * readBufferMultiplier` |
 | rcvBufSize | AIRGAP_DOWNSTREAM_RCV_BUF_SIZE | 4194304 (4MiB) | Size (in bytes) of the OS-level receive buffer for each UDP socket, set via the SO_RCVBUF socket option. It controls how much incoming UDP data the kernel can buffer for the application before packets are dropped due to the application not reading fast enough. |
 | maximumDecompressSize | AIRGAP_MAXIMUM_DECOMPRESS_SIZE | 268435456 (256MiB) | The maximum size, in bytes, downstream will try do decompress until it errors and drops the packet. Takes sufixes B, KiB, MiB, GiB or none (defaults to B). Can be set to "-1" for no limit |
@@ -926,6 +927,17 @@ The four settings above protect the downstream listening port against denial-of-
 ### Configuration Examples
 
 numReceivers can be set to 10 or more to bind several threads to the same port. The kernel will distribute the events evenly (at least if the numReceivers is divisable by 5). If two downstream are started with the same configuration, the second started will act as a hot stand-by. Use 1 numReceiver for every free CPU core.
+
+Downstream waits for its Kafka producer to connect before starting the transport
+receiver. If local Kafka is still starting, temporary failures produce WARN
+records and retry after `kafkaRetryInterval` milliseconds (default 5000), without
+exiting for a systemd restart. Each Sarama connection attempt has its own retry
+and network timeouts, so the interval is a delay **after** an unsuccessful
+attempt, not a total startup timeout. SIGINT/SIGTERM cancels startup, including
+the wait for an in-flight attempt, and exits cleanly. UDP traffic sent before
+the receiver is ready is not buffered by the application. This option affects
+downstream producer startup only, not upstream consumer startup or Kafka's
+established-connection retry behavior.
 
 For high throughput on high-end servers, set the numReceivers, channelBufferSize, batchSize, readBufferMultiplier and rcvBufSize to:
 

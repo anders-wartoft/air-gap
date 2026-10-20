@@ -1,0 +1,20 @@
+services:
+  downstream:
+    platform: linux/amd64
+    depends_on: !reset {}
+    volumes:
+      - ${TC_WORK}:/airgap/work
+    entrypoint: ["/airgap/bin/downstream"]
+    command: ["/airgap/work/downstream.properties"]
+    environment:
+      AIRGAP_LOG_REPEAT_INTERVAL: "0"
+    restart: "no"
+
+  upstream:
+    platform: linux/amd64
+    depends_on: !reset {}
+    volumes:
+      - ${TC_WORK}:/airgap/work
+    entrypoint: ["/airgap/bin/upstream"]
+    command: ["/airgap/work/upstream.properties"]
+    restart: "no"

@@ -2,6 +2,7 @@ package downstream
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -238,7 +239,7 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 	return config.keyInfos
 }
 
-func connectToKafka(config TransferConfiguration) {
+func connectToKafka(ctx context.Context, config TransferConfiguration) error {
 	Logger.Infof(logging.Event(logging.EventKafkaConnect,
 		logging.Str("server.address", config.bootstrapServers),
 		logging.Str("messaging.kafka.client.id", config.clientID),
@@ -271,12 +272,12 @@ func connectToKafka(config TransferConfiguration) {
 	conf.Producer.Return.Errors = true
 	conf.Net.KeepAlive = 30 * time.Second
 	conf.ClientID = config.clientID
-	producer, err := sarama.NewAsyncProducer(strings.Split(config.bootstrapServers, ","), conf)
+	producer, err := newKafkaProducerWithRetry(ctx, config.bootstrapServers,
+		time.Duration(config.kafkaRetryInterval)*time.Millisecond, func() (sarama.AsyncProducer, error) {
+			return sarama.NewAsyncProducer(strings.Split(config.bootstrapServers, ","), conf)
+		})
 	if err != nil {
-		Logger.Panicf(logging.Event(logging.EventKafkaConnect,
-			logging.Str("server.address", config.bootstrapServers),
-		).Merge(logging.Err(err)),
-			"Error creating producer: %v\n", err)
+		return err
 	}
 	go func() {
 		for producerErr := range producer.Errors() {
@@ -350,4 +351,5 @@ func connectToKafka(config TransferConfiguration) {
 	kafka.SetErrorCallback(UpdateKafkaStatus)
 	// Start a new goroutine for sending kafka messages
 	kafka.StartBackgroundThread()
+	return nil
 }

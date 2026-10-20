@@ -75,6 +75,19 @@ connections. Requires host Go and Docker Compose; it generates temporary TLS
 identities using the application binaries. Checks are green/red (`NO_COLOR=1`
 disables colors). Failure artifacts are retained; `-pause` retains containers.
 
+TC-40 verifies downstream Kafka startup recovery:
+
+```bash
+./run-testcase.sh 40
+```
+
+It starts downstream before Kafka without an automatic restart policy, requires
+multiple WARN retries without FATAL, then starts Kafka and verifies payload
+delivery without a downstream process restart. A separate shutdown control
+checks SIGTERM interrupts a 60-second retry wait and exits with code 0.
+Requires host Go and Docker Compose. Uses a temporary build directory and an
+isolated network without published ports; supports `-pause` and `NO_COLOR=1`.
+
 ## CI batch runs and machine-readable results
 
 Use `run-testcases.sh` for one case, a comma-separated selection, ranges, or

@@ -2,6 +2,22 @@
 
 ## 0.1.16-SNAPSHOT
 
+### Downstream Kafka startup recovery
+
+- Downstream now retries transient Kafka producer startup failures indefinitely
+  at WARN level instead of exiting with FATAL when the local broker is not
+  ready. `kafkaRetryInterval` / `AIRGAP_DOWNSTREAM_KAFKA_RETRY_INTERVAL` /
+  `--kafkaRetryInterval` controls the delay after a failed attempt (positive
+  milliseconds, default 5000). Identifiable configuration, TLS verification,
+  and authentication/authorization failures still fail explicitly.
+- SIGINT/SIGTERM cancels Kafka startup and exits cleanly, including while an
+  attempt or retry delay is pending. The transport receiver starts only after
+  Kafka connects; early UDP traffic is not buffered.
+- Added retry/classification/configuration/cancellation unit tests and TC-40:
+  start downstream before Kafka, require WARN retries and no FATAL, start Kafka
+  and verify actual payload delivery with the same downstream process and no
+  restart, then verify clean shutdown during a long retry wait.
+
 ### CI testcase reports
 
 - The batch Docker testcase runner supports optional `--json PATH` and

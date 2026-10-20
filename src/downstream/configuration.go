@@ -83,6 +83,7 @@ type TransferConfiguration struct {
 	numReceivers          int               // Number of UDP receivers to start
 	channelBufferSize     int               // Size of the channel buffer between UDP receiver and Kafka writer
 	batchSize             int               // Number of messages to batch together
+	kafkaRetryInterval    int               // milliseconds between transient Kafka startup failures
 	readBufferMultiplier  uint16            // Multiplier for the read buffer size
 	rcvBufSize            int               // Size of the OS receive buffer for UDP sockets
 	keyPasswordFile       string            // File containing the password to decrypt the key file
@@ -191,10 +192,11 @@ func defaultConfiguration() TransferConfiguration {
 	config.logFileName = ""
 	config.mtu = 0 // default auto
 	config.translations = make(map[string]string)
-	config.logStatistics = 0                         // default no logging
-	config.numReceivers = 10                         // default ten UDP receiver
-	config.channelBufferSize = 16384                 // default channel buffer size of 16384 bytes
-	config.batchSize = 32                            // default batching of 32 messages
+	config.logStatistics = 0         // default no logging
+	config.numReceivers = 10         // default ten UDP receiver
+	config.channelBufferSize = 16384 // default channel buffer size of 16384 bytes
+	config.batchSize = 32            // default batching of 32 messages
+	config.kafkaRetryInterval = 5000
 	config.readBufferMultiplier = 16                 // default 16 times mtu as memory buffer
 	config.rcvBufSize = 4 * 1024 * 1024              // default 4MB OS receive buffer for UDP sockets
 	config.topic = ""                                // default disabled (empty = no internal Kafka logging)
@@ -361,6 +363,12 @@ func readConfigurationFile(fileName string, result TransferConfiguration, strict
 				result.channelBufferSize = tmp
 			}
 			Logger.Infof(configInt(logging.EventConfigParse, "channelBufferSize", int64(result.channelBufferSize)), "channelBufferSize: %d", result.channelBufferSize)
+		case "kafkaRetryInterval":
+			interval, err := parseKafkaRetryInterval(value)
+			if err != nil {
+				return result, err
+			}
+			result.kafkaRetryInterval = interval
 		case "batchSize":
 			tmp, err := strconv.Atoi(value)
 			if err != nil {
@@ -649,6 +657,13 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 			config.channelBufferSize = tmp
 		}
 	}
+	if value := os.Getenv(prefix + "KAFKA_RETRY_INTERVAL"); value != "" {
+		interval, err := parseKafkaRetryInterval(value)
+		if err != nil {
+			Logger.Fatal(configInvalid("kafkaRetryInterval", value).Merge(logging.Err(err)), err)
+		}
+		config.kafkaRetryInterval = interval
+	}
 	if batchSize := os.Getenv(prefix + "BATCH_SIZE"); batchSize != "" {
 		tmp, err := strconv.Atoi(batchSize)
 		if err != nil {
@@ -861,6 +876,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Infof(configInt(logging.EventConfigApplied, "numReceivers", int64(config.numReceivers)), "  numReceivers: %d", config.numReceivers)
 	Logger.Infof(configInt(logging.EventConfigApplied, "channelBufferSize", int64(config.channelBufferSize)), "  channelBufferSize: %d", config.channelBufferSize)
 	Logger.Infof(configInt(logging.EventConfigApplied, "batchSize", int64(config.batchSize)), "  batchSize: %d", config.batchSize)
+	Logger.Infof(configInt(logging.EventConfigApplied, "kafkaRetryInterval", int64(config.kafkaRetryInterval)), "  kafkaRetryInterval: %dms", config.kafkaRetryInterval)
 	Logger.Infof(configInt(logging.EventConfigApplied, "readBufferMultiplier", int64(config.readBufferMultiplier)), "  readBufferMultiplier: %d", config.readBufferMultiplier)
 	Logger.Infof(configInt(logging.EventConfigApplied, "rcvBufSize", int64(config.rcvBufSize)), "  rcvBufSize: %d", config.rcvBufSize)
 	Logger.Infof(configStr(logging.EventConfigApplied, "internalTopic", config.topic), "  internalTopic: %s", config.topic)
@@ -994,6 +1010,12 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				Logger.Fatalf(configInvalid("channelBufferSize", value), "Error parsing --channelBufferSize: %s", value)
 			}
 			config.channelBufferSize = v
+		case "kafkaRetryInterval":
+			interval, err := parseKafkaRetryInterval(value)
+			if err != nil {
+				Logger.Fatal(configInvalid("kafkaRetryInterval", value).Merge(logging.Err(err)), err)
+			}
+			config.kafkaRetryInterval = interval
 		case "batchSize":
 			v, err := strconv.Atoi(value)
 			if err != nil || v < 1 || v > 512 {
@@ -1168,6 +1190,9 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	}
 	if result.channelBufferSize < 1 {
 		Logger.Fatal(configInvalid("channelBufferSize", strconv.Itoa(result.channelBufferSize)), "Invalid configuration: channelBufferSize must be a positive integer")
+	}
+	if _, err := parseKafkaRetryInterval(strconv.Itoa(result.kafkaRetryInterval)); err != nil {
+		Logger.Fatal(configInvalid("kafkaRetryInterval", strconv.Itoa(result.kafkaRetryInterval)).Merge(logging.Err(err)), err)
 	}
 	if result.batchSize < 1 || result.batchSize > 512 {
 		Logger.Fatal(configInvalid("batchSize", strconv.Itoa(result.batchSize)), "Invalid configuration: batchSize must be a positive integer up to 512")

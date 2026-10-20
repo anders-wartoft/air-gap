@@ -1,6 +1,7 @@
 package downstream
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -483,6 +484,16 @@ func Main(build string) {
 	}
 	defer receiver.Close()
 
+	// Register shutdown before Kafka startup, which may wait for a local broker.
+	startupCtx, stopStartup := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopStartup()
+	hup := make(chan os.Signal, 1)
+	sigterm := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	signal.Notify(sigterm, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(hup)
+	defer signal.Stop(sigterm)
+
 	switch config.target {
 	case "cmd":
 		Logger.Info(logging.Event(logging.EventConfigApplied,
@@ -503,16 +514,19 @@ func Main(build string) {
 		), "Using Kafka adapter")
 		kafkaWriter = NewKafkaAdapter()
 		kafka.StopBackgroundThread()
-		connectToKafka(config)
+		if err := connectToKafka(startupCtx, config); err != nil {
+			if startupCtx.Err() != nil {
+				Logger.Info(logging.Event(logging.EventAppShutdown), "Kafka startup canceled by shutdown signal")
+				return
+			}
+			Logger.Fatalf(logging.Event(logging.EventKafkaConnect,
+				logging.Str("server.address", config.bootstrapServers),
+			).Merge(logging.Err(err)), "Error creating producer: %v", err)
+			return
+		}
 		kafka.StartBackgroundThread()
 		defer kafka.StopBackgroundThread()
 	}
-
-	// Signal handling
-	hup := make(chan os.Signal, 1)
-	sigterm := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	signal.Notify(sigterm, syscall.SIGINT, syscall.SIGTERM)
 
 	stopChan := make(chan struct{})
 	done := make(chan struct{})

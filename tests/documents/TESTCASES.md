@@ -5964,3 +5964,37 @@ All checks and the final TC-39 verdict pass (green; red on failure).
 `NO_COLOR=1` disables colors. Successful runs remove their containers and
 temporary files. Failed runs tear down containers but retain artifacts at the
 printed path; `-pause` retains both containers and artifacts.
+
+## TC-40 — Downstream Kafka startup retry
+
+### Purpose and run
+
+Verify that downstream started before its local Kafka waits with WARN retries,
+recovers without a process restart, and can be stopped cleanly while waiting.
+
+```bash
+cd tests/env
+./run-testcase.sh 40
+```
+
+Requires Go and Docker Compose. The runner builds current Linux AMD64 binaries,
+uses the shared Kafka-transfer Compose topology with no published ports, and
+explicitly starts downstream without dependencies or a restart policy.
+
+### Assertions
+
+1. With Kafka absent, require at least two producer-unavailable WARN records
+   and no FATAL/PANIC. Use `kafkaRetryInterval=500` for this test.
+2. Start Kafka, initialize topics, and require producer connection and transport
+   listener startup. The downstream container's process start timestamp must
+   remain unchanged and restart count must remain zero.
+3. Start a random-source upstream and consume actual `Random message` payload
+   from Kafka, proving downstream producer recovery.
+4. For a separate shutdown control, recreate downstream targeting a closed local
+   port with `kafkaRetryInterval=60000`. Once it enters the retry wait, send
+   SIGTERM and require exit code 0 within ten seconds, the startup-canceled
+   message, and no FATAL/PANIC.
+
+Successful checks and the final verdict are green; failures are red.
+`NO_COLOR=1` disables colors. Successful runs remove containers and temporary
+files; failed runs retain artifacts at the printed path. `-pause` retains both.
