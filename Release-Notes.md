@@ -2,6 +2,19 @@
 
 ## 0.1.16-SNAPSHOT
 
+### CI testcase reports
+
+- The batch Docker testcase runner supports optional `--json PATH` and
+  `--junit PATH` reports (individually or together), plus `--log-dir DIR` for
+  retained logs. JSON records each selected case's status, process exit code,
+  duration, and skip reason; JUnit exposes failures and manual skips in CI.
+- TC-16 is explicitly manual in batch runs (`-1` / skipped) while direct
+  execution remains unchanged. Batch exit codes are `0` with no failures
+  (skips allowed), `1` for testcase failures, and `2` for usage/setup/report
+  errors. Explicit nonexistent case selections are now rejected.
+- Documented CI usage, report formats, and the separately planned split-host
+  TC-16 benchmark workflow.
+
 ### Bounded TCP reconnects and repeated-log summaries
 
 - TCP connection attempts now respect `tcpRetryInterval` (default 1000 ms)

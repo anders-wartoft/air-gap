@@ -75,6 +75,117 @@ connections. Requires host Go and Docker Compose; it generates temporary TLS
 identities using the application binaries. Checks are green/red (`NO_COLOR=1`
 disables colors). Failure artifacts are retained; `-pause` retains containers.
 
+## CI batch runs and machine-readable results
+
+Use `run-testcases.sh` for one case, a comma-separated selection, ranges, or
+all available cases. It continues after testcase failures:
+
+```bash
+# Run one case and produce JSON.
+./tests/env/run-testcases.sh --json artifacts/results.json 39
+
+# Run a selection, producing both report formats and retaining complete logs.
+./tests/env/run-testcases.sh \
+  --json artifacts/results.json --junit artifacts/junit.xml \
+  --log-dir artifacts/logs '1-15,17-'
+
+# Include TC-16: it is reported as skipped, without starting containers.
+./tests/env/run-testcases.sh --junit artifacts/junit.xml '1-'
+```
+
+Paths for `--json`, `--junit`, and `--log-dir` are relative to the caller's
+working directory. Either report format, both, or neither can be selected.
+Reports require Python 3.8+ (standard library only). Without `--log-dir`,
+per-case batch logs are temporary; individual runners may retain additional
+failure artifacts. Use a fresh output directory per CI job. Reports are
+written at the end of a completed batch, including batches with failed cases;
+an interrupted run or setup error is not guaranteed to produce reports.
+
+### Exit codes and report schema
+
+| Batch exit code | Meaning |
+| --- | --- |
+| `0` | No executed case failed. Skips, including an entirely skipped selection, are allowed. |
+| `1` | At least one testcase failed; other selected cases were still attempted. |
+| `2` | Invalid arguments/selection or a batch setup/log/report-writing error. |
+
+An explicitly named nonexistent case is an error. Ranges include only available
+manifests; missing numbers inside a range are not errors. A testcase's own
+positive exit code is preserved in JSON, but any testcase failure makes the
+batch return `1`.
+
+```json
+{
+  "results": {
+    "TC-15": {"status": "passed", "code": 0, "durationSeconds": 42},
+    "TC-16": {
+      "status": "skipped",
+      "code": -1,
+      "durationSeconds": 0,
+      "reason": "Manual performance benchmark; run ./run-testcase.sh 16 interactively"
+    },
+    "TC-17": {"status": "failed", "code": 7, "durationSeconds": 18}
+  },
+  "summary": {"passed": 1, "failed": 1, "skipped": 1}
+}
+```
+
+Only selected cases appear. Numeric codes are `0` for passed, `-1` for skipped,
+and the actual positive process exit code for failed. JUnit maps them to
+ordinary testcases, `<skipped>`, and `<failure>` respectively, with runtimes
+and up to the last 64 KiB of failed-case log output (ANSI/control characters
+removed for XML). Keep full logs with `--log-dir`.
+
+### GitLab CI example
+
+The CI worker needs the usual testcase prerequisites (including Go, Docker
+Compose, and any case-specific dependencies), plus Python 3.8+ for reports.
+Run batch jobs serially on a given Docker daemon: some cases use shared
+container names/ports and are not isolated across concurrent jobs.
+
+```yaml
+docker-testcases:
+  stage: test
+  script:
+    - ./tests/env/run-testcases.sh --json artifacts/results.json --junit artifacts/junit.xml --log-dir artifacts/logs '1-15,17-'
+  artifacts:
+    when: always
+    paths:
+      - artifacts/
+    reports:
+      junit: artifacts/junit.xml
+```
+
+The runner's exit code fails the job automatically; `when: always` preserves
+reports and logs even on a failing batch. Avoid `|| true` on the runner command,
+which would hide test failures.
+
+### Manual TC-16 and future split-machine setup
+
+TC-16 declares `TC_MANUAL_REASON` in its manifest. The batch runner always
+reports it as skipped (`-1` / JUnit skipped); it does not launch the benchmark.
+Direct interactive execution remains unchanged:
+
+```bash
+./tests/env/run-testcase.sh 16           # default all-on-one-machine stack
+./tests/env/run-testcase.sh 16 down-only # existing generic downstream role
+./tests/env/run-testcase.sh 16 up-only   # existing generic upstream role
+```
+
+The proposed `TC-16-DS` / `TC-16-US` workflow is not implemented by this change.
+The intended future workflow is to start downstream Kafka, receiver, dedup,
+and statistics collection on one host; configure static ARP/routes and start
+upstream Kafka/generation on another; prefill Kafka before starting the upstream
+application; then measure downstream throughput from the first received event.
+Current generic role selection does not implement that staged producer/app
+startup or first-event statistics protocol.
+
+Runner/report regressions can be tested without Docker:
+
+```bash
+python3 tests/env/test-run-testcases.py -v
+```
+
 ## Topology
 
 The Kafka layout mirrors the real deployment: each cluster is a two-broker

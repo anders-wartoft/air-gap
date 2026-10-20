@@ -105,6 +105,7 @@ teardown between each). It understands ranges and wildcards:
 ./run-testcases.sh 1-              # all of them (trailing '*' is optional)
 ./run-testcases.sh --long 9,11     # include every verdict block, not just failures
 ./run-testcases.sh 9 -- -pause     # keep the stack up after TC-9
+./run-testcases.sh --json results.json --junit junit.xml '1-15,17-'
 ```
 
 Each testcase prints a short summary line in the chain summary, with its
@@ -112,10 +113,19 @@ wall-clock runtime shown inline (e.g. `(1m26s)`) — handy for comparing
 throughput across different machines/hosts. The total chain runtime is
 printed on its own line at the very end (`total runtime: Xm YYs (Zs)`).
 
+For CI, select JSON (`--json PATH`), JUnit XML (`--junit PATH`), or both.
+Use `--log-dir DIR` to retain complete per-case logs. Paths are relative to
+the caller's working directory. Batch exit codes are `0` (no failures, skips
+allowed), `1` (one or more failed cases), and `2` (argument/setup/report error).
+JSON preserves per-case `0`/`-1`/positive exit codes; JUnit exposes manual cases
+as skipped. See the [CI guide](../env/README.md#ci-batch-runs-and-machine-readable-results)
+for the schema, prerequisites, and GitLab configuration.
+
 * `✅ testcase N PASS` — pass; verdict shown only in `--long` mode.
 * `❌ testcase N FAIL` — fail; verdict block always shown so you see why
   without re-running.
-* `🤔 testcase N SKIP` — the manifest `testcases/NN.env` doesn't declare
+* `🤔 testcase N SKIP` — the manifest explicitly declares `TC_MANUAL_REASON`,
+  or doesn't declare
   `TC_RUNNER`, `LG_PRODUCER_CONFIG`, or `AUTO_EXIT_SERVICE`, so there's no auto-exit
   path and running it would hang the chain. Chain-safe testcases listed
   as "**Chain run**" below are: **TC-1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
@@ -130,6 +140,7 @@ understands these manifest knobs:
 
 | Knob | Effect |
 | --- | --- |
+| `TC_MANUAL_REASON=text` | Batch runner only: skip this case with numeric code `-1` and the given reason; direct execution is unchanged. |
 | `TC_RUNNER=path` | Run an isolated standalone Docker test (TC-26/27) which owns its stack, assertions, exit status, and cleanup. Supports `all` and `-pause`; avoids starting the Kafka/LG stack. |
 | `LG_PRODUCER_CONFIG` | Activate the `lg-producer` compose profile, use it as the auto-exit container. |
 | `LG_SINK_CONFIG` | Activate the `lg-sink` compose profile; its summary is the verdict source. |
@@ -2577,8 +2588,7 @@ Measure sustained EPS and loss on the chosen host.
 
 **Not chain-safe — intentionally manual-only.** Unlike TC-1 through
 TC-15, TC-16 is a performance *benchmark*, not a correctness check.
-There is no automated chain variant, and this is a deliberate choice,
-not pending work:
+There is no automated pass/fail benchmark in the chain:
 
 * REQ-11 asks to "measure sustained EPS and loss" — there's no single
   correct EPS value to assert pass/fail against; throughput is
@@ -2605,6 +2615,13 @@ number), that would be a different, new testcase — not a replacement
 for this benchmark. TC-16 stays on `./run-testcase.sh 16` for
 interactive use; the chain runner correctly reports it as
 chain-unsafe/SKIP and that's by design, not a gap to fill.
+
+The manifest explicitly marks this benchmark manual, so including TC-16 in
+a CI selection yields JSON code `-1` / JUnit skipped without launching it.
+Running it directly defaults to the one-machine setup. A future `TC-16-DS` /
+`TC-16-US` workflow with prefilled upstream Kafka, delayed application startup,
+and first-event downstream statistics is planned separately; these aliases
+and staging semantics are not implemented yet.
 
 **Setup.**
 

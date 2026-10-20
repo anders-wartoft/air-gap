@@ -73,6 +73,9 @@ The first topic may contain duplicates but the one from the deduplicator should 
 
 ## Getting started
 
+For automated Docker testcase selections, JSON/JUnit CI reports, and GitLab
+examples, see the [test runner CI guide](tests/env/README.md#ci-batch-runs-and-machine-readable-results).
+
 ### Properties file comments
 
 Application properties files use `key=value`. A `#` starts a comment at the

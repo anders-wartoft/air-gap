@@ -2,7 +2,16 @@
 # Run a selection of testcases given as a compact id spec.
 #
 # Usage:
-#   ./run-testcases.sh [-l|--long] [<spec>] [-- extra args forwarded to run-testcase.sh]
+#   ./run-testcases.sh [options] [<spec>] [-- args for run-testcase.sh]
+#
+#   --json PATH    write per-case codes/status/duration/reason as JSON
+#   --junit PATH   write a JUnit XML report (can be combined with --json)
+#   --log-dir DIR  retain per-case logs in DIR
+#   Report paths are relative to the caller's working directory.
+#   Reports require Python 3 (standard library only).
+#   Exit: 0 = no failed cases (skips allowed), 1 = testcase failure,
+#         2 = usage/report/setup error. Per-case codes: 0 pass, -1 skip,
+#         positive = testcase exit code. Manual cases are never started.
 #
 #   <spec> is a comma-separated list where each token is one of:
 #       N        single testcase id
@@ -43,17 +52,36 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+CALLER_DIR="$PWD"
 cd "$HERE"
 
-usage() { sed -n '2,42p' "$0"; exit "${1:-1}"; }
+usage() { sed -n '2,/^set -euo pipefail/{ /^set -euo pipefail/d; p; }' "$0"; exit "${1:-1}"; }
 
 LONG=0
+JSON_REPORT=""
+JUNIT_REPORT=""
+RETAIN_LOGDIR=""
 POSITIONAL=()
 EXTRA_ARGS=()
 while (( $# > 0 )); do
     case "$1" in
         -h|--help)   usage 0 ;;
         -l|--long)   LONG=1; shift ;;
+        --json|--junit|--log-dir)
+            option="$1"
+            if (( $# < 2 )) || [[ -z "$2" || "$2" == --* ]]; then
+                echo "run-testcases: $option requires a path" >&2
+                exit 2
+            fi
+            path="$2"
+            [[ "$path" == /* ]] || path="$CALLER_DIR/$path"
+            case "$option" in
+                --json) JSON_REPORT="$path" ;;
+                --junit) JUNIT_REPORT="$path" ;;
+                --log-dir) RETAIN_LOGDIR="$path" ;;
+            esac
+            shift 2
+            ;;
         --)          shift; EXTRA_ARGS=("$@"); break ;;
         -*)
             echo "run-testcases: unknown option '$1'" >&2
@@ -141,6 +169,10 @@ for raw in "${tokens[@]}"; do
     else
         lo="$(resolve_endpoint "$tok" lo)"
         hi="$lo"
+        if ! is_available "$lo"; then
+            echo "run-testcases: no manifest for explicitly selected TC-$lo" >&2
+            exit 2
+        fi
     fi
     for (( id = lo; id <= hi; id++ )); do
         if ! is_available "$id"; then
@@ -152,6 +184,25 @@ for raw in "${tokens[@]}"; do
         fi
     done
 done
+
+if [[ -n "$JSON_REPORT" || -n "$JUNIT_REPORT" ]]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "run-testcases: Python 3 is required for JSON/JUnit reports" >&2
+        exit 2
+    fi
+    if [[ -n "$JSON_REPORT" && "$JSON_REPORT" == "$JUNIT_REPORT" ]]; then
+        echo "run-testcases: JSON and JUnit reports require different paths" >&2
+        exit 2
+    fi
+    for path in "$JSON_REPORT" "$JUNIT_REPORT"; do
+        [[ -n "$path" ]] || continue
+        if ! mkdir -p "$(dirname "$path")" || [[ -d "$path" ]] ||
+            [[ ! -w "$(dirname "$path")" ]] || { [[ -e "$path" ]] && [[ ! -w "$path" ]]; }; then
+            echo "run-testcases: cannot write report: $path" >&2
+            exit 2
+        fi
+    done
+fi
 
 if (( ${#IDS[@]} == 0 )); then
     echo "run-testcases: spec '$SPEC' selected no available testcases" >&2
@@ -175,9 +226,22 @@ PROFILE_FLAGS=(
 
 # Per-run artifacts: one log file per testcase so we can reprint the verdict
 # block at the end. Cleaned up on exit (success or failure).
-LOGDIR="$(mktemp -d -t airgap-chain.XXXXXX)"
+if ! LOGDIR="$(mktemp -d -t airgap-chain.XXXXXX)"; then
+    echo "run-testcases: cannot create temporary results directory" >&2
+    exit 2
+fi
 cleanup() { rm -rf "$LOGDIR"; }
 trap cleanup EXIT
+RESULT_ROWS="$LOGDIR/results.tsv"
+: > "$RESULT_ROWS"
+CASE_LOGDIR="$LOGDIR"
+if [[ -n "$RETAIN_LOGDIR" ]]; then
+    if ! mkdir -p "$RETAIN_LOGDIR"; then
+        echo "run-testcases: cannot create log directory: $RETAIN_LOGDIR" >&2
+        exit 2
+    fi
+    CASE_LOGDIR="$RETAIN_LOGDIR"
+fi
 
 # Did the caller forward -pause? If so we leave the stack up after the final
 # testcase (same semantics run-testcase.sh gives for a single run).
@@ -244,7 +308,16 @@ tc_has_auto_exit() {
         set +u
         # shellcheck disable=SC1090
         . "$manifest"
+        [[ -z "${TC_MANUAL_REASON-}" ]] || return 1
         [[ -n "${TC_RUNNER-}" ]] || [[ -n "${LG_PRODUCER_CONFIG-}" ]] || [[ -n "${AUTO_EXIT_SERVICE-}" ]]
+    )
+}
+
+tc_skip_reason() {
+    local manifest="testcases/$(printf '%02d' "$1").env"
+    (
+        . "$manifest"
+        printf '%s' "${TC_MANUAL_REASON:-No automated completion/verdict configured; run interactively}"
     )
 }
 
@@ -263,14 +336,16 @@ for id in "${IDS[@]}"; do
     echo "  running testcase $id"
     echo "========================================================"
     if ! tc_has_auto_exit "$id"; then
-        echo "runner: testcase $id has no TC_RUNNER, LG_PRODUCER_CONFIG, or AUTO_EXIT_SERVICE — would hang the chain." >&2
+        reason="$(tc_skip_reason "$id")"
+        echo "runner: testcase $id skipped: $reason" >&2
         echo "runner: skipping. Run it interactively with ./run-testcase.sh $id." >&2
         SKIP+=("$id")
         declare_status "$id" SKIP
         declare_duration "$id" 0
+        printf '%s\t%s\t%s\t%s\n' "$id" -1 0 "$reason" >> "$RESULT_ROWS"
         continue
     fi
-    LOG="$LOGDIR/tc-${id}.log"
+    LOG="$CASE_LOGDIR/tc-${id}.log"
     tc_start_epoch="$(date +%s)"
     set +e
     if (( ${#EXTRA_ARGS[@]} )); then
@@ -278,10 +353,16 @@ for id in "${IDS[@]}"; do
     else
         ./run-testcase.sh "$id" 2>&1 | tee "$LOG"
     fi
-    rc="${PIPESTATUS[0]}"
+    pipeline_status=("${PIPESTATUS[@]}")
+    rc="${pipeline_status[0]}"
     set -e
+    if (( pipeline_status[1] != 0 )); then
+        echo "run-testcases: failed to capture log: $LOG" >&2
+        exit 2
+    fi
     tc_elapsed=$(( $(date +%s) - tc_start_epoch ))
     declare_duration "$id" "$tc_elapsed"
+    printf '%s\t%s\t%s\t\n' "$id" "$rc" "$tc_elapsed" >> "$RESULT_ROWS"
     if (( rc == 0 )); then
         echo "[chain] TC-$id OK ($(format_duration "$tc_elapsed"))"
         PASS+=("$id")
@@ -336,11 +417,11 @@ for id in "${IDS[@]}"; do
     # it failed without re-running) and additionally shown for successes
     # when -l/--long was requested. SKIP has no captured log to extract.
     if [[ "$status" == "SKIP" ]]; then
-        echo "  (no LG_PRODUCER_CONFIG in testcases/$(printf '%02d' "$id").env — chain-unsafe)"
+        echo "  ($(tc_skip_reason "$id"))"
         continue
     fi
     if (( LONG )) || [[ "$status" == "FAIL" ]]; then
-        block="$(print_verdict_block "$id" "$LOGDIR/tc-${id}.log")"
+        block="$(print_verdict_block "$id" "$CASE_LOGDIR/tc-${id}.log")"
         if [[ -n "$block" ]]; then
             printf '%s\n' "$block"
         else
@@ -356,6 +437,13 @@ echo "  failed  (${#FAIL[@]}): ${FAIL[*]:-(none)}"
 echo "  skipped (${#SKIP[@]}): ${SKIP[*]:-(none)}"
 CHAIN_ELAPSED=$(( $(date +%s) - CHAIN_START_EPOCH ))
 echo "  total runtime: $(format_duration "$CHAIN_ELAPSED") (${CHAIN_ELAPSED}s)"
+if [[ -n "$JSON_REPORT" || -n "$JUNIT_REPORT" ]]; then
+    if ! python3 "$HERE/lib/chain-report.py" "$RESULT_ROWS" "$CASE_LOGDIR" \
+        "$JSON_REPORT" "$JUNIT_REPORT"; then
+        echo "run-testcases: failed to write results report" >&2
+        exit 2
+    fi
+fi
 if (( ${#FAIL[@]} )); then
     exit 1
 fi
