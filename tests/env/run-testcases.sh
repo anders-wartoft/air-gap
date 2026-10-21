@@ -45,6 +45,15 @@
 #   ./run-testcases.sh --long 9,11
 #   ./run-testcases.sh '3, 5-8, 11' -- -pause
 #   ./run-testcases.sh -l 5-
+#   ./run-testcases.sh --log-dir ./logs 1,4-7,9
+#   ./run-testcases.sh 1,4-7,9 > test-run.log 2>&1
+#   set -o pipefail
+#   ./run-testcases.sh 1,4-7,9 2>&1 | tee test-run.log
+#
+# --log-dir retains tc-1.log, tc-4.log, etc. relative to the caller's
+# working directory. Existing per-case logs are overwritten. Redirection
+# saves combined output, including the final summary; tee also displays it.
+# In Bash, set -o pipefail preserves the runner's failure status with tee.
 #
 # After every testcase this script runs the compose teardown for all known
 # profiles so the next one starts clean (same as run-all-testcases.sh).

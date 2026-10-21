@@ -30,7 +30,7 @@ Common conventions used throughout:
   outside of Docker, is:
 
   ```bash
-  java -jar LogGenerator-1.1-7.jar -pf <properties-file>
+  java -jar LogGenerator-1.1-9.jar -pf <properties-file>
   ```
 
   LogGenerator reads a `.properties` file whose format is distinct from
@@ -108,6 +108,29 @@ teardown between each). It understands ranges and wildcards:
 ./run-testcases.sh --json results.json --junit junit.xml '1-15,17-'
 ```
 
+To retain a separate log for each testcase:
+
+```sh
+./run-testcases.sh --log-dir ./logs 1,4-7,9
+```
+
+This writes `tc-1.log`, `tc-4.log`, etc. into `./logs`, relative to your
+current working directory. Existing logs with the same names are overwritten.
+
+To save all console output, including the final summary, in one combined log:
+
+```sh
+./run-testcases.sh 1,4-7,9 > test-run.log 2>&1
+```
+
+To display that output while also saving it, use `tee`. In Bash, enable
+`pipefail` so the pipeline preserves the runner's failure status:
+
+```bash
+set -o pipefail
+./run-testcases.sh 1,4-7,9 2>&1 | tee test-run.log
+```
+
 Each testcase prints a short summary line in the chain summary, with its
 wall-clock runtime shown inline (e.g. `(1m26s)`) — handy for comparing
 throughput across different machines/hosts. The total chain runtime is
@@ -125,14 +148,20 @@ for the schema, prerequisites, and GitLab configuration.
 * `❌ testcase N FAIL` — fail; verdict block always shown so you see why
   without re-running.
 * `🤔 testcase N SKIP` — the manifest explicitly declares `TC_MANUAL_REASON`,
-  or doesn't declare
-  `TC_RUNNER`, `LG_PRODUCER_CONFIG`, or `AUTO_EXIT_SERVICE`, so there's no auto-exit
-  path and running it would hang the chain. Chain-safe testcases listed
-  as "**Chain run**" below are: **TC-1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-  11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
-  29**. The others still work with `./run-testcase.sh N` directly
-  for the manual procedure. TC-16 uses a staged single-machine benchmark
-  with a delivery verdict and no fixed throughput threshold.
+  or none of `TC_RUNNER`, `LG_PRODUCER_CONFIG`, and `AUTO_EXIT_SERVICE` is
+  nonempty, so there is no automated completion path.
+
+The runner discovers available testcase IDs from `NN.env` manifests in
+[tests/env/testcases/](../env/testcases/) rather than hard-coding the current
+highest ID. With no spec (or with `1-`), newly added testcases are automatically
+included. Each selected case runs if its manifest provides an automated
+completion path and does not set `TC_MANUAL_REASON`; otherwise it is reported
+as skipped. The manifests, rather than a hard-coded list here, determine
+which cases are chain-safe.
+
+Manual cases can be run directly with `./run-testcase.sh N` following their
+documented procedure. TC-16 is a staged two-host UDP benchmark and is
+intentionally skipped by the batch runner; see [the TC-16 guide](../env/TC-16.md).
 
 The runner's single-testcase variant [run-testcase.sh](../env/run-testcase.sh)
 understands these manifest knobs:

@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.1.16.1-SNAPSHOT
+
+### Security dependency update
+
+- Updated the transitive Go dependency `github.com/klauspost/compress` from
+  v1.18.0 to v1.18.7 to address GHSA-259r-337f-4rfw (integer overflow and
+  out-of-bounds memory access in S2 dictionary handling). The application does
+  not use the affected S2 dictionary APIs.
+
 ## 0.1.16-SNAPSHOT
 
 ### Staged UDP performance benchmark (TC-16)
