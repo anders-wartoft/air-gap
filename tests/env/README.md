@@ -102,7 +102,7 @@ all available cases. It continues after testcase failures:
   --json artifacts/results.json --junit artifacts/junit.xml \
   --log-dir artifacts/logs '1-15,17-'
 
-# Include TC-16: it is reported as skipped, without starting containers.
+# Include TC-16's staged benchmark (automatically resets only TC-16 data).
 ./tests/env/run-testcases.sh --junit artifacts/junit.xml '1-'
 ```
 
@@ -131,15 +131,10 @@ batch return `1`.
 {
   "results": {
     "TC-15": {"status": "passed", "code": 0, "durationSeconds": 42},
-    "TC-16": {
-      "status": "skipped",
-      "code": -1,
-      "durationSeconds": 0,
-      "reason": "Manual performance benchmark; run ./run-testcase.sh 16 interactively"
-    },
+    "TC-16": {"status": "passed", "code": 0, "durationSeconds": 60},
     "TC-17": {"status": "failed", "code": 7, "durationSeconds": 18}
   },
-  "summary": {"passed": 1, "failed": 1, "skipped": 1}
+  "summary": {"passed": 2, "failed": 1, "skipped": 0}
 }
 ```
 
@@ -175,9 +170,13 @@ which would hide test failures.
 
 ### Staged TC-16: one or two Linux machines
 
-TC-16 declares `TC_MANUAL_REASON` in its manifest. The batch runner always
-reports it as skipped (`-1` / JUnit skipped); it does not launch the benchmark.
-Direct execution uses a dedicated staged benchmark stack:
+TC-16 declares a standalone staged runner. Both `./run-testcases.sh 16` and
+ranges such as `./run-testcases.sh 1-` execute its single-machine benchmark,
+reporting the delivery verdict without a fixed throughput threshold.
+Batch runs reset only the dedicated TC-16 stacks and Kafka volumes before
+starting and remove them afterward, on success or failure. Diagnostic files
+are captured before cleanup. Direct runs retain data and require explicit
+resets before another fresh run. Direct execution also supports separate machines:
 
 ```bash
 ./tests/env/run-testcase.sh 16       # all phases on one machine (loopback)

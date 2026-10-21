@@ -129,11 +129,10 @@ for the schema, prerequisites, and GitLab configuration.
   `TC_RUNNER`, `LG_PRODUCER_CONFIG`, or `AUTO_EXIT_SERVICE`, so there's no auto-exit
   path and running it would hang the chain. Chain-safe testcases listed
   as "**Chain run**" below are: **TC-1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-  11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+  11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
   29**. The others still work with `./run-testcase.sh N` directly
-  for the manual procedure. Note: TC-16 SKIPs by deliberate design, not
-  because it's unimplemented — see its section below for why a
-  performance benchmark can't have a meaningful automated chain variant.
+  for the manual procedure. TC-16 uses a staged single-machine benchmark
+  with a delivery verdict and no fixed throughput threshold.
 
 The runner's single-testcase variant [run-testcase.sh](../env/run-testcase.sh)
 understands these manifest knobs:
@@ -2589,39 +2588,15 @@ Measure sustained EPS and loss on the chosen host.
 * Current staged procedure: [TC-16 guide](../env/TC-16.md), including separate
   instructions for each machine, static ARP/routes and timing interpretation.
 
-**Not chain-safe — intentionally manual-only.** Unlike TC-1 through
-TC-15, TC-16 is a performance *benchmark*, not a correctness check.
-There is no automated pass/fail benchmark in the chain:
+**Chain-enabled staged benchmark.** Both `./run-testcases.sh 16` and ranges
+such as `./run-testcases.sh 1-` execute the dedicated single-machine flow.
+Pass/fail checks delivery; throughput is measured without an arbitrary EPS
+threshold. Docker Desktop measurements are not representative of native Linux
+physical-network performance. Batch mode resets only TC-16 containers and Kafka
+volumes before starting and removes them after success or failure, preserving
+diagnostic files. Direct runs retain their stacks and require explicit resets.
 
-* REQ-11 asks to "measure sustained EPS and loss" — there's no single
-  correct EPS value to assert pass/fail against; throughput is
-  host-dependent by design. Any hard threshold the chain runner
-  enforced would be arbitrary and likely to fail on slower CI/dev
-  hosts for reasons that have nothing to do with a real regression.
-* Docker Desktop (macOS/Windows) runs containers inside a virtualized
-  VM with its own virtualized networking layer. UDP throughput numbers
-  measured there are **not comparable** to the bare-metal numbers this
-  test is meant to produce (the manual procedure's own baseline notes
-  "~900 EPS" on an OSX desktop vs. "~375,000" on a Fedora i7 — already
-  a 400x spread between two bare-metal hosts; a VM-in-a-VM Docker
-  Desktop setup adds yet another, differently-shaped bottleneck).
-* The documented procedure pre-fills Kafka with 1,000,000 events and
-  runs an open-ended baseline (no Kafka, `NullAdapter`) plus a
-  full-chain run — both are open-ended stress tests meant to be
-  watched and tuned interactively (adjusting EPS, UDP buffer sizes,
-  `numReceivers`, etc.), not a fixed-duration pass/fail step suitable
-  for an unattended chain run.
-
-If you need a quick automated smoke test that the pipeline doesn't
-fall over under *some* load (distinct from measuring a meaningful
-number), that would be a different, new testcase — not a replacement
-for this benchmark. TC-16 stays on `./run-testcase.sh 16` for
-interactive use; the chain runner correctly reports it as
-chain-unsafe/SKIP and that's by design, not a gap to fill.
-
-The manifest explicitly marks this benchmark manual, so including TC-16 in
-a CI selection yields JSON code `-1` / JUnit skipped without launching it.
-Running it directly uses a dedicated one-machine staged setup. `TC-16-DS`
+Running it directly uses the same dedicated one-machine staged setup. `TC-16-DS`
 starts only downstream Kafka and the UDP receiver initially. `TC-16-US`
 pre-fills upstream Kafka using LogGenerator and starts the sender only after
 generation finishes. DS measures raw backlog completion, stops the receiver,
@@ -4082,9 +4057,8 @@ force-recreate patterns).
 
 ---
 
-**All 25 testcases now have chain-run automation** (TC-16 excluded by
-deliberate design — see its section above for why a performance benchmark
-can't have a meaningful automated chain variant). `./run-testcases.sh`
+**TC-16 now also has chain-run automation**, with a delivery verdict rather
+than a throughput threshold. `./run-testcases.sh`
 with no arguments runs the full suite.
 
 ## TC-26 — Production configuration warning acceptance tests

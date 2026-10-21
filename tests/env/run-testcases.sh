@@ -348,7 +348,9 @@ for id in "${IDS[@]}"; do
     LOG="$CASE_LOGDIR/tc-${id}.log"
     tc_start_epoch="$(date +%s)"
     set +e
-    if (( ${#EXTRA_ARGS[@]} )); then
+    if [[ "$id" == 16 ]]; then
+        TC16_BATCH_MODE=1 ./run-testcase.sh "$id" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} 2>&1 | tee "$LOG"
+    elif (( ${#EXTRA_ARGS[@]} )); then
         ./run-testcase.sh "$id" "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG"
     else
         ./run-testcase.sh "$id" 2>&1 | tee "$LOG"

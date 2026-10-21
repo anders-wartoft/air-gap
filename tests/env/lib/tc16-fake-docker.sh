@@ -26,9 +26,25 @@ case "$command" in
     up)
         touch "$FAKE_STATE/$service"
         ;;
-    stop|down) ;;
+    stop) ;;
+    down)
+        [[ "${FAKE_CLEANUP_FAIL:-0}" != 1 ]] || { echo "Injected cleanup failure" >&2; exit 1; }
+        if [[ "$side" == us ]]; then
+            rm -f "$FAKE_STATE/upstream" "$FAKE_STATE/lg-producer"
+        else
+            rm -f "$FAKE_STATE/downstream" "$FAKE_STATE/dedup" "$FAKE_STATE/lg-sink"
+        fi
+        ;;
     logs)
-        if [[ "$service" == downstream ]]; then
+        if [[ "$service" == --no-color ]]; then
+            if [[ "$side" == us && -f "$FAKE_STATE/upstream" ]]; then
+                echo "STATISTICS: {\"total_received\":$TC16_COUNT,\"total_sent\":$TC16_COUNT}"
+            elif [[ "$side" == ds && -f "$FAKE_STATE/downstream" ]]; then
+                count="$TC16_COUNT"
+                [[ "${FAKE_DROP:-0}" != 1 ]] || count=$((count-1))
+                echo "STATISTICS: {\"total_received\":$count,\"total_sent\":$count}"
+            fi
+        elif [[ "$service" == downstream ]]; then
             echo "UDP listener starting"
         elif [[ "$service" == lg-sink ]]; then
             echo "Number of unique received numbers: $TC16_COUNT"

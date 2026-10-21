@@ -29,10 +29,30 @@ run_case 0 16
 grep -q 'TC-16 PASS' "$WORK/result"
 if [[ -z "${NO_COLOR-}" ]]; then
     grep -Fq $'\033[0;32m─── TC-16 (all): PASS' "$WORK/result"
+    grep -Fq $'  \033[0;32mStage' "$WORK/result"
 fi
 grep -q 'Unique delivered sequence IDs, expected 10, 10' "$WORK/result"
 grep -q 'Duplicate sequence IDs, expected 0, 0' "$WORK/result"
 grep -q 'Next expected sequence ID, expected 11, 11' "$WORK/result"
+grep -q 'Measured phase.*Events.*Elapsed.*Average EPS' "$WORK/result"
+grep -q 'generation .*| *10 .*| *[0-9]*s .*|' "$WORK/result"
+grep -q 'Total runtime : [0-9]*s' "$WORK/result"
+previous=0
+for message in \
+    'Starting ds Kafka cluster' \
+    'Starting downstream UDP receiver' \
+    'Starting us Kafka cluster' \
+    'Adding 10 test events' \
+    'Deduplicating data' \
+    'Checking received data' \
+    'Collecting diagnostic logs'; do
+    current="$(grep -nF "$message" "$WORK/result" | head -1 | cut -d: -f1)"
+    [[ "$current" -gt "$previous" ]]
+    previous="$current"
+done
+grep -q 'Sending data to downstream over UDP' "$WORK/result"
+grep -q 'Waiting for downstream Kafka to store all 10 events' "$WORK/result"
+grep -q 'allowing 1s to check for late or extra events' "$WORK/result"
 before 'up .*lg-producer$' 'up .*upstream$'
 before 'stop .*downstream$' 'up .*dedup$'
 before 'stop .*upstream$' 'up .*dedup$'
@@ -45,6 +65,10 @@ rm "$FAKE_STATE/upstream" "$FAKE_STATE/lg-producer"
 export FAKE_DROP=1
 run_case 1 16
 grep -q 'transfer timed out' "$WORK/result"
+grep -q 'Upstream sent (last statistics).*| 10' "$WORK/result"
+grep -q 'Downstream received (last statistics).*| 9' "$WORK/result"
+grep -q 'Missing raw Kafka records : 1 (10.0000%)' "$WORK/result"
+grep -q 'transfer (incomplete/armed wall clock).*| *9 .*|' "$WORK/result"
 if [[ -z "${NO_COLOR-}" ]]; then
     grep -Fq $'\033[0;31m─── TC-16 (all): FAIL' "$WORK/result"
 fi
@@ -112,6 +136,50 @@ if grep -Fq $'\033[' "$WORK/result"; then
     echo "NO_COLOR output contains ANSI escapes" >&2; exit 1
 fi
 echo "PASS: colored success/failure summaries and NO_COLOR output"
+
+mkdir -p "$WORK/env/testcases"
+cp "$HERE/run-testcases.sh" "$WORK/env/"
+cp "$HERE/testcases/16.env" "$WORK/env/testcases/"
+for selection in 16 1-; do
+    # Seed retained input: batch preparation must remove it without user resets.
+    touch "$FAKE_STATE/lg-producer"
+    : > "$FAKE_STATE/calls"
+    bash "$WORK/env/run-testcases.sh" "$selection" > "$WORK/result" 2>&1
+    grep -q 'TC-16 PASS: all 10 sequence IDs' "$WORK/result"
+    grep -q 'testcase 16 PASS' "$WORK/result"
+    grep -q 'Cleaning up TC-16 containers and Kafka volumes' "$WORK/result"
+    before 'airgap-tc16-us .*down -v --remove-orphans' 'up .*lg-producer$'
+    before 'airgap-tc16-ds .*down -v --remove-orphans' 'up .*downstream$'
+    for side in us ds; do
+        [[ "$(grep -c "airgap-tc16-$side .*down -v --remove-orphans" "$FAKE_STATE/calls")" == 2 ]]
+    done
+    for service in upstream lg-producer downstream dedup lg-sink; do
+        [[ ! -f "$FAKE_STATE/$service" ]]
+    done
+    if grep -q 'testcase 16 SKIP' "$WORK/result"; then
+        echo "Batch skipped the staged benchmark" >&2; exit 1
+    fi
+done
+for service in upstream lg-producer downstream dedup lg-sink; do rm -f "$FAKE_STATE/$service"; done
+rc=0
+FAKE_DROP=1 bash "$WORK/env/run-testcases.sh" 16 > "$WORK/result" 2>&1 || rc=$?
+[[ "$rc" == 1 ]]
+grep -q 'testcase 16 FAIL' "$WORK/result"
+grep -q 'Missing raw Kafka records : 1 (10.0000%)' "$WORK/result"
+if grep -q 'no verdict block captured' "$WORK/result"; then
+    echo "Batch did not capture failure details" >&2; exit 1
+fi
+for service in upstream lg-producer downstream dedup lg-sink; do
+    [[ ! -f "$FAKE_STATE/$service" ]]
+done
+echo "PASS: batch explicit/range selections run TC-16 and propagate delivery failures"
+
+rc=0
+FAKE_CLEANUP_FAIL=1 bash "$WORK/env/run-testcases.sh" 16 > "$WORK/result" 2>&1 || rc=$?
+[[ "$rc" == 1 ]]
+grep -q 'failed to clean up us stack' "$WORK/result"
+grep -q 'failed to clean up ds stack' "$WORK/result"
+echo "PASS: batch cleanup errors fail explicitly and attempt both sides"
 
 rm "$WORK/env/bin/LogGenerator-1.1-9.jar"
 touch "$WORK/env/bin/LogGenerator-1.1-6.jar"

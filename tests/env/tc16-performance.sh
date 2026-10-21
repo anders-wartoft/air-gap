@@ -7,7 +7,11 @@ source "$HERE/lib/report.sh"
 cd "$HERE"
 export COMPOSE_PROGRESS=plain
 
-die() { echo "TC-16: $*" >&2; exit 1; }
+die() {
+    echo "TC-16: $*" >&2
+    if [[ -n "${FAILURE_FILE:-}" ]]; then printf '%s\n' "$*" > "$FAILURE_FILE"; fi
+    exit 1
+}
 positive() { [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer"; }
 
 export TC16_COUNT="${TC16_COUNT:-1000000}"
@@ -30,6 +34,18 @@ esac
 RESULTS="${TC16_RESULTS_DIR:-$ROOT/tmp/tc16}"
 mkdir -p "$RESULTS"
 RESULTS="$(cd "$RESULTS" && pwd)"
+FAILURE_FILE=""
+case "$MODE" in
+    reset-*|stop-us) ;;
+    *)
+        FAILURE_FILE="$(mktemp "$RESULTS/failure.XXXXXX")"
+        : > "$RESULTS/phase-timing.csv"
+        rm -f "$RESULTS/failure-summary.txt" "$RESULTS/success-summary.txt"
+        if [[ "$MODE" == all || "$MODE" == ds ]]; then
+            : > "$RESULTS/progress.csv"
+        fi
+        ;;
+esac
 
 compose() {
     local side="$1"; shift
@@ -43,8 +59,9 @@ kafka() {
 }
 now() { date +%s; }
 metric() {
-    local phase="$1" seconds="$2"
-    awk -v p="$phase" -v n="$TC16_COUNT" -v s="$seconds" \
+    local phase="$1" seconds="$2" count="${3:-$TC16_COUNT}"
+    printf '%s,%s,%s\n' "$phase" "$count" "$seconds" >> "$RESULTS/phase-timing.csv"
+    awk -v p="$phase" -v n="$count" -v s="$seconds" \
         'BEGIN { printf "%s: %d events, %ds wall time", p,n,s;
         if(s>0) printf ", %.2f events/s", n/s; print "" }' | tee -a "$RESULTS/timing.txt"
 }
@@ -55,16 +72,102 @@ assert_running() {
     status="$(docker inspect -f '{{.State.Status}}' "$cid")"
     [[ "$status" == running ]] || { echo "TC-16: $service is $status; inspect $RESULTS/$side.log" >&2; return 1; }
 }
+stat_total() {
+    local file="$1" field="$2"
+    awk -v field="$field" '
+        /STATISTICS:/ {
+            pattern="\"" field "\":[[:space:]]*[0-9]+"
+            if (match($0,pattern)) {
+                value=substr($0,RSTART,RLENGTH)
+                sub(/.*:[[:space:]]*/,"",value)
+                found=value
+            }
+        }
+        END { print (found=="" ? "unavailable" : found) }
+    ' "$file"
+}
+result_details() {
+    local rc="$1"
+    local phase epoch current end lag sent received written
+    sent="$(stat_total "$RESULTS/us.log" total_sent)"
+    received="$(stat_total "$RESULTS/ds.log" total_received)"
+    written="$(stat_total "$RESULTS/ds.log" total_sent)"
+    echo "─── testcase 16 verdict ───"
+    if (( rc == 0 )); then
+        if [[ "$MODE" == us ]]; then
+            echo "  result : sender startup passed; delivery verification runs on DS"
+        else
+            echo "  result : all expected sequence IDs verified exactly once"
+        fi
+    elif [[ -s "$FAILURE_FILE" ]]; then
+        printf '  reason : %s\n' "$(cat "$FAILURE_FILE")"
+    else
+        echo "  reason : command failed or run interrupted; inspect diagnostic logs"
+    fi
+    printf '  %-37s | %s\n' "Stage" "Events"
+    printf '  %-37s | %s\n' "Expected" "$TC16_COUNT"
+    printf '  %-37s | %s\n' "Upstream read (last statistics)" "$(stat_total "$RESULTS/us.log" total_received)"
+    printf '  %-37s | %s\n' "Upstream sent (last statistics)" "$sent"
+    printf '  %-37s | %s\n' "Downstream received (last statistics)" "$received"
+    printf '  %-37s | %s\n' "Downstream written (last statistics)" "$written"
+    printf '  %-37s | %10s | %10s | %12s\n' "Measured phase" "Events" "Elapsed" "Average EPS"
+    awk -F, '{
+        eps=($3>0 ? sprintf("%.2f",$2/$3) : "n/a (<1s)")
+        printf "  %-37s | %10s | %9ss | %12s\n",$1,$2,$3,eps
+    }' "$RESULTS/phase-timing.csv"
+    printf '  Total runtime : %ss (includes setup, waiting, shutdown and cleanup)\n' "$SECONDS"
+    echo "  timing : phase EPS includes startup/CLI polling; not steady-state throughput. Unreached phases have no timing."
+    if [[ "$MODE" != us && -f "$RESULTS/progress.csv" ]]; then
+        while IFS=, read -r phase epoch current end lag; do
+            printf '  %s progress : current=%s end=%s lag=%s\n' "$phase" "$current" "$end" "$lag"
+            if [[ "$phase" == transfer ]]; then
+                awk -v n="$TC16_COUNT" -v c="$current" 'BEGIN {
+                    if(c<=n) printf "  Missing raw Kafka records : %d (%.4f%%)\n",n-c,100*(n-c)/n;
+                    else printf "  Extra raw Kafka records : %d\n",c-n
+                }'
+            fi
+        done < <(awk -F, '{last[$1]=$0} END {for(p in last) print last[p]}' "$RESULTS/progress.csv")
+    fi
+    echo "  note : statistics are sampled and may lag; unavailable is not zero."
+    echo "  note : UDP send success is not delivery confirmation; a shortfall alone does not identify the drop location."
+    printf '  evidence : %s\n' "$RESULTS"
+}
 capture() {
     local rc=$?
     trap - EXIT
+    echo "TC-16: Collecting diagnostic logs..."
     for side in us ds; do
         if ! compose "$side" logs --no-color > "$RESULTS/$side.log" 2>&1; then
             echo "TC-16: could not collect $side logs" >&2
             (( rc != 0 )) || rc=1
         fi
     done
-    echo "TC-16: exit=$rc; artifacts=$RESULTS; containers/data retained (explicit reset required)"
+    if [[ "${TC16_BATCH_MODE:-0}" == 1 && "$MODE" == all ]]; then
+        echo "TC-16: Cleaning up TC-16 containers and Kafka volumes..."
+        for side in us ds; do
+            if ! compose "$side" down -v --remove-orphans; then
+                echo "TC-16: failed to clean up $side stack" >&2
+                (( rc != 0 )) || rc=1
+            fi
+        done
+        echo "TC-16: exit=$rc; artifacts=$RESULTS; batch cleanup attempted for both TC-16 stacks"
+    else
+        echo "TC-16: exit=$rc; artifacts=$RESULTS; containers/data retained (explicit reset required)"
+    fi
+    local summary_file="$RESULTS/failure-summary.txt" color="$REPORT_RED"
+    if (( rc == 0 )); then
+        summary_file="$RESULTS/success-summary.txt"
+        color="$REPORT_GREEN"
+    fi
+    result_details "$rc" | tee "$summary_file" | while IFS= read -r line; do
+        # Keep the verdict marker uncolored for the batch summary extractor.
+        if [[ "$line" == "  "* ]]; then
+            printf '  %s%s%s\n' "$color" "${line#  }" "$REPORT_RESET"
+        else
+            printf '%s\n' "$line"
+        fi
+    done
+    rm -f "$FAILURE_FILE"
     local label="TC-16 ($MODE)"
     if [[ "$MODE" == us ]]; then
         label="$label sender startup only; delivery verification runs on DS"
@@ -118,6 +221,7 @@ create_topic() {
 }
 prepare() {
     local side="$1" services
+    echo "TC-16: Starting $side Kafka cluster and preparing test topics..."
     services="$(compose "$side" ps --services --status running)"
     [[ -z "$services" ]] || die "$side stack is already running; for a fresh run execute: bash \"$HERE/tc16-performance.sh\" reset-$side (deletes this side's TC-16 Kafka data)"
     compose "$side" up -d --no-deps "kafka-$side-1" "kafka-$side-2"
@@ -130,6 +234,7 @@ prepare() {
         # Downstream writes diagnostics here; do not auto-create arbitrary topics.
         create_topic ds airgap-internal
         [[ "$(offset_count ds tc16-dedup)" == 0 ]] || die "dedup topic is not empty; reset-ds first"
+        echo "TC-16: Starting downstream UDP receiver..."
         compose ds up -d --build --no-deps downstream
         local deadline=$((SECONDS + 120))
         until compose ds logs --no-color downstream | grep -q 'UDP listener starting'; do
@@ -163,6 +268,7 @@ wait_job() {
 }
 generate() {
     local started
+    echo "TC-16: Adding $TC16_COUNT test events to upstream Kafka with LogGenerator (sender not running)..."
     started="$(now)"
     compose us up -d --no-deps lg-producer
     wait_job us lg-producer
@@ -171,6 +277,7 @@ generate() {
     echo "TC-16-US: generation finished; starting UDP sender (no generator remains running)"
 }
 send_events() {
+    echo "TC-16: Sending data to downstream over UDP; starting upstream sender..."
     compose us up -d --build --no-deps upstream || return
     sleep 1
     assert_running us upstream
@@ -222,6 +329,7 @@ wait_phase() {
             return
         fi
         if (( SECONDS >= deadline )); then
+            metric "$phase (incomplete/armed wall clock)" "$((sampled - started))" "$count"
             if [[ "$phase" == transfer && "$count" == 0 ]]; then
                 echo "TC-16: no raw Kafka records arrived. Confirm TC-16-US finished generation and started upstream; DS alone produces no traffic." >&2
                 echo "TC-16: if upstream is running, check its logs, target IP, UDP/1234 firewall and route; Docker Desktop is not native Linux host networking." >&2
@@ -239,6 +347,7 @@ verify() {
         die "stop downstream and dedup before isolated verification"
     fi
     [[ "$(offset_count ds tc16-transfer)" == "$TC16_COUNT" ]] || die "raw input count differs from TC16_COUNT"
+    echo "TC-16: Checking received data with LogGenerator: expecting $TC16_COUNT unique sequence IDs and no duplicates..."
     # A fresh group prevents an earlier verification's committed end offsets
     # from looking like completion before this reader has consumed anything.
     export TC16_VERIFY_GROUP="tc16-verifier-$(now)-$$"
@@ -273,12 +382,15 @@ verify() {
     echo "TC-16 PASS: all $TC16_COUNT sequence IDs delivered exactly once; no fixed EPS threshold."
 }
 receive_events() {
+    echo "TC-16: Waiting for downstream Kafka to store all $TC16_COUNT events..."
     wait_phase transfer downstream
+    echo "TC-16: All raw events stored; allowing ${TC16_SETTLE}s to check for late or extra events..."
     sleep "$TC16_SETTLE"
     compose ds stop -t 30 downstream
     [[ "$(offset_count ds tc16-transfer)" == "$TC16_COUNT" ]] || die "raw record count changed during settle/shutdown"
     if [[ "$MODE" == all ]]; then compose us stop -t 30 upstream; fi
     echo "TC-16-DS: raw backlog stored; receiver stopped; starting dedup"
+    echo "TC-16: Deduplicating data: reading $TC16_COUNT raw events and writing deduplicated output..."
     # Fresh container also guarantees a fresh local Streams state directory.
     compose ds up -d --force-recreate --no-deps dedup
     wait_phase dedup dedup tc16-dedup
@@ -309,6 +421,11 @@ case "$MODE" in
         ;;
     all)
         require_lg
+        if [[ "${TC16_BATCH_MODE:-0}" == 1 ]]; then
+            echo "TC-16: batch mode resets only TC-16 containers and Kafka volumes before the run"
+            compose us down -v --remove-orphans
+            compose ds down -v --remove-orphans
+        fi
         : > "$RESULTS/timing.txt"
         : > "$RESULTS/progress.csv"
         prepare ds
