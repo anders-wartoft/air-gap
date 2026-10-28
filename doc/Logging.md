@@ -950,6 +950,173 @@ that host can re-sign an edited file. Getting real value out of signatures means
 thinking about where the key lives, which is a larger piece of work than the
 signing itself.
 
+## Quick start: verify a local file or a Kibana search
+
+Use `tests/env/verify_integrity_report.py` for an event-by-event report of
+record hashes, chain continuity, and signatures on completed checkpoints.
+Run the following commands from the repository root.
+
+### One-time prerequisites
+
+```bash
+python3 -m pip install -r tests/env/requirements-integrity-report.txt
+```
+
+Obtain `trusted-log-keys.json` from your independently trusted provisioning
+inventory, using the registry format in
+[Signer and public-key identity](#signer-and-public-key-identity).
+Include all key versions needed for the period being investigated. Do not
+construct trust merely by copying keys from the log under investigation.
+Private signing keys are not needed for verification.
+
+### Verify a local file
+
+For a saved Elasticsearch search-response JSON object or a JSON array of
+supported events:
+
+```bash
+python3 tests/env/verify_integrity_report.py \
+  --events-file exported-events.json \
+  --trust-registry trusted-log-keys.json \
+  --report-file local-integrity-report.txt
+```
+
+The file reader accepts one JSON document: a search response containing
+`hits.hits`, an event array, or a single event object. Events may contain the
+original OTLP envelope directly or preserve it in `event.original`.
+Each OTLP envelope must contain exactly one resource block, scope block, and
+log record, as emitted by Air-gap. A Discover CSV or ordinary text log is not
+a substitute for these structured records.
+
+**For a native Air-gap OTLP JSON Lines log**, first wrap its envelopes in a
+JSON array. This preserves the parsed field values without modifying the
+original file:
+
+```bash
+python3 - application.ndjson exported-events.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source, destination = map(Path, sys.argv[1:])
+if source.resolve() == destination.resolve():
+    raise SystemExit("Input and output paths must differ")
+events = []
+with source.open(encoding="utf-8") as stream:
+    for number, line in enumerate(stream, 1):
+        if not line.strip():
+            raise SystemExit(f"{source}:{number}: blank line is not an OTLP event")
+        try:
+            event = json.loads(line)
+        except ValueError as exc:
+            raise SystemExit(f"{source}:{number}: invalid JSON: {exc}") from exc
+        if not isinstance(event, dict) or "resourceLogs" not in event:
+            raise SystemExit(f"{source}:{number}: expected an OTLP envelope")
+        events.append(event)
+if not events:
+    raise SystemExit("Input contains no events")
+with destination.open("x", encoding="utf-8") as stream:
+    json.dump(events, stream)
+    stream.write("\n")
+PY
+```
+
+Then run the local verification command above. The converter refuses to
+overwrite an existing output file and does not silently discard malformed,
+blank, or plain-text lines. A mixed text/JSON startup log needs explicit
+separation before conversion; any excluded lines remain outside the
+verification claim.
+
+All supplied events are processed; `--size` does not limit local files.
+Local verification cannot fetch missing checkpoint records or rotation
+evidence from Kibana. Supply complete checkpoint windows and independently
+trusted keys for their signers. This path reads the whole JSON file into
+memory; it is not a streaming verifier for arbitrarily large logs.
+
+### Verify a Kibana search expression
+
+Create a protected credentials file, for example `case-kibana.json`:
+
+```json
+{
+  "kibana_url": "https://kibana.example.com",
+  "api_key": "REPLACE_WITH_YOUR_API_KEY",
+  "trust_registry": "trusted-log-keys.json"
+}
+```
+
+Keep credentials out of version control. The registry path is resolved
+relative to the credentials file. Then run:
+
+```bash
+python3 tests/env/verify_integrity_report.py \
+  --credentials-file case-kibana.json \
+  --index 'logs-*' \
+  --query 'tags:case-1234' \
+  --size 10000 \
+  --report-file kibana-integrity-report.txt
+```
+
+`--query` accepts an **Elasticsearch query-string expression**, not the KQL
+normally used by Discover. For EQL use `--eql` instead, for example
+`--eql 'any where tags == "case-1234"'`; do not combine the two options.
+Optional `--date-from` and `--date-to` bound the selected events.
+
+`--size` limits the requested search results; choose it large enough for the
+selection and inspect the report's selected-event count. A successful report
+must not be interpreted as proof that an arbitrary large search was fully
+exported. With trusted-key or CA configuration, the verifier additionally
+retrieves complete signed windows and required certificate-rotation evidence.
+Those evidence events can lie outside the selection's date bounds.
+See [Verifying a signed window from Kibana](#verifying-a-signed-window-from-kibana)
+for CA-based trust, ingestion requirements, and search details.
+
+### Read the result and automate it
+
+Both commands write the full event-by-event report to `--report-file`.
+The default `--max-details 10` limits console details, **not verification**.
+Always supply `--report-file` for unattended operation: otherwise a large
+result can prompt for a report filename.
+
+Exit status is `0` when all reported checks pass and `1` for verification
+failures, empty results, or handled input/access errors. Command-line usage
+errors from the argument parser use status `2`. Automation should treat
+**any nonzero status as failure**:
+
+```bash
+if python3 tests/env/verify_integrity_report.py \
+    --events-file exported-events.json \
+    --trust-registry trusted-log-keys.json \
+    --report-file integrity-report.txt; then
+  echo "Reported integrity checks passed; review coverage and warnings."
+else
+  status=$?
+  echo "Verification failed (exit $status); inspect the report/diagnostic output." >&2
+  exit "$status"
+fi
+```
+
+**PASS means the available checks succeeded, not that every event has every
+protection.** Review each event's hash, chain, and signature results:
+
+- `not present` is not necessarily a failure. The utility has no strict mode
+  requiring every event to be hashed, chained, and covered by a trusted
+  signature.
+- Ordinary records are authenticated through signed checkpoint windows;
+  they do not each carry a separate signature. Require complete, successfully
+  verified windows for the events whose authenticity matters.
+- An unfinished final window is not yet signed. Missing protection and
+  unsigned tails must be assessed separately from successful hash checks.
+- Warnings, including certificates expired now but valid at the event time,
+  require review even when the overall result passes.
+- Neither a local-file PASS nor a search PASS proves that every generated
+  event was retained. Detecting removal of the final portion requires
+  independent retained checkpoints or other completeness evidence.
+
+Do not use the process exit code alone as an enforcement policy for
+mandatory signed coverage. Retain the report, original evidence, and trusted
+key-registry version together.
+
 ## Verifying a signed window from Kibana
 
 `verify_integrity_report.py` automates the manual procedure below. The
