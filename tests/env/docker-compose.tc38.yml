@@ -4,11 +4,11 @@ services:
     build:
       context: .
       args:
-        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-tc38:local
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-tc38:local
     volumes:
-      - ${TC38_WORK:?Run through run-testcase.sh 38}:/airgap/work
-      - ../../config/testcases:/airgap/config:ro
+      - ${TC38_WORK:?Run through run-testcase.sh 38}:/airgap/work:z
+      - ../../config/testcases:/airgap/config:ro,z
     entrypoint: ["/airgap/work/downstream"]
     command: ["/airgap/config/downstream-airgap-38-docker.properties"]
     environment:
@@ -17,10 +17,10 @@ services:
 
   upstream:
     platform: linux/amd64
-    image: airgap-testenv-tc38:local
+    image: localhost/airgap-testenv-tc38:local
     volumes:
-      - ${TC38_WORK}:/airgap/work
-      - ../../config/testcases:/airgap/config:ro
+      - ${TC38_WORK}:/airgap/work:z
+      - ../../config/testcases:/airgap/config:ro,z
     entrypoint: ["/airgap/work/upstream"]
     command: ["/airgap/config/upstream-airgap-38-docker.properties"]
     environment:

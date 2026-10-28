@@ -1,6 +1,6 @@
 services:
   kafka:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: kafka
     environment:
       KAFKA_NODE_ID: 1
@@ -21,7 +21,7 @@ services:
       retries: 60
 
   topic-init:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     depends_on:
       kafka:
         condition: service_healthy
@@ -37,29 +37,29 @@ services:
     build:
       context: .
       args:
-        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-tc33:local
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-tc33:local
     entrypoint: ["/airgap/work/airgap-load"]
     command: ["seed-retention", "--dir=/airgap/work/lost-events"]
     volumes:
-      - ${TC33_WORK:?TC33_WORK is required}:/airgap/work
+      - ${TC33_WORK:?TC33_WORK is required}:/airgap/work:z
 
   downstream:
-    image: airgap-testenv-tc33:local
+    image: localhost/airgap-testenv-tc33:local
     hostname: downstream
     depends_on:
       topic-init:
         condition: service_completed_successfully
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config/testcases:/airgap/config:ro
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config/testcases:/airgap/config:ro,z
     environment:
       AIRGAP_CONFIG: /airgap/config/downstream-airgap-33-docker.properties
     command: ["downstream"]
     restart: on-failure:3
 
   upstream:
-    image: airgap-testenv-tc33:local
+    image: localhost/airgap-testenv-tc33:local
     hostname: upstream
     depends_on:
       topic-init:
@@ -69,20 +69,20 @@ services:
       downstream:
         condition: service_started
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config/testcases:/airgap/config:ro
-      - ${TC33_WORK:?TC33_WORK is required}:/airgap/work
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config/testcases:/airgap/config:ro,z
+      - ${TC33_WORK:?TC33_WORK is required}:/airgap/work:z
     environment:
       AIRGAP_CONFIG: /airgap/config/upstream-airgap-33-docker.properties
     command: ["upstream"]
     restart: on-failure:3
 
   producer:
-    image: airgap-testenv-tc33:local
+    image: localhost/airgap-testenv-tc33:local
     entrypoint: ["/airgap/work/airgap-load"]
     command: ["produce", "--brokers=kafka:9092", "--topic=source", "--count=1", "--size=4096"]
     depends_on:
       topic-init:
         condition: service_completed_successfully
     volumes:
-      - ${TC33_WORK:?TC33_WORK is required}:/airgap/work:ro
+      - ${TC33_WORK:?TC33_WORK is required}:/airgap/work:ro,z

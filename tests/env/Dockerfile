@@ -10,7 +10,7 @@
 #   * The container only installs light runtime diagnostics (ip/ping/ps),
 #     which are useful when debugging UDP/TCP transport inside Docker.
 
-ARG BASE_IMAGE=rockylinux:9
+ARG BASE_IMAGE=docker.io/library/rockylinux:9
 FROM ${BASE_IMAGE}
 
 RUN set -eux; \

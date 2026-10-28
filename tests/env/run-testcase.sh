@@ -318,10 +318,9 @@ echo
 bash "$HERE/generate-kafka-certs.sh"
 
 if [[ -n "$AUTO_EXIT_FROM" ]]; then
-    # Compose names containers deterministically as <project>-<service>-<index>;
-    # the project name is pinned via `name: airgap-testenv` in
-    # docker-compose.yml, so this is a fixed constant, not derived from
-    # anything dynamic. Defined early (before PRE_UP_SCRIPT, which needs it)
+    # docker-compose.yml pins container_name to airgap-testenv-<service>-1
+    # for both Docker Compose and podman-compose. Defined early (before
+    # PRE_UP_SCRIPT, which needs it)
     # rather than down by the AUTO_EXIT polling loop where it's also used.
     PROJECT_NAME="airgap-testenv"
 
@@ -435,6 +434,7 @@ if [[ -n "$AUTO_EXIT_FROM" ]]; then
     # dump the captured output before re-raising, so the banner isn't
     # immediately followed by "tearing down stack" with zero explanation.
     UP_LOG="$(mktemp -t airgap-up-XXXXXX)"
+    echo "runner: starting stack; startup output: $UP_LOG" >&2
     up_rc=0
     if ((${#UP_ARGS[@]})); then
         docker compose "${PROFILE_FLAGS[@]}" up -d "${UP_ARGS[@]}" </dev/null >"$UP_LOG" 2>&1 || up_rc=$?

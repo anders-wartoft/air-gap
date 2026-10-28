@@ -8,6 +8,7 @@ source "$HERE/lib/production-warnings.sh"
 export COMPOSE_PROGRESS=plain BUILDKIT_PROGRESS=plain
 umask 077
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc26.XXXXXX")"
+mkdir -m 0755 "$WORK/lost-events"
 PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
 export TC26_LOG_LEVEL=DEBUG
 

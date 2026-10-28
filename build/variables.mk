@@ -11,7 +11,7 @@ NEXT_BUILD_NUMBER := $(shell echo $$(($(BUILD_NUMBER)+1)))
 BUILD_LDFLAGS := -X 'main.BuildNumber=$(NEXT_BUILD_NUMBER)'
 
 # Package Configuration
-PKG_VERSION ?= $(shell echo $(GIT_VERSION) | sed 's/^v//')
+PKG_VERSION ?= $(shell echo $(GIT_VERSION) | sed 's/^v//; s/\//-/g')
 PKG_RELEASE ?= $(NEXT_BUILD_NUMBER)
 GITHUB_SHA := $(GIT_SHA)
 

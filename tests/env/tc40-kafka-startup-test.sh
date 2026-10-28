@@ -4,6 +4,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/lib/report.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc40.XXXXXX")"
+mkdir -m 0755 "$WORK/lost-events"
 PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
 export TC_WORK="$WORK" AIRGAP_BIN_DIR="$WORK" COMPOSE_PROGRESS=plain
 

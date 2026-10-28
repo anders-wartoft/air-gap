@@ -4,6 +4,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/lib/report.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc39.XXXXXX")"
+mkdir -m 0755 "$WORK/lost-events"
+mkdir -m 0700 "$WORK/server-trust" "$WORK/client-trust"
 PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
 export TC39_WORK="$WORK" COMPOSE_PROGRESS=plain
 
@@ -24,7 +26,10 @@ cleanup() {
             rc=1
         fi
         if (( rc == 0 )); then
-            rm -rf "$WORK"
+            if ! rm -rf "$WORK"; then
+                echo "TC-39 cleanup failed; artifacts retained at $WORK" >&2
+                rc=1
+            fi
         else
             echo "TC-39 failure artifacts retained at $WORK" >&2
         fi

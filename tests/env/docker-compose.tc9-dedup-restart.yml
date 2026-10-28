@@ -18,7 +18,7 @@ networks:
 
 services:
   kafka:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: kafka
     networks:
       - airgap-tc9-dedup-restart
@@ -39,7 +39,7 @@ services:
       KAFKA_NUM_PARTITIONS: ${TC9_RESTART_PARTITIONS:-3}
 
   topic-init:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: topic-init
     networks:
       - airgap-tc9-dedup-restart
@@ -76,7 +76,7 @@ services:
     restart: "no"
 
   dedup:
-    image: ${DEDUP_IMAGE:-eclipse-temurin:17-jre-noble}
+    image: ${DEDUP_IMAGE:-docker.io/library/eclipse-temurin:17-jre-noble}
     platform: linux/amd64
     hostname: dedup
     networks:
@@ -108,8 +108,8 @@ services:
       FAIL_FAST_CHECK_INTERVAL_MS: ${TC9_RESTART_CHECK_INTERVAL_MS:-4000}
       FAIL_FAST_CHECK_TIMEOUT_MS: ${TC9_RESTART_CHECK_TIMEOUT_MS:-8000}
     volumes:
-      - ../../java-streams/target:/airgap/dedup-jar:ro
-      - ../../config:/airgap/config:ro
+      - ../../java-streams/target:/airgap/dedup-jar:ro,z
+      - ../../config:/airgap/config:ro,z
     working_dir: /airgap
     # Nothing supervises this container. If dedup exits, the container stops
     # and the verification notices.

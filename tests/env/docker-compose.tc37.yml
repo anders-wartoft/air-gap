@@ -3,12 +3,12 @@ services:
     build:
       context: .
       args:
-        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-kafka-transfer:local
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-kafka-transfer:local
     hostname: tc37-upstream
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ${TC_WORK:?TC_WORK is required}:${TC_WORK}
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ${TC_WORK:?TC_WORK is required}:${TC_WORK}:z
     environment:
       AIRGAP_CONFIG: ${TC_WORK}/upstream.properties
     command: ["upstream"]

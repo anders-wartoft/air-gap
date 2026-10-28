@@ -13,6 +13,7 @@ cleanup() {
     local rc=$?
     trap - EXIT
     if (( rc != 0 )); then
+        compose ps -a >&2 || true
         compose logs --no-color >&2 || true
         compose exec -T systemd journalctl --no-pager -n 100 >&2 || true
     fi
@@ -35,7 +36,14 @@ for (( attempt=0; attempt<30; attempt++ )); do
     fi
     sleep 1
 done
-report_check "TC-8 container systemd" "responsive within 30s" "ready=$ready" "$((1-ready))"
+if (( ready == 0 )); then
+    cid="$(compose ps -aq systemd)"
+    if [[ -n "$cid" ]]; then
+        docker inspect --format 'TC-8 systemd state: {{json .State}}' "$cid" >&2 || true
+    fi
+    report_check "TC-8 container systemd" "responsive within 30s" "ready=$ready" 1
+fi
+report_check "TC-8 container systemd" "responsive within 30s" "ready=$ready" 0
 
 compose exec -T systemd systemctl start airgap-downstream@tcp.service airgap-upstream@tcp.service
 for service in upstream downstream; do

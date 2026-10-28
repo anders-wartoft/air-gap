@@ -7,6 +7,10 @@ cd "$HERE"
 source "$HERE/lib/report.sh"
 export COMPOSE_PROGRESS=plain BUILDKIT_PROGRESS=plain
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc30.XXXXXX")"
+mkdir -m 0755 "$WORK/lost-events"
+# Keep the sink's counter host-owned when its container writes with mode 0600.
+printf '0\n' >"$WORK/sink.bytes"
+chmod 0600 "$WORK/sink.bytes"
 PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
 export TC30_WORK="$WORK"
 COMPOSE_FILE="$HERE/docker-compose.tc30.yml"
@@ -20,6 +24,10 @@ compose() {
 cleanup() {
     local rc=$?
     trap - EXIT
+    if [[ -n "${SAMPLER_PID:-}" ]]; then
+        kill "$SAMPLER_PID" 2>/dev/null || true
+        wait "$SAMPLER_PID" 2>/dev/null || true
+    fi
     if (( rc != 0 )); then
         compose logs --no-color >&2 || true
         echo "TC-30 artifacts retained at $WORK" >&2
@@ -99,15 +107,29 @@ while (( SECONDS < deadline )); do
     sleep 1
 done
 
+# Kafka lag can reach zero before the TCP sink has drained and published its count.
+deadline=$((SECONDS + 90))
+sink_bytes=""
+while (( SECONDS < deadline )); do
+    if ! sink_bytes="$(cat "$WORK/sink.bytes")"; then
+        echo "Cannot read TC-30 sink counter: $WORK/sink.bytes" >&2
+        exit 1
+    fi
+    if [[ "$sink_bytes" =~ ^[0-9]+$ ]] && (( sink_bytes >= PAYLOAD_BYTES )); then
+        break
+    fi
+    sleep 0.1
+done
+
 compose logs --no-color --no-log-prefix upstream >"$WORK/upstream.log" 2>&1
 restart_count="$(docker inspect --format '{{.RestartCount}}' "$UPSTREAM_CID")"
 oom_killed="$(docker inspect --format '{{.State.OOMKilled}}' "$UPSTREAM_CID")"
 state="$(docker inspect --format '{{.State.Status}}' "$UPSTREAM_CID")"
-sink_bytes="$(cat "$WORK/sink.bytes" 2>/dev/null || echo 0)"
 max_memory="$(cat "$WORK/max-memory" 2>/dev/null || echo 0)"
 
 kill "$SAMPLER_PID" 2>/dev/null || true
 wait "$SAMPLER_PID" 2>/dev/null || true
+unset SAMPLER_PID
 
 rc=0
 # The watermark events are configurable. These are the messages configured in

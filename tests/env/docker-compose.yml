@@ -37,19 +37,22 @@ networks:
   airgap:
     name: airgap-testenv
 
+# The runner and verification hooks use these names. Pin them explicitly:
+# Docker Compose and podman-compose use different default separators.
 services:
   # ==========================================================================
   # Upstream Kafka cluster (two brokers forming one KRaft cluster)
   # ==========================================================================
   kafka-upstream:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    container_name: airgap-testenv-kafka-upstream-1
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: kafka-upstream
     networks:
       airgap:
         aliases:
           - kafka-upstream.sitia.nu   # matches the SAN in the Kafka TLS cert
     volumes:
-      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro,z
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -71,14 +74,15 @@ services:
       KAFKA_NUM_PARTITIONS: 5
 
   kafka-upstream-2:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    container_name: airgap-testenv-kafka-upstream-2-1
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: kafka-upstream-2
     networks:
       airgap:
         aliases:
           - kafka-upstream.sitia.nu
     volumes:
-      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro,z
     environment:
       KAFKA_NODE_ID: 2
       KAFKA_PROCESS_ROLES: broker,controller
@@ -104,13 +108,14 @@ services:
   # topic name).  Enable with --profile second-cluster.
   # ==========================================================================
   kafka-upstream-b:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    container_name: airgap-testenv-kafka-upstream-b-1
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: kafka-upstream-b
     profiles: ["second-cluster"]
     networks:
       - airgap
     volumes:
-      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro,z
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -132,13 +137,14 @@ services:
       KAFKA_NUM_PARTITIONS: 5
 
   kafka-upstream-b-2:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    container_name: airgap-testenv-kafka-upstream-b-2-1
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: kafka-upstream-b-2
     profiles: ["second-cluster"]
     networks:
       - airgap
     volumes:
-      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro,z
     environment:
       KAFKA_NODE_ID: 2
       KAFKA_PROCESS_ROLES: broker,controller
@@ -163,14 +169,15 @@ services:
   # Downstream Kafka cluster (two brokers).
   # ==========================================================================
   kafka-downstream:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    container_name: airgap-testenv-kafka-downstream-1
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: kafka-downstream
     networks:
       airgap:
         aliases:
           - kafka-downstream.sitia.nu
     volumes:
-      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro,z
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -192,14 +199,15 @@ services:
       KAFKA_NUM_PARTITIONS: 15
 
   kafka-downstream-2:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    container_name: airgap-testenv-kafka-downstream-2-1
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: kafka-downstream-2
     networks:
       airgap:
         aliases:
           - kafka-downstream.sitia.nu
     volumes:
-      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro
+      - ../../certs/kafka/ssl:/etc/kafka/secrets:ro,z
     environment:
       KAFKA_NODE_ID: 2
       KAFKA_PROCESS_ROLES: broker,controller
@@ -228,7 +236,8 @@ services:
   # service_completed_successfully.
   # ==========================================================================
   topic-init-upstream:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    container_name: airgap-testenv-topic-init-upstream-1
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: topic-init-upstream
     networks:
       - airgap
@@ -269,7 +278,8 @@ services:
     restart: "no"
 
   topic-init-downstream:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    container_name: airgap-testenv-topic-init-downstream-1
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: topic-init-downstream
     networks:
       - airgap
@@ -311,7 +321,8 @@ services:
 
   # Same, but for the second upstream cluster (profile second-cluster).
   topic-init-upstream-b:
-    image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+    container_name: airgap-testenv-topic-init-upstream-b-1
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
     hostname: topic-init-upstream-b
     profiles: ["second-cluster"]
     networks:
@@ -350,11 +361,12 @@ services:
   # Air-gap upstream (one image, used for upstream + downstream + create + resend).
   # ==========================================================================
   upstream-a:
+    container_name: airgap-testenv-upstream-a-1
     build:
       context: .
       args:
-        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-upstream:local
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-upstream:local
     hostname: upstream-a
     networks:
       - airgap
@@ -372,14 +384,14 @@ services:
         condition: service_started
         required: false
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config:/airgap/config:ro
-      - ../../certs:/airgap/certs:ro
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config:/airgap/config:ro,z
+      - ../../certs:/airgap/certs:ro,z
       # Read-write: TC-24's live SIGHUP cert-rotation test points
       # tcpTLSCertFile/KeyFile at writable copies here (the certs/ mount
       # above is read-only) so it can overwrite them mid-run without a
       # container recreate. Harmless for every other testcase (unused).
-      - ../../tmp:/airgap/tmp
+      - ../../tmp:/airgap/tmp:z
     environment:
       AIRGAP_CONFIG: ${UPSTREAM_A_CONFIG:-/airgap/config/upstream-docker.properties}
       AIRGAP_UPSTREAM_NIC: ${UPSTREAM_A_NIC:-eth0}
@@ -398,11 +410,12 @@ services:
     restart: on-failure:10
 
   upstream-b:
+    container_name: airgap-testenv-upstream-b-1
     build:
       context: .
       args:
-        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-upstream:local
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-upstream:local
     hostname: upstream-b
     profiles: ["dual"]
     networks:
@@ -414,9 +427,9 @@ services:
         condition: service_started
         required: false
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config:/airgap/config:ro
-      - ../../certs:/airgap/certs:ro
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config:/airgap/config:ro,z
+      - ../../certs:/airgap/certs:ro,z
     environment:
       AIRGAP_CONFIG: ${UPSTREAM_B_CONFIG:-/airgap/config/upstream-docker.properties}
       AIRGAP_UPSTREAM_NIC: ${UPSTREAM_B_NIC:-eth0}
@@ -426,11 +439,12 @@ services:
     restart: on-failure:10
 
   downstream:
+    container_name: airgap-testenv-downstream-1
     build:
       context: .
       args:
-        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-downstream:local
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-downstream:local
     hostname: downstream
     networks:
       - airgap
@@ -438,9 +452,9 @@ services:
       topic-init-downstream:
         condition: service_completed_successfully
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config:/airgap/config:ro
-      - ../../certs:/airgap/certs:ro
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config:/airgap/config:ro,z
+      - ../../certs:/airgap/certs:ro,z
     environment:
       AIRGAP_CONFIG: ${DOWNSTREAM_CONFIG:-/airgap/config/downstream-docker.properties}
       AIRGAP_DOWNSTREAM_NIC: ${DOWNSTREAM_NIC:-eth0}
@@ -465,7 +479,8 @@ services:
   # because this service depends on topic-init-downstream completion.
   # ==========================================================================
   dedup:
-    image: ${DEDUP_IMAGE:-eclipse-temurin:17-jre-noble}
+    container_name: airgap-testenv-dedup-1
+    image: ${DEDUP_IMAGE:-docker.io/library/eclipse-temurin:17-jre-noble}
     platform: linux/amd64
     hostname: dedup
     profiles: ["dedup"]
@@ -481,9 +496,9 @@ services:
       STATE_DIR_CONFIG: /tmp/dedup-state
       DEDUP_LOG_CONFIG: ${DEDUP_LOG_CONFIG:-/airgap/config/testcases/log4j2.xml}
     volumes:
-      - ../../java-streams/target:/airgap/dedup-jar:ro
-      - ../../config:/airgap/config:ro
-      - ../../certs:/airgap/certs:ro
+      - ../../java-streams/target:/airgap/dedup-jar:ro,z
+      - ../../config:/airgap/config:ro,z
+      - ../../certs:/airgap/certs:ro,z
     working_dir: /airgap
     entrypoint:
       - /bin/sh
@@ -503,11 +518,12 @@ services:
   # One-shot: dump gap descriptors from the downstream Kafka to /airgap/tmp.
   # ==========================================================================
   create:
+    container_name: airgap-testenv-create-1
     build:
       context: .
       args:
-        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-downstream:local
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-downstream:local
     hostname: create
     profiles: ["create"]
     networks:
@@ -516,10 +532,10 @@ services:
       topic-init-downstream:
         condition: service_completed_successfully
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config:/airgap/config:ro
-      - ../../certs:/airgap/certs:ro
-      - ../../tmp:/airgap/tmp
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config:/airgap/config:ro,z
+      - ../../certs:/airgap/certs:ro,z
+      - ../../tmp:/airgap/tmp:z
     environment:
       AIRGAP_CONFIG: ${CREATE_CONFIG:-/airgap/config/create.properties}
       AIRGAP_CREATE_BOOTSTRAP_SERVERS: ${CREATE_BOOTSTRAP:-kafka-downstream:9092,kafka-downstream-2:8092}
@@ -531,11 +547,12 @@ services:
   # One-shot: replay a gap file through a fresh upstream against upstream Kafka.
   # ==========================================================================
   resend:
+    container_name: airgap-testenv-resend-1
     build:
       context: .
       args:
-        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-upstream:local
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-upstream:local
     hostname: resend
     profiles: ["resend"]
     networks:
@@ -544,10 +561,10 @@ services:
       topic-init-upstream:
         condition: service_completed_successfully
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config:/airgap/config:ro
-      - ../../certs:/airgap/certs:ro
-      - ../../tmp:/airgap/tmp
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config:/airgap/config:ro,z
+      - ../../certs:/airgap/certs:ro,z
+      - ../../tmp:/airgap/tmp:z
     environment:
       AIRGAP_CONFIG: ${RESEND_CONFIG:-/airgap/config/resend.properties}
       AIRGAP_RESEND_NIC: ${RESEND_NIC:-eth0}
@@ -565,7 +582,8 @@ services:
   # filename is irrelevant; drop in any LogGenerator-*.jar.
   # ==========================================================================
   lg-producer:
-    image: ${LG_IMAGE:-eclipse-temurin:17-jre-noble}
+    container_name: airgap-testenv-lg-producer-1
+    image: ${LG_IMAGE:-docker.io/library/eclipse-temurin:17-jre-noble}
     hostname: lg-producer
     profiles: ["lg-producer"]
     networks:
@@ -582,9 +600,10 @@ services:
         condition: service_started
         required: false
     volumes:
-      - ./bin:/airgap/lg-bin:ro
-      - ../../config:/airgap/config:ro
-      - ../../tmp:/airgap/tmp
+      - ./bin:/airgap/lg-bin:ro,z
+      - ../../config:/airgap/config:ro,z
+      - ../../tmp:/airgap/tmp:z
+      - ./lg-entrypoint.sh:/airgap/lg-entrypoint.sh:ro,z
     environment:
       LG_CONFIG: ${LG_PRODUCER_CONFIG:-/airgap/config/testcases/upstream-lg-1.properties}
       LG_ARGS: ${LG_PRODUCER_ARGS:-}
@@ -594,11 +613,7 @@ services:
       # finish REBALANCING → RUNNING before the first event. Default 0
       # means "produce as soon as compose dependency chain is satisfied".
       LG_STARTUP_DELAY: ${LG_STARTUP_DELAY:-0}
-    entrypoint: ["/airgap/lg-entrypoint.sh"]
-    configs:
-      - source: lg_entrypoint
-        target: /airgap/lg-entrypoint.sh
-        mode: 0755
+    entrypoint: ["/bin/sh", "/airgap/lg-entrypoint.sh"]
     restart: "no"
 
   # ==========================================================================
@@ -611,7 +626,8 @@ services:
   # finishing first.
   # ==========================================================================
   lg-producer-b:
-    image: ${LG_IMAGE:-eclipse-temurin:17-jre-noble}
+    container_name: airgap-testenv-lg-producer-b-1
+    image: ${LG_IMAGE:-docker.io/library/eclipse-temurin:17-jre-noble}
     hostname: lg-producer-b
     profiles: ["lg-producer-b"]
     networks:
@@ -625,19 +641,16 @@ services:
         condition: service_started
         required: false
     volumes:
-      - ./bin:/airgap/lg-bin:ro
-      - ../../config:/airgap/config:ro
-      - ../../tmp:/airgap/tmp
+      - ./bin:/airgap/lg-bin:ro,z
+      - ../../config:/airgap/config:ro,z
+      - ../../tmp:/airgap/tmp:z
+      - ./lg-entrypoint.sh:/airgap/lg-entrypoint.sh:ro,z
     environment:
       LG_CONFIG: ${LG_PRODUCER_B_CONFIG:-/airgap/config/testcases/upstream-lg-1.properties}
       LG_ARGS: ${LG_PRODUCER_B_ARGS:-}
       LG_SED: ${LG_PRODUCER_B_SED:-}
       LG_STARTUP_DELAY: ${LG_STARTUP_DELAY:-0}
-    entrypoint: ["/airgap/lg-entrypoint.sh"]
-    configs:
-      - source: lg_entrypoint
-        target: /airgap/lg-entrypoint.sh
-        mode: 0755
+    entrypoint: ["/bin/sh", "/airgap/lg-entrypoint.sh"]
     restart: "no"
 
   # ==========================================================================
@@ -647,7 +660,8 @@ services:
   # service first (it binds UDP/1234 on the same network).
   # ==========================================================================
   lg-sink:
-    image: ${LG_IMAGE:-eclipse-temurin:17-jre-noble}
+    container_name: airgap-testenv-lg-sink-1
+    image: ${LG_IMAGE:-docker.io/library/eclipse-temurin:17-jre-noble}
     hostname: lg-sink
     profiles: ["lg-sink"]
     networks:
@@ -656,18 +670,15 @@ services:
       topic-init-downstream:
         condition: service_completed_successfully
     volumes:
-      - ./bin:/airgap/lg-bin:ro
-      - ../../config:/airgap/config:ro
-      - ../../tmp:/airgap/tmp
+      - ./bin:/airgap/lg-bin:ro,z
+      - ../../config:/airgap/config:ro,z
+      - ../../tmp:/airgap/tmp:z
+      - ./lg-entrypoint.sh:/airgap/lg-entrypoint.sh:ro,z
     environment:
       LG_CONFIG: ${LG_SINK_CONFIG:-/airgap/config/testcases/downstream-lg-9.properties}
       LG_ARGS: ${LG_SINK_ARGS:-}
       LG_SED: ${LG_SINK_SED:-}
-    entrypoint: ["/airgap/lg-entrypoint.sh"]
-    configs:
-      - source: lg_entrypoint
-        target: /airgap/lg-entrypoint.sh
-        mode: 0755
+    entrypoint: ["/bin/sh", "/airgap/lg-entrypoint.sh"]
     restart: "no"
 
   # ==========================================================================
@@ -687,7 +698,8 @@ services:
   #      verdict parser works unchanged
   # ==========================================================================
   tc7-binary-test:
-    image: ${TC7_GO_IMAGE:-golang:1.24-alpine}
+    container_name: airgap-testenv-tc7-binary-test-1
+    image: ${TC7_GO_IMAGE:-docker.io/library/golang:1.24-alpine}
     hostname: tc7-binary-test
     profiles: ["tc7-binary-test"]
     networks:
@@ -702,7 +714,7 @@ services:
       downstream:
         condition: service_started
     volumes:
-      - ./bin:/tc:ro
+      - ./bin:/tc:ro,z
     environment:
       UPSTREAM_BOOTSTRAP: ${TC7_UPSTREAM_BOOTSTRAP:-kafka-upstream:9092}
       DOWNSTREAM_BOOTSTRAP: ${TC7_DOWNSTREAM_BOOTSTRAP:-kafka-downstream:9092}
@@ -725,7 +737,8 @@ services:
   # grep for the "Logrotate completed" / "SIGHUP received" markers).
   # ==========================================================================
   tc8-settle-timer:
-    image: ${TC8_SETTLE_IMAGE:-busybox:latest}
+    container_name: airgap-testenv-tc8-settle-timer-1
+    image: ${TC8_SETTLE_IMAGE:-docker.io/library/busybox:latest}
     hostname: tc8-settle-timer
     profiles: ["tc8-settle-timer"]
     networks:
@@ -775,7 +788,8 @@ services:
   # the real pass/fail check against downstream's log afterward.
   # ==========================================================================
   tc22-settle-timer:
-    image: ${TC8_SETTLE_IMAGE:-busybox:latest}
+    container_name: airgap-testenv-tc22-settle-timer-1
+    image: ${TC8_SETTLE_IMAGE:-docker.io/library/busybox:latest}
     hostname: tc22-settle-timer
     profiles: ["tc22-settle-timer"]
     networks:
@@ -818,7 +832,8 @@ services:
   # POST_DRAIN_SCRIPT=tc24-tls-test.sh, which runs once this exits.
   # ==========================================================================
   tc24-settle-timer:
-    image: ${TC8_SETTLE_IMAGE:-busybox:latest}
+    container_name: airgap-testenv-tc24-settle-timer-1
+    image: ${TC8_SETTLE_IMAGE:-docker.io/library/busybox:latest}
     hostname: tc24-settle-timer
     profiles: ["tc24-settle-timer"]
     networks:
@@ -853,7 +868,8 @@ services:
   # POST_DRAIN_SCRIPT=tc25-rxqovfl-test.sh, which runs once this exits.
   # ==========================================================================
   tc25-settle-timer:
-    image: ${TC8_SETTLE_IMAGE:-busybox:latest}
+    container_name: airgap-testenv-tc25-settle-timer-1
+    image: ${TC8_SETTLE_IMAGE:-docker.io/library/busybox:latest}
     hostname: tc25-settle-timer
     profiles: ["tc25-settle-timer"]
     networks:
@@ -877,7 +893,3 @@ services:
         echo "Next expected number: 2"
         echo "[tc25-settle] done, handing off to tc25-rxqovfl-test.sh"
     restart: "no"
-
-configs:
-  lg_entrypoint:
-    file: ./lg-entrypoint.sh

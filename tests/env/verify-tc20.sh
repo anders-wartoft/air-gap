@@ -33,15 +33,21 @@ if ! docker inspect "$UPSTREAM_CTR" >/dev/null 2>&1; then
     exit 2
 fi
 
-upstream_log="$(docker logs "$UPSTREAM_CTR" 2>&1 || true)"
-if [[ -z "$upstream_log" ]]; then
+upstream_log="$(mktemp "${TMPDIR:-/tmp}/airgap-tc20-log.XXXXXX")"
+trap 'rm -f -- "$upstream_log"' EXIT
+if ! docker logs "$UPSTREAM_CTR" >"$upstream_log" 2>&1; then
+    cat "$upstream_log" >&2
+    report_check "${UPSTREAM_CTR} log output" "readable" "docker logs failed" 1 || true
+    exit 2
+fi
+if [[ ! -s "$upstream_log" ]]; then
     report_check "${UPSTREAM_CTR} log output" "non-empty" "empty" 1 || true
     exit 2
 fi
 
 rc=0
 
-unavailable_count="$(printf '%s\n' "$upstream_log" | grep -cF 'TCP connection unavailable' || true)"
+unavailable_count="$(grep -acF 'TCP connection unavailable' "$upstream_log" || true)"
 unavailable_count="${unavailable_count:-0}"
 if (( unavailable_count > 0 )); then
     report_check "upstream-a 'TCP connection unavailable' retries" "> 0" "${unavailable_count} found" 0 || rc=1
@@ -49,7 +55,7 @@ else
     report_check "upstream-a 'TCP connection unavailable' retries" "> 0" "0 found — downstream may not have been held back" 1 || rc=1
 fi
 
-restored_count="$(printf '%s\n' "$upstream_log" | grep -cF 'Transport status restored to running' || true)"
+restored_count="$(grep -acF 'Transport status restored to running' "$upstream_log" || true)"
 restored_count="${restored_count:-0}"
 if (( restored_count > 0 )); then
     report_check "upstream-a 'Transport status restored to running'" "> 0" "${restored_count} found" 0 || rc=1
@@ -58,8 +64,8 @@ else
 fi
 
 if (( unavailable_count > 0 && restored_count > 0 )); then
-    first_unavailable_line="$(printf '%s\n' "$upstream_log" | grep -nF 'TCP connection unavailable' | head -1 | cut -d: -f1)"
-    first_restored_line="$(printf '%s\n' "$upstream_log" | grep -nF 'Transport status restored to running' | head -1 | cut -d: -f1)"
+    first_unavailable_line="$(awk 'index($0, "TCP connection unavailable") { print NR; exit }' "$upstream_log")"
+    first_restored_line="$(awk 'index($0, "Transport status restored to running") { print NR; exit }' "$upstream_log")"
     if (( first_unavailable_line < first_restored_line )); then
         report_check "Chronological order (unavailable before restored)" "unavailable first" "unavailable @line ${first_unavailable_line}, restored @line ${first_restored_line}" 0 || rc=1
     else

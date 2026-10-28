@@ -3,11 +3,11 @@ services:
     build:
       context: .
       args:
-        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-tc26-upstream:local
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-tc26-upstream:local
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config/testcases:/airgap/config:ro
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config/testcases:/airgap/config:ro,z
     environment:
       AIRGAP_CONFIG: /airgap/config/upstream-warnings-26-docker.properties
       AIRGAP_UPSTREAM_LOG_LEVEL: ${TC26_LOG_LEVEL:-DEBUG}
@@ -17,11 +17,11 @@ services:
     build:
       context: .
       args:
-        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-tc26-downstream:local
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-tc26-downstream:local
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config/testcases:/airgap/config:ro
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config/testcases:/airgap/config:ro,z
     environment:
       AIRGAP_CONFIG: /airgap/config/downstream-warnings-26-docker.properties
       AIRGAP_DOWNSTREAM_LOG_LEVEL: ${TC26_LOG_LEVEL:-DEBUG}

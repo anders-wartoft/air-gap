@@ -11,6 +11,7 @@ cd "$HERE"
 source "$HERE/lib/report.sh"
 export COMPOSE_PROGRESS=plain BUILDKIT_PROGRESS=plain
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc31.XXXXXX")"
+mkdir -m 0755 "$WORK/lost-events"
 PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
 export TC31_WORK="$WORK"
 COMPOSE_FILE="$HERE/docker-compose.tc31.yml"

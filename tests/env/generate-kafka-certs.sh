@@ -51,6 +51,7 @@ gen_cluster_keystore() {
     local ks="${name}.keystore.jks"
     if [[ -f "$ks" ]]; then
         echo "[certs] keep existing $ks"
+        chmod 644 "$ks"
         return
     fi
     echo "[certs] generating $ks"
@@ -76,6 +77,9 @@ EOF
         -name "$name" \
         -password "pass:$STOREPASS" \
         -out "$ks"
+    # Rootless Podman maps the broker's UID 1000 to a different host UID.
+    # Only the disposable broker stores are shared; keep the CA key private.
+    chmod 644 "$ks"
 }
 
 gen_cluster_keystore kafka-upstream \
@@ -169,6 +173,7 @@ gen_client_credentials() {
 gen_client_credentials airgap-upstream
 gen_client_credentials airgap-downstream
 chmod 644 "$CLIENT_DIR/kafka-ca.crt"
+chmod 644 "$TRUST"
 
 echo "[certs] done:"
 ls -1 "$SSL_DIR" | sed 's/^/  /'
@@ -181,7 +186,7 @@ ls -1 "$SSL_DIR" | sed 's/^/  /'
 for f in kafka-keystore-creds kafka-key-creds kafka-truststore-creds; do
     if [[ ! -f "$f" ]]; then
         printf '%s' "$STOREPASS" > "$f"
-        chmod 644 "$f"
         echo "[certs] wrote $f"
     fi
+    chmod 644 "$f"
 done

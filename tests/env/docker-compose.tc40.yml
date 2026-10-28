@@ -1,9 +1,10 @@
+# The TC-40 runner starts each application with --no-deps so Kafka can be
+# absent initially, without requiring provider-specific YAML reset tags.
 services:
   downstream:
     platform: linux/amd64
-    depends_on: !reset {}
     volumes:
-      - ${TC_WORK}:/airgap/work
+      - ${TC_WORK}:/airgap/work:z
     entrypoint: ["/airgap/bin/downstream"]
     command: ["/airgap/work/downstream.properties"]
     environment:
@@ -12,9 +13,8 @@ services:
 
   upstream:
     platform: linux/amd64
-    depends_on: !reset {}
     volumes:
-      - ${TC_WORK}:/airgap/work
+      - ${TC_WORK}:/airgap/work:z
     entrypoint: ["/airgap/bin/upstream"]
     command: ["/airgap/work/upstream.properties"]
     restart: "no"

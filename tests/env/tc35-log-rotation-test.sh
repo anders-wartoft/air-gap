@@ -14,6 +14,7 @@ cd "$HERE"
 source "$HERE/lib/report.sh"
 export COMPOSE_PROGRESS=plain BUILDKIT_PROGRESS=plain
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc35.XXXXXX")"
+mkdir -m 0755 "$WORK/lost-events"
 PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
 export TC_WORK="$WORK"
 export TC35_LEAK_BIN="$WORK/leak-bin"

@@ -21,6 +21,104 @@ The container image is deliberately minimal — an OS plus `iproute` / `ping` /
 `ps`. The upstream / downstream / create / resend binaries and the dedup jar
 are **not** baked in; they are bind-mounted from the host build directory.
 
+## macOS and Rocky Linux 9
+
+The Compose files support Docker Desktop on macOS and Docker Engine/Compose
+on Rocky Linux 9. They also avoid the Podman compatibility problems observed
+with Rocky's `docker` shim and `podman-compose`:
+
+- Registry images use fully qualified names (`docker.io/...`), so unattended
+  startup never needs a short-name registry selection prompt. Built images
+  are tagged `localhost/airgap-testenv-...:local`; these are local build tags,
+  not images to pull from a registry.
+- Repository and testcase bind mounts use shared SELinux labeling (`z`).
+  Multiple containers mount the same files, so do not change this to private
+  `Z` labeling. Docker Desktop accepts these options without needing SELinux.
+  The systemd test uses a private cgroup namespace and the engine-provided
+  cgroup mount, not a bind mount of the host's cgroup hierarchy.
+- LogGenerator's entrypoint is a read-only bind-mounted script, invoked with
+  `/bin/sh`, rather than a Compose `configs:` entry. This works with providers
+  that do not implement file-backed configs or their executable mode.
+- The main stack pins container names to the existing
+  `airgap-testenv-<service>-1` convention used by the runner and verification
+  hooks. Standalone testcase projects retain their separate namespaces.
+
+If you already copied `.env.example` to `.env`, update any old short image
+names there too: `.env` and exported variables override the new defaults.
+Keep using the same non-root user for rootless Podman pulls, builds, and runs.
+Do not disable SELinux or recursively change repository ownership/permissions.
+The `z` option relabels the mounted source paths, so use a dedicated checkout
+and testcase work directories, not system directories or your entire home.
+
+Standalone shell testcases that create a temporary `WORK` directory precreate
+`lost-events` with mode `0755` as the invoking user before starting containers.
+This keeps the directory host-owned so root-created payload files can be
+removed without sudo. It does not repair permissions in artifacts from older
+runs or in other container-created directories.
+
+TC-30 also precreates its sink counter as the host user, because the helper
+writes it with mode `0600`. It waits for the full TCP byte count independently
+of Kafka consumer lag; unreadable counters fail explicitly rather than
+appearing as zero delivery. TC-39 precreates its public trust-entry directories
+with mode `0700` so they remain removable by the invoking user.
+
+For unattended runs, provision Docker Engine and non-root user access during
+machine setup (`sudo systemctl enable --now docker` on Rocky Linux, then log
+out and reconnect after Docker group changes). Test wrappers should check
+`docker info` and fail if access is unavailable, not start or stop the system
+daemon with sudo. Leave Docker running after tests; testcase teardown removes
+the test containers without stopping the shared engine.
+
+`generate-kafka-certs.sh` makes disposable broker keystores, the combined
+truststore, and broker password files readable by the broker's container user,
+including existing files from earlier runs. This is necessary with rootless
+Podman's UID mapping. These test files are readable by other local users;
+the test CA private key's permissions are not changed. Do not use production
+credentials in this environment.
+
+After updating the files, stop the old run and remove its old containers
+before retrying. From this directory, this removes only the main test stack
+and its volumes (not standalone testcase projects):
+
+```bash
+docker compose --profile '*' down -v --remove-orphans
+./run-testcases.sh --log-dir ../../tmp/logs 1 -- -- --build --force-recreate
+```
+
+The two `--` separators forward Compose options through both runners.
+Start with testcase 1 before retrying the full suite. The runner prints the
+startup log path before `compose up -d`; tail that file if startup stalls.
+`LG_MAX_WAIT` bounds producer monitoring, not image pulls or Compose startup.
+
+Docker Compose remains the reference provider. Podman support depends on the
+installed provider implementing profiles, conditional/optional `depends_on`,
+and the CLI options used by each testcase. The systemd/cgroup and diode/network
+tests have additional host requirements; rootless Podman is not a substitute
+for the privileged host setup those tests require. TC-16 still requires native
+Linux host networking. These portability changes do not make every testcase
+suitable for every runtime or architecture.
+
+Validate all Compose models and portability invariants without a running
+container engine:
+
+```bash
+python3 -m unittest discover -s tests/env -p 'test_compose_portability.py'
+```
+
+Run that command from the repository root; it requires the Docker Compose CLI
+but does not pull images or start containers.
+
+Run verifier and host-owned fixture regressions without a container engine:
+
+```bash
+bash tests/env/test-verifier-regressions.sh
+```
+
+TC-20 verifies recovery ordering from a temporary log file rather than piping
+large binary-containing logs through early-closing commands. TC-8 additionally
+tests real systemd reloads in a privileged container, marks its container
+environment explicitly, and reports the container state if startup fails.
+
 ### Standalone testcase Compose overrides
 
 Standalone testcases with the same single-Kafka transfer topology compose a

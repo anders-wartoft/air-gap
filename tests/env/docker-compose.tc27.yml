@@ -3,13 +3,13 @@ services:
     build:
       context: .
       args:
-        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-tc27-upstream:local
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-tc27-upstream:local
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config/testcases:/airgap/config:ro
-      - ${TC27_WORK_DIR:?Run through run-testcase.sh 27}/client:/airgap/identity:ro
-      - ${TC27_WORK_DIR}/${TC27_UPSTREAM_TRUST_DIR:-servers}:/airgap/trusted:ro
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config/testcases:/airgap/config:ro,z
+      - ${TC27_WORK_DIR:?Run through run-testcase.sh 27}/client:/airgap/identity:ro,z
+      - ${TC27_WORK_DIR}/${TC27_UPSTREAM_TRUST_DIR:-servers}:/airgap/trusted:ro,z
     environment:
       AIRGAP_CONFIG: /airgap/config/upstream-pinned-27-docker.properties
       AIRGAP_UPSTREAM_TCP_TLS_CERT_FILE: /airgap/identity/client-${TC27_CLIENT_KEY:-1}.crt
@@ -20,13 +20,13 @@ services:
     build:
       context: .
       args:
-        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-rockylinux:9}
-    image: airgap-testenv-tc27-downstream:local
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/airgap-testenv-tc27-downstream:local
     volumes:
-      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-      - ../../config/testcases:/airgap/config:ro
-      - ${TC27_WORK_DIR}/server:/airgap/identity:ro
-      - ${TC27_WORK_DIR}/${TC27_DOWNSTREAM_TRUST_DIR:-clients}:/airgap/trusted:ro
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ../../config/testcases:/airgap/config:ro,z
+      - ${TC27_WORK_DIR}/server:/airgap/identity:ro,z
+      - ${TC27_WORK_DIR}/${TC27_DOWNSTREAM_TRUST_DIR:-clients}:/airgap/trusted:ro,z
     environment:
       AIRGAP_CONFIG: /airgap/config/downstream-pinned-27-docker.properties
       AIRGAP_DOWNSTREAM_TCP_TLS_CERT_FILE: /airgap/identity/server-${TC27_SERVER_KEY:-1}.crt

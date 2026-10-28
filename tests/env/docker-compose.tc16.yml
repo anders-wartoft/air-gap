@@ -1,7 +1,7 @@
 # Native Linux host networking: the UDP sender uses the host's diode route
 # and permanent neighbour entry, without Docker bridge/NAT/ARP in between.
 x-broker: &broker
-  image: ${KAFKA_IMAGE:-confluentinc/confluent-local:7.6.1}
+  image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
   network_mode: host
   environment: &kafka-env
     KAFKA_PROCESS_ROLES: broker,controller
@@ -19,21 +19,21 @@ x-app: &app
   build:
     context: .
     args:
-      BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-rockylinux:9}
-  image: airgap-testenv-tc16:local
+      BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+  image: localhost/airgap-testenv-tc16:local
   network_mode: host
   working_dir: /airgap
   volumes:
-    - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro
-    - ../../config:/airgap/config:ro
+    - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+    - ../../config:/airgap/config:ro,z
 
 x-lg: &lg
-  image: ${LG_IMAGE:-eclipse-temurin:17-jre-noble}
+  image: ${LG_IMAGE:-docker.io/library/eclipse-temurin:17-jre-noble}
   network_mode: host
   volumes:
-    - ./bin:/airgap/lg-bin:ro
-    - ../../config:/airgap/config:ro
-    - ./lg-entrypoint.sh:/airgap/lg-entrypoint.sh:ro
+    - ./bin:/airgap/lg-bin:ro,z
+    - ../../config:/airgap/config:ro,z
+    - ./lg-entrypoint.sh:/airgap/lg-entrypoint.sh:ro,z
   entrypoint: ["/bin/sh", "/airgap/lg-entrypoint.sh"]
 
 services:
@@ -101,7 +101,7 @@ services:
       AIRGAP_DOWNSTREAM_NIC: ${TC16_NIC:-lo}
     command: ["downstream"]
   dedup:
-    image: ${DEDUP_IMAGE:-eclipse-temurin:17-jre-noble}
+    image: ${DEDUP_IMAGE:-docker.io/library/eclipse-temurin:17-jre-noble}
     platform: linux/${TC16_ARCH:-amd64}
     network_mode: host
     environment:
@@ -116,7 +116,7 @@ services:
       GAP_EMIT_INTERVAL_SEC: "60"
       PERSIST_INTERVAL_MS: "10000"
     volumes:
-      - ../../java-streams/target:/airgap/dedup-jar:ro
+      - ../../java-streams/target:/airgap/dedup-jar:ro,z
     entrypoint:
       - /bin/sh
       - -ec
