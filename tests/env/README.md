@@ -186,6 +186,35 @@ checks SIGTERM interrupts a 60-second retry wait and exits with code 0.
 Requires host Go and Docker Compose. Uses a temporary build directory and an
 isolated network without published ports; supports `-pause` and `NO_COLOR=1`.
 
+TC-41 verifies a graceful upgrade from legacy JSON gap records:
+
+```bash
+./run-testcase.sh 41
+```
+
+It builds the real dedup from git tag `0.1.10-SNAPSHOT` (cached under
+`~/.cache/airgap-tests/`), lets it write legacy JSON gap records including a
+purged window, upgrades in place to the current dedup JAR (`make build-java`),
+adds a new gap, and requires the current `create` to export the legacy-only
+gaps and the new gap with no per-record parse errors. It also requires
+tombstones for the restored windows the current dedup purges. `TC41_CREATE_REF=0.1.16-SNAPSHOT` runs
+the same scenario with the old `create` as a negative control (must fail).
+Requires host Go, git tags and Docker Compose; Maven is used from the host or
+a Maven container. Supports `-pause` and `NO_COLOR=1`.
+
+TC-42 verifies that the gap topic stays bounded:
+
+```bash
+./run-testcase.sh 42
+```
+
+It runs the current dedup (`WINDOW_SIZE=100`, `MAX_WINDOWS=2`) against a gap
+topic with aggressive compaction settings, produces 20 windows with one gap
+each, and requires a tombstone and a WARN for each of the 18 purged windows,
+at most 2 keys left in the topic after compaction, and a `create` bundle with
+only the active windows' gaps. Requires host Go and Docker Compose. Supports
+`-pause` and `NO_COLOR=1`.
+
 ## CI batch runs and machine-readable results
 
 Use `run-testcases.sh` for one case, a comma-separated selection, ranges, or

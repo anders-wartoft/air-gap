@@ -1127,6 +1127,8 @@ public class PartitionDedupApp {
         private org.apache.kafka.streams.processor.api.ProcessorContext<String, byte[]> context;
         private KeyValueStore<String, byte[]> gapStore;
         private Map<String, GapDetector> gapDetectors = new HashMap<>();
+        // Legacy gap-topic keys ("topic_partition:windowMin") of windows restored from state.
+        private final java.util.Set<String> restoredLegacyGapKeys = new java.util.HashSet<>();
         private Cancellable persistSchedule;
         private Cancellable emitSchedule;
 
@@ -1183,6 +1185,11 @@ public class PartitionDedupApp {
                     GapDetector gd = deserializeGapDetector(entry.value, entry.key);
                     if (gd != null) {
                         gapDetectors.put(entry.key, gd);
+                        // Restored windows may have legacy gap records (dedup 0.1.10 and
+                        // earlier); remember their keys so purging also removes them.
+                        for (GapDetector.Window w : gd.getWindows()) {
+                            restoredLegacyGapKeys.add(entry.key + ":" + w.getMinOffset());
+                        }
                         Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "Registered GapDetector for key: {}", entry.key);
                         JmxSupport.registerProcessorMBean(this);
                     }
@@ -1302,7 +1309,7 @@ public class PartitionDedupApp {
                     windowsScanned++;
                     List<List<Long>> gaps = window.findGapsFiltered(detector.getMinReceived());
                     long windowMin = window.getMinOffset();
-                    String gapKey = topic + ":" + partition + ":" + windowMin;
+                    String gapKey = gapKey(topic, partition, windowMin);
                     if (window.lastEmittedNonEmpty == null)
                         window.lastEmittedNonEmpty = new boolean[] { true };
                     boolean wasNonEmpty = window.lastEmittedNonEmpty[0];
@@ -1411,16 +1418,29 @@ public class PartitionDedupApp {
                         topicPartition, gapDetectors.keySet());
             }
 
+            // A purged window is out of scope: late arrivals are no longer deduplicated
+            // for it, so its gap record is deleted with a tombstone to keep the
+            // compacted gap topic bounded to the active windows.
             int alreadyReceived = gapDetector.check(offset, window -> {
                 try {
-                    List<List<Long>> gaps = window.findGaps();
                     long windowMin = window.getMinOffset();
-                    if (!gaps.isEmpty()) {
-                        String gapKey = topic + ":" + partition + ":" + windowMin;
-                        byte[] payload = gapListToBinaryPayload(windowMin, window.getMaxOffset(), gaps);
-                        context.forward(new Record<>(gapKey, payload, record.timestamp()), "gaps-sink");
-                        Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "Emitted binary gap payload for purged window {} ({} bytes, {} gap ranges)",
-                                gapKey, payload.length, gaps.size());
+                    long missing = countMissing(window.findGaps());
+                    for (String tombstoneKey : tombstoneKeysForPurgedWindow(topic, partition, windowMin, restoredLegacyGapKeys)) {
+                        context.forward(new Record<String, byte[]>(tombstoneKey, null, record.timestamp()), "gaps-sink");
+                    }
+                    if (missing > 0) {
+                        Log.warn(LOG, Attrs.event(Events.GAP_REPORT)
+                                .with("messaging.destination.name", topic)
+                                .with("messaging.destination.partition.id", String.valueOf(partition))
+                                .with("airgap.gap.window.min", windowMin)
+                                .with("airgap.gap.window.max", window.getMaxOffset())
+                                .with("airgap.gap.missing.count", missing),
+                                "Window {}-{} for {}:{} left the detection range with {} missing offsets; its gap record was removed and these offsets will not be included in resend bundles. Increase MAX_WINDOWS or WINDOW_SIZE if gaps must stay resendable longer",
+                                windowMin, window.getMaxOffset(), topic, partition, missing);
+                    } else {
+                        Log.debug(LOG, Attrs.event(Events.GAP_REPORT)
+                                .with("airgap.gap.window.min", windowMin),
+                                "Removed gap record for purged gap-free window {}:{}:{}", topic, partition, windowMin);
                     }
                 } catch (OutOfMemoryError oom) {
                     String errorMessage = "OutOfMemoryError while emitting gaps for purged window. Consider increasing MAX_WINDOWS or reducing WINDOW_SIZE. "
@@ -1430,7 +1450,7 @@ public class PartitionDedupApp {
                     context.forward(new Record<>(dedupedKey, errorMessage.getBytes(), record.timestamp()),
                             "deduped-sink");
                 } catch (Exception e) {
-                    Log.error(LOG, Attrs.event(Events.GAP_DETECTED), "Failed to emit gaps for purged window", e);
+                    Log.error(LOG, Attrs.event(Events.GAP_DETECTED), "Failed to write tombstone for purged window", e);
                 }
             });
 
@@ -1585,6 +1605,45 @@ public class PartitionDedupApp {
             oos.flush();
             return bos.toByteArray();
         }
+    }
+
+    /** Gap-topic key for a window: {@code topic:partition:windowMin}. */
+    static String gapKey(String topic, int partition, long windowMin) {
+        return topic + ":" + partition + ":" + windowMin;
+    }
+
+    /** Gap-topic key written by dedup 0.1.10 and earlier: {@code topic_partition:windowMin}. */
+    static String legacyGapKey(String topic, int partition, long windowMin) {
+        return topic + "_" + partition + ":" + windowMin;
+    }
+
+    /**
+     * Keys to tombstone when a window is purged from the gap detector. The
+     * current key is always deleted, with or without gaps. The legacy key is
+     * deleted once if the window was restored from state, since a pre-upgrade
+     * dedup may have written a record for it.
+     */
+    static List<String> tombstoneKeysForPurgedWindow(String topic, int partition, long windowMin,
+            java.util.Set<String> restoredLegacyGapKeys) {
+        List<String> keys = new ArrayList<>(2);
+        keys.add(gapKey(topic, partition, windowMin));
+        String legacy = legacyGapKey(topic, partition, windowMin);
+        if (restoredLegacyGapKeys.remove(legacy)) {
+            keys.add(legacy);
+        }
+        return keys;
+    }
+
+    static long countMissing(List<List<Long>> gaps) {
+        long missing = 0;
+        for (List<Long> gap : gaps) {
+            if (gap.size() == 1) {
+                missing += 1;
+            } else if (gap.size() == 2) {
+                missing += gap.get(1) - gap.get(0) + 1;
+            }
+        }
+        return missing;
     }
 
     /**

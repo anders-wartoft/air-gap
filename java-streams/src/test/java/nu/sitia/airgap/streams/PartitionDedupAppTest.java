@@ -174,4 +174,28 @@ class PartitionDedupAppTest {
         assertEquals("2001:db8::1", method.invoke(null, "[2001:db8::1]:9092"));
         assertEquals("raw-host", method.invoke(null, "raw-host"));
     }
+
+    @Test
+    void purgedWindowAlwaysTombstonesCurrentGapKey() {
+        java.util.Set<String> restored = new java.util.HashSet<>();
+        assertEquals(java.util.List.of("export:48:5000"),
+                PartitionDedupApp.tombstoneKeysForPurgedWindow("export", 48, 5000L, restored));
+    }
+
+    @Test
+    void purgedRestoredWindowAlsoTombstonesLegacyKeyOnce() {
+        java.util.Set<String> restored = new java.util.HashSet<>(java.util.Set.of("my_topic_2:0"));
+        assertEquals(java.util.List.of("my_topic:2:0", "my_topic_2:0"),
+                PartitionDedupApp.tombstoneKeysForPurgedWindow("my_topic", 2, 0L, restored));
+        assertTrue(restored.isEmpty());
+        assertEquals(java.util.List.of("my_topic:2:0"),
+                PartitionDedupApp.tombstoneKeysForPurgedWindow("my_topic", 2, 0L, restored));
+    }
+
+    @Test
+    void countMissingCountsSinglesAndRanges() {
+        assertEquals(5L, PartitionDedupApp.countMissing(java.util.List.of(
+                java.util.List.of(3L), java.util.List.of(10L, 13L))));
+        assertEquals(0L, PartitionDedupApp.countMissing(java.util.List.of()));
+    }
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -29,6 +30,182 @@ type parsedWindow struct {
 	windowMax int64
 	// relGaps contains relative gap ranges: each entry is [from] or [from, to].
 	relGaps [][]int64
+	// legacy is true when the window was decoded from the JSON format written by
+	// dedup 0.1.10 and earlier (key "topic_partition:windowMin").
+	legacy bool
+}
+
+// legacyGapPayload is the JSON gap-topic value written by dedup 0.1.10 and earlier.
+type legacyGapPayload struct {
+	Topic     *string   `json:"topic"`
+	Partition *int      `json:"partition"`
+	WindowMin *int64    `json:"window_min"`
+	WindowMax *int64    `json:"window_max"`
+	Gaps      [][]int64 `json:"gaps"`
+}
+
+// gapParseStats aggregates per-record outcomes so a run logs one summary line
+// instead of one line per record.
+type gapParseStats struct {
+	legacy     int64
+	tombstones int64
+	failed     int64
+	firstErr   error
+}
+
+// gapState holds the latest record per gap-topic key. Binary and legacy keys
+// for the same window are tracked separately so the result does not depend on
+// read order across gap-topic partitions. A nil entry is a tombstone.
+type gapState struct {
+	binary map[string]*parsedWindow
+	legacy map[string]*parsedWindow
+	stats  gapParseStats
+}
+
+func newGapState() *gapState {
+	return &gapState{
+		binary: make(map[string]*parsedWindow),
+		legacy: make(map[string]*parsedWindow),
+	}
+}
+
+// windowKey identifies a gap window independently of the record format.
+func windowKey(topic string, partition int, windowMin int64) string {
+	return fmt.Sprintf("%s-%d-%d", topic, partition, windowMin)
+}
+
+// parseGapKey extracts the window identity from a gap-topic key. Kafka topic
+// names cannot contain ':', so the current key "topic:partition:windowMin" has
+// two colons and the legacy key "topic_partition:windowMin" has one.
+func parseGapKey(key []byte) (topic string, partition int, windowMin int64, legacy bool, err error) {
+	k := string(key)
+	var partitionStr, windowStr string
+	switch strings.Count(k, ":") {
+	case 2:
+		parts := strings.SplitN(k, ":", 3)
+		topic, partitionStr, windowStr = parts[0], parts[1], parts[2]
+	case 1:
+		legacy = true
+		colon := strings.LastIndex(k, ":")
+		underscore := strings.LastIndex(k[:colon], "_")
+		if underscore <= 0 {
+			return "", 0, 0, false, fmt.Errorf("invalid legacy gap key %q: expected topic_partition:windowMin", k)
+		}
+		topic, partitionStr, windowStr = k[:underscore], k[underscore+1:colon], k[colon+1:]
+	default:
+		return "", 0, 0, false, fmt.Errorf("invalid gap key %q: expected topic:partition:windowMin", k)
+	}
+	if partition, err = strconv.Atoi(partitionStr); err != nil {
+		return "", 0, 0, false, fmt.Errorf("invalid partition in gap key %q: %w", k, err)
+	}
+	if windowMin, err = strconv.ParseInt(windowStr, 10, 64); err != nil {
+		return "", 0, 0, false, fmt.Errorf("invalid windowMin in gap key %q: %w", k, err)
+	}
+	return topic, partition, windowMin, legacy, nil
+}
+
+// apply records one gap-topic message. An empty value is a tombstone: dedup
+// writes one when a window leaves its detection range.
+func (s *gapState) apply(key, value []byte) error {
+	if len(value) == 0 {
+		topic, partition, windowMin, legacy, err := parseGapKey(key)
+		if err != nil {
+			s.fail(err)
+			return err
+		}
+		s.stats.tombstones++
+		if legacy {
+			s.legacy[windowKey(topic, partition, windowMin)] = nil
+		} else {
+			s.binary[windowKey(topic, partition, windowMin)] = nil
+		}
+		return nil
+	}
+	pw, err := parseGapPayload(key, value)
+	if err != nil {
+		s.fail(err)
+		return err
+	}
+	k := windowKey(pw.topic, pw.partition, pw.windowMin)
+	if pw.legacy {
+		s.stats.legacy++
+		s.legacy[k] = &pw
+	} else {
+		s.binary[k] = &pw
+	}
+	return nil
+}
+
+func (s *gapState) fail(err error) {
+	s.stats.failed++
+	if s.stats.firstErr == nil {
+		s.stats.firstErr = err
+	}
+}
+
+// windows returns the live windows. A binary record or tombstone for a window
+// takes precedence over a legacy record for the same window.
+func (s *gapState) windows() map[string]parsedWindow {
+	result := make(map[string]parsedWindow, len(s.binary)+len(s.legacy))
+	for k, pw := range s.legacy {
+		if _, shadowed := s.binary[k]; !shadowed && pw != nil {
+			result[k] = *pw
+		}
+	}
+	for k, pw := range s.binary {
+		if pw != nil {
+			result[k] = *pw
+		}
+	}
+	return result
+}
+
+// superseded counts live legacy records hidden by a binary record or tombstone.
+func (s *gapState) superseded() int64 {
+	var n int64
+	for k, pw := range s.legacy {
+		if _, shadowed := s.binary[k]; shadowed && pw != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// isLegacyJSONPayload reports whether value is a legacy JSON gap record. The
+// binary format starts with version byte 1, so a leading '{' is unambiguous.
+func isLegacyJSONPayload(value []byte) bool {
+	trimmed := bytes.TrimLeft(value, " \t\r\n")
+	return len(trimmed) > 0 && trimmed[0] == '{'
+}
+
+// parseLegacyGapPayload decodes the JSON gap format written by dedup 0.1.10 and
+// earlier. Topic, partition and window are taken from the value, since the
+// legacy key "topic_partition:windowMin" is ambiguous for topics containing '_'.
+func parseLegacyGapPayload(value []byte) (parsedWindow, error) {
+	var p legacyGapPayload
+	if err := json.Unmarshal(value, &p); err != nil {
+		return parsedWindow{}, fmt.Errorf("invalid legacy JSON gap payload: %w", err)
+	}
+	if p.Topic == nil || p.Partition == nil || p.WindowMin == nil {
+		return parsedWindow{}, fmt.Errorf("legacy JSON gap payload is missing topic, partition or window_min")
+	}
+	windowMax := *p.WindowMin
+	if p.WindowMax != nil {
+		windowMax = *p.WindowMax
+	}
+	for _, gap := range p.Gaps {
+		if len(gap) != 1 && len(gap) != 2 {
+			return parsedWindow{}, fmt.Errorf("invalid gap range %v in legacy JSON gap payload", gap)
+		}
+	}
+	return parsedWindow{
+		topic:     *p.Topic,
+		partition: *p.Partition,
+		windowMin: *p.WindowMin,
+		windowMax: windowMax,
+		relGaps:   p.Gaps,
+		legacy:    true,
+	}, nil
 }
 
 // parseGapPayload decodes the binary gap-topic wire format.
@@ -41,7 +218,12 @@ type parsedWindow struct {
 //	[N bytes] 32-bit RoaringBitmap of MISSING relative positions (portable format)
 //
 // Key format: "topic:partition:windowMin"
+//
+// Records in the legacy JSON format (dedup 0.1.10 and earlier) are also accepted.
 func parseGapPayload(key, value []byte) (parsedWindow, error) {
+	if isLegacyJSONPayload(value) {
+		return parseLegacyGapPayload(value)
+	}
 	parts := strings.SplitN(string(key), ":", 3)
 	if len(parts) != 3 {
 		return parsedWindow{}, fmt.Errorf("invalid gap key %q: expected topic:partition:windowMin", string(key))
@@ -279,7 +461,7 @@ func Main(BuildNumber string) {
 
 	// Shared state (updated from multiple goroutines after bootstrap).
 	var mu sync.Mutex
-	lastEntries := make(map[string]parsedWindow)
+	state := newGapState()
 
 	// Bootstrap: read all existing messages and print initial state.
 	Logger.Infof(logging.Event(logging.EventKafkaConsume,
@@ -290,17 +472,14 @@ func Main(BuildNumber string) {
 	kafkaReader := NewKafkaReader()
 	bootstrapHandler := func(id string, key []byte, t time.Time, received []byte) bool {
 		atomic.AddInt64(&receivedEvents, 1)
-		pw, err := parseGapPayload(key, received)
-		if err != nil {
-			Logger.Errorf(logging.Event(logging.EventGapReport,
+		if err := state.apply(key, received); err != nil {
+			Logger.Debugf(logging.Event(logging.EventGapReport,
 				logging.Str("airgap.message.id", id),
 				logging.Str("messaging.destination.name", config.topic),
 				logging.Str("airgap.gap.phase", "bootstrap"),
 			).Merge(logging.Err(err)), "Failed to parse gap message: %v", err)
 			return true
 		}
-		keyStr := fmt.Sprintf("%s-%d-%d", pw.topic, pw.partition, pw.windowMin)
-		lastEntries[keyStr] = pw
 		return true
 	}
 	if err := kafkaReader.ReadToEnd(context.Background(), config.bootstrapServers, config.topic, config.groupID, bootstrapHandler); err != nil {
@@ -313,12 +492,30 @@ func Main(BuildNumber string) {
 	Logger.Infof(logging.Event(logging.EventGapReport,
 		logging.Str("messaging.destination.name", config.topic),
 		logging.Int("airgap.message.count", receivedEvents),
-		logging.Int("airgap.gap.window.count", int64(len(lastEntries))),
-	), "Read %d gap messages.", receivedEvents)
+		logging.Int("airgap.gap.window.count", int64(len(state.windows()))),
+		logging.Int("airgap.gap.tombstone.count", state.stats.tombstones),
+	), "Read %d gap messages (%d tombstones).", receivedEvents, state.stats.tombstones)
+	parseStats := state.stats
+	if parseStats.legacy > 0 {
+		superseded := state.superseded()
+		Logger.Infof(logging.Event(logging.EventGapReport,
+			logging.Str("messaging.destination.name", config.topic),
+			logging.Int("airgap.gap.legacy.count", parseStats.legacy),
+			logging.Int("airgap.gap.legacy.superseded", superseded),
+		), "Read %d gap records in the legacy JSON format (dedup 0.1.10 and earlier); %d were superseded by binary records or tombstones for the same window, the rest are included",
+			parseStats.legacy, superseded)
+	}
+	if parseStats.failed > 0 {
+		Logger.Errorf(logging.Event(logging.EventGapReport,
+			logging.Str("messaging.destination.name", config.topic),
+			logging.Int("airgap.gap.skipped.count", parseStats.failed),
+		).Merge(logging.Err(parseStats.firstErr)), "Skipped %d gap records that could not be parsed (enable debug logging for details); first error: %v",
+			parseStats.failed, parseStats.firstErr)
+	}
 	if config.mode == "full" {
-		printFull(sortWindows(lastEntries))
+		printFull(sortWindows(state.windows()))
 	} else {
-		printShort(sortWindows(lastEntries))
+		printShort(sortWindows(state.windows()))
 	}
 
 	// Set up signal handling and a cancelable context for the tail phase.
@@ -334,7 +531,9 @@ func Main(BuildNumber string) {
 	reprint := make(chan struct{}, 1)
 
 	tailHandler := func(id string, key []byte, t time.Time, received []byte) bool {
-		pw, err := parseGapPayload(key, received)
+		mu.Lock()
+		err := state.apply(key, received)
+		mu.Unlock()
 		if err != nil {
 			Logger.Errorf(logging.Event(logging.EventGapReport,
 				logging.Str("airgap.message.id", id),
@@ -343,10 +542,6 @@ func Main(BuildNumber string) {
 			).Merge(logging.Err(err)), "Failed to parse gap message: %v", err)
 			return true
 		}
-		keyStr := fmt.Sprintf("%s-%d-%d", pw.topic, pw.partition, pw.windowMin)
-		mu.Lock()
-		lastEntries[keyStr] = pw
-		mu.Unlock()
 		atomic.AddInt64(&receivedEvents, 1)
 		select {
 		case reprint <- struct{}{}:
@@ -372,7 +567,7 @@ func Main(BuildNumber string) {
 			return
 		case <-reprint:
 			mu.Lock()
-			windows := sortWindows(lastEntries)
+			windows := sortWindows(state.windows())
 			mu.Unlock()
 			fmt.Printf("\n--- %s ---\n", time.Now().Format("2006-01-02 15:04:05"))
 			if config.mode == "full" {

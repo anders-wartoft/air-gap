@@ -1,0 +1,86 @@
+# TC-41 — legacy JSON gap records survive a dedup upgrade.
+# The runner copies both dedup JARs, the current `create` binary and its
+# configuration into ${TC_WORK}. Both dedup services share one state volume and
+# APPLICATION_ID so the upgrade is in place.
+x-dedup: &dedup
+  image: ${DEDUP_IMAGE:-docker.io/library/eclipse-temurin:17-jre-noble}
+  platform: linux/amd64
+  depends_on:
+    topic-init:
+      condition: service_completed_successfully
+  environment:
+    BOOTSTRAP_SERVERS: kafka:9092
+    APPLICATION_ID: tc41-dedup
+    RAW_TOPICS: transfer
+    CLEAN_TOPIC: dedup
+    GAP_TOPIC: gaps
+    WINDOW_SIZE: "100"
+    MAX_WINDOWS: "2"
+    GAP_EMIT_INTERVAL_SEC: "2"
+    MISSING_REPORT_INTERVAL_SEC: "5"
+    PERSIST_INTERVAL_MS: "1000"
+    COMMIT_INTERVAL_MS: "1000"
+    STATE_DIR_CONFIG: /state
+  volumes:
+    - ${TC_WORK:?TC_WORK is required}:/airgap/work:ro,z
+    - dedup-state:/state
+  restart: "no"
+
+services:
+  kafka:
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  topic-init:
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - bash
+      - -ec
+      - >-
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic transfer --partitions 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic dedup --partitions 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic gaps --partitions 1
+        --config cleanup.policy=compact
+
+  dedup-legacy:
+    <<: *dedup
+    command: ["java", "-jar", "/airgap/work/dedup-legacy.jar"]
+
+  dedup:
+    <<: *dedup
+    command: ["java", "-jar", "/airgap/work/dedup-current.jar"]
+
+  create:
+    image: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    platform: linux/amd64
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${TC_WORK:?TC_WORK is required}:/airgap/work:z
+    entrypoint: ["/airgap/work/create"]
+    command: ["/airgap/work/create.properties"]
+    restart: "no"
+
+volumes:
+  dedup-state:

@@ -168,14 +168,15 @@ The dedup Java application uses the Java long primitive type, which is also a 64
 
 Gap detection is the ability to detect missing events. We use gap as a notation for one or more consecutive missing events. One missing event is denoted [n-n], example: [42-42] meaning that one event with id 42 is missing. Several consecutive missing events can be bundled together as: [n-m], example: [42-75] meaning that all events from 42 to 75 are missing.
 
-Gap detection can be performed on the Roaring bitmaps effectively. This is performed:
+Gap detection can be performed on the Roaring bitmaps effectively. Periodically (`GAP_EMIT_INTERVAL_SEC`), the gaps of every active window are written to the gap topic. A window with gaps is written on every interval; a window without gaps is written once, so that a previously reported gap is cleared.
 
-- When a window is about to get deleted
-- Once every (configurable) second.
+When a window is purged (a new window is needed and `MAX_WINDOWS` are already in use), it leaves the detection range. The deduplicator will accept any event older than the oldest event in the oldest window without deduplication, so the window is no longer tracked. The deduplicator then writes a **tombstone** (null value) for the window's gap-topic key, whether or not the window had gaps, so that compaction removes it from the gap topic. If the window still had missing offsets, a WARN is logged with the count (`airgap.gap.missing.count`):
 
-When a window is about to get deleted, all the gaps in that window are sent to the gap topic. The deduplicator will accept any event older than the oldest event in the oldest window, so this is the last chance to deliver those events.
+```text
+Window 0-99 for source:0 left the detection range with 1 missing offsets; its gap record was removed and these offsets will not be included in resend bundles. Increase MAX_WINDOWS or WINDOW_SIZE if gaps must stay resendable longer
+```
 
-Periodically (configurable), all gaps are extracted for all partitions. Gaps are compared with all gaps for the last time this was run and all gaps that are present in the last run and in this run will be written to the gap topic.
+Gaps are therefore only resendable while their window is in the detection range. `MAX_WINDOWS × WINDOW_SIZE` must cover at least the number of events per partition that arrive between a gap occurring and the resend bundle being created (by `create`) and delivered.
 
 Resend bundles can be created from the gap topic to get the missing events delivered once more (more on that in the Resend documentation).
 
@@ -214,13 +215,21 @@ The maximum message size for a window of size `W` is `17 + ⌈W / 8⌉` bytes in
 >   --alter --add-config max.message.bytes=<larger_value>
 > ```
 
+### Legacy JSON gap records (dedup 0.1.10 and earlier)
+
+Dedup 0.1.10 and earlier wrote JSON values keyed by `topic_partition:windowMin`, for example key `export_48:0` with value `{"partition":48,"topic":"export","window_min":0,"window_max":4999999,"gaps":[[3],[7,9]]}` (gaps relative to `window_min`). Because the key format changed, compaction never replaces these records, so they remain in the gap topic after an upgrade.
+
+`create` and `gaps` still read these records: topic, partition and window are taken from the JSON value, and their gaps are included in the output. If both a legacy and a binary record exist for the same window, the binary record is used regardless of read order. Each run logs one INFO summary with the number of legacy records (and how many were superseded) instead of one line per record. Records that cannot be parsed at all are counted and reported in a single ERROR summary per run; details per record are logged at DEBUG.
+
+After an in-place upgrade, the windows restored from the dedup state may also have legacy records. When such a window is purged, the deduplicator writes tombstones for both its binary key and its legacy key. A binary tombstone also hides a legacy record for the same window in `create` and `gaps`. Legacy records for windows that were purged before the upgrade are not touched; once they have been resent or are no longer needed, remove them by producing tombstones (null value) for their keys.
+
 ### Gap topic size
 
-The number of unique keys in the gap topic is:
+Because purged windows are tombstoned, the number of live keys in the gap topic is at most:
 
-$$\text{unique keys} = \text{source partitions} \times \text{MAX\_WINDOWS}$$
+$$\text{live keys} = \text{source partitions} \times \text{MAX\_WINDOWS}$$
 
-After full compaction this is the entire topic — e.g. 6 partitions × 5 windows × ~300 bytes ≈ **9 KB**.
+After full compaction this is the entire topic, plus tombstones of recently purged windows. The cleaner keeps a tombstone for `delete.retention.ms` (default 24 hours) after compacting it, so with the defaults the topic also holds one small tombstone per window purged in the last day. `create` reads the whole topic on every run, so a lower `delete.retention.ms` (for example one hour) is safe and keeps the topic smaller. Example: 6 partitions × 5 windows × ~300 bytes ≈ **9 KB** of live records.
 
 Before compaction the topic grows at roughly one message per active window per `GAP_EMIT_INTERVAL_SEC`. With Kafka's default `min.cleanable.dirty.ratio=0.5` and no compaction lag, the cleaner triggers almost immediately and the topic stays near its compacted size.
 

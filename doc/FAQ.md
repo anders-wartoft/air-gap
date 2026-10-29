@@ -283,6 +283,7 @@ retained offsets per partition ≈ WINDOW_SIZE * MAX_WINDOWS
 
 - Increase `MAX_WINDOWS` when you need to tolerate longer resend delays or longer out-of-order arrival.
 - Increase `WINDOW_SIZE` when throughput is high and windows roll too quickly.
+- Gaps are only resendable while their window is retained. When a window is purged, dedup deletes its gap record (tombstone) and logs a WARN if it still had missing offsets, so the retained range must cover the events that arrive between a gap and the next resend bundle. See [Gap detection](Deduplication.md#gap-detection).
 - Prefer many moderately sized windows over a few very large windows for better bitmap behavior.
 
 ### Memory tradeoff

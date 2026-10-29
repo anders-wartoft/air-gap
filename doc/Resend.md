@@ -20,7 +20,7 @@ This application reads all data from the GAP_TOPIC topic and creates a JSON rese
 
 The deduplication app (PartitionDedupApp) tracks received offsets in fixed-size *windows* (default size: `WINDOW_SIZE=1000`). Each window covers a contiguous range of offsets, e.g. `[0–999]`, `[1000–1999]`. Missing offsets within a window are stored as offsets *relative to the window's start* (`window_min`), so a relative gap of `5` in the window `[1000–1999]` means absolute Kafka offset `1005`.
 
-Each window is emitted as a separate record to the GAP_TOPIC keyed by `topic_partition:window_min`. A partition with many messages will therefore have multiple gap records in the topic.
+Each window is emitted as a separate record to the GAP_TOPIC keyed by `topic:partition:window_min` (dedup 0.1.10 and earlier used `topic_partition:window_min` with a JSON value; `create` still reads those records, see [Deduplication](Deduplication.md#legacy-json-gap-records-dedup-0110-and-earlier)). A partition with many messages will therefore have multiple gap records in the topic.
 
 #### What `create` produces
 

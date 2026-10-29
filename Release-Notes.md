@@ -1,5 +1,43 @@
 # Release Notes
 
+## 0.1.17-SNAPSHOT
+
+### Graceful reading of legacy gap records
+
+- `create` and `gaps` now read gap-topic records in the JSON format written by
+  dedup 0.1.10 and earlier (key `topic_partition:windowMin`). Previously every
+  such record logged `Failed to parse gap message` at ERROR on every run and its
+  gaps were dropped from the resend bundle. Topic, partition and window are
+  taken from the JSON value and the gaps are now included.
+- When a legacy and a binary record describe the same window, the binary record
+  wins regardless of gap-topic partition or read order.
+- Per-record parse failures are logged at DEBUG; each run logs at most one INFO
+  summary of legacy records and one ERROR summary of unparseable records.
+- New requirement REQ-53 with Go unit tests and TC-41, which builds the real
+  dedup 0.1.10-SNAPSHOT, upgrades it in place to the current dedup and requires
+  `create` to export both the legacy and the new gaps. Running TC-41 with
+  `TC41_CREATE_REF=0.1.16-SNAPSHOT` reproduces the original failure.
+
+### Bounded gap topic: tombstones for purged windows
+
+- Dedup now writes a tombstone for a window's gap record when the window is
+  purged from the detection range, with or without gaps. Previously every
+  window left a record in the compacted gap topic forever, so the number of
+  keys grew with the number of windows ever seen instead of staying at
+  `partitions × MAX_WINDOWS`.
+- **Behaviour change:** gaps in a purged window are no longer resendable,
+  since late arrivals for it are not deduplicated anyway. Dedup logs a WARN
+  with the number of missing offsets when it purges a window with gaps. Size
+  `MAX_WINDOWS × WINDOW_SIZE` to cover the events per partition between a gap
+  and the next resend bundle.
+- After an in-place upgrade from dedup 0.1.10, purging a restored window also
+  tombstones its legacy key. Legacy records of windows purged before the
+  upgrade remain and can be removed with manual tombstones.
+- `create` and `gaps` treat tombstones as deletions instead of parse errors; a
+  binary tombstone also hides a legacy record for the same window.
+- New requirement REQ-54 with Java and Go unit tests and TC-42; TC-41 now
+  also checks the tombstones written after the upgrade.
+
 ## 0.1.16.1-SNAPSHOT
 
 ### Security dependency update

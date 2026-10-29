@@ -1288,3 +1288,71 @@ console proxy. The same selection must also be proven through a real EQL
 query. The test must retain altered-body, altered-hash, and
 altered-signature indices as negative controls. Timestamp and severity
 mutations must also be retained as negative controls.
+
+## REQ-53 — Graceful upgrade of legacy gap records
+
+> After dedup is upgraded from a version that wrote gap records in the legacy
+> JSON format (0.1.10-SNAPSHOT and earlier, key `topic_partition:windowMin`)
+> to a version that writes the binary format (key `topic:partition:windowMin`,
+> REQ-40), `create` and `gaps` must keep working against the same gap topic
+> without manual cleanup, and no gap in a window still within the detection
+> range may be lost.
+
+* Status: **Implemented**.
+* Implemented in: 0.1.17-SNAPSHOT
+* Covered by: Go unit tests (`src/create`, `src/gaps`) and TC-41
+* Notes: Legacy records are never compacted away by the new records because
+  the key format differs. Legacy records of windows restored from dedup state
+  are tombstoned when those windows are purged (REQ-54); records of windows
+  purged before the upgrade remain until removed manually. Reported as LIA stream issue 8 (one ERROR per legacy record and
+  run; gaps missing from `gaps.json`).
+
+Acceptance criteria:
+
+1. Legacy JSON records are read. Topic, partition, `window_min`,
+   `window_max` and the relative `gaps` are taken from the JSON value, not the
+   ambiguous legacy key, so topics containing `_` are handled.
+2. Gaps from legacy records are included in the resend bundle as absolute
+   offsets, merged with gaps from binary records for the same partition.
+3. When a legacy and a binary record describe the same window, the binary
+   record is used regardless of gap-topic partition or read order. A binary
+   tombstone for the window also hides the legacy record.
+4. Reading legacy records must not produce one log record per record. Each
+   run logs at most one summary of legacy records (count and how many were
+   superseded) and at most one ERROR summary of records that cannot be parsed
+   at all; per-record details are logged at DEBUG only.
+5. Acceptance must use a real legacy dedup build writing to Kafka, an
+   in-place upgrade to the current dedup (same application ID and state), and
+   the current `create`, and must include a window that exists only as a
+   legacy record.
+
+## REQ-54 — Bounded gap topic: tombstones for purged windows
+
+> When dedup purges a window from its detection range (`MAX_WINDOWS`
+> exceeded), it must delete that window's gap record by writing a tombstone,
+> whether or not the window had gaps, so that the compacted gap topic holds at
+> most `partitions × MAX_WINDOWS` live keys instead of one key per window ever
+> seen.
+
+* Status: **Implemented**.
+* Implemented in: 0.1.17-SNAPSHOT
+* Covered by: Java unit tests (`PartitionDedupAppTest`, `GapDetectorTest`),
+  Go unit tests (`src/create`, `src/gaps`), TC-41 and TC-42
+* Notes: Late arrivals for a purged window are not deduplicated, so its gaps
+  are no longer resendable. `MAX_WINDOWS × WINDOW_SIZE` must cover the events
+  per partition between a gap and the next resend bundle. Previously every
+  window left a record behind and the topic grew without bound.
+
+Acceptance criteria:
+
+1. Purging a window writes a tombstone for `topic:partition:windowMin`, both
+   for gap-free windows and for windows with missing offsets.
+2. Purging a window with missing offsets logs one WARN with the number of
+   missing offsets; purging a gap-free window logs at DEBUG only.
+3. Purging a window that was restored from dedup state after an upgrade also
+   tombstones its legacy key `topic_partition:windowMin` (REQ-53), once.
+4. `create` and `gaps` treat tombstones as deletions, not parse errors, for
+   both key formats, independently of read order.
+5. With a compacted gap topic, the number of keys physically present after
+   compaction and tombstone removal is at most `MAX_WINDOWS` per source
+   partition, and `create` exports only the gaps of the active windows.

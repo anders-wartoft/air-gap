@@ -86,4 +86,23 @@ public class GapDetectorTest {
         gd.check(2, w -> purged[0] = true); // triggers purge of first window
         assertTrue(purged[0], "Purge callback should be called");
     }
+
+    @Test
+    public void testPurgeCallbackRunsForGapFreeAndGappedWindows() {
+        GapDetector gd = new GapDetector("test", 10, 2);
+        java.util.List<Long> purgedMins = new java.util.ArrayList<>();
+        java.util.List<Integer> purgedGapCounts = new java.util.ArrayList<>();
+        java.util.function.Consumer<GapDetector.WindowView> onPurge = w -> {
+            purgedMins.add(w.getMinOffset());
+            purgedGapCounts.add(w.findGaps().size());
+        };
+        for (long i = 0; i < 40; i++) {
+            if (i != 15) {
+                gd.check(i, onPurge);
+            }
+        }
+        // Windows 0 and 10 leave the range of two windows; 0 is gap-free, 10 misses 15.
+        assertEquals(java.util.List.of(0L, 10L), purgedMins);
+        assertEquals(java.util.List.of(0, 1), purgedGapCounts);
+    }
 }

@@ -6014,3 +6014,113 @@ explicitly starts downstream without dependencies or a restart policy.
 Successful checks and the final verdict are green; failures are red.
 `NO_COLOR=1` disables colors. Successful runs remove containers and temporary
 files; failed runs retain artifacts at the printed path. `-pause` retains both.
+
+## TC-41 — Graceful upgrade from legacy JSON gap records
+
+Verify that gaps written by dedup 0.1.10-SNAPSHOT in the legacy JSON format
+are still exported by the current `create` after an in-place dedup upgrade,
+without per-record errors.
+
+* Covers: REQ-53, REQ-54
+* Implemented in: 0.1.17-SNAPSHOT
+* Runner: `./run-testcase.sh 41`
+
+### Run
+
+```bash
+cd tests/env
+./run-testcase.sh 41
+# Optional: retain containers and artifacts.
+./run-testcase.sh 41 -pause
+# Negative control: the same scenario with create 0.1.16 must FAIL.
+TC41_CREATE_REF=0.1.16-SNAPSHOT ./run-testcase.sh 41
+```
+
+Requires host Go, git tags, Docker Compose and the current dedup fat JAR
+(`make build-java`). The legacy dedup is built from git tag
+`TC41_LEGACY_TAG` (default `0.1.10-SNAPSHOT`) with host Maven, or the
+`maven:3.9-eclipse-temurin-17` image when Maven is absent, and cached under
+`${XDG_CACHE_HOME:-~/.cache}/airgap-tests/`. `TC41_LEGACY_DEDUP_JAR` and
+`TC41_CURRENT_DEDUP_JAR` override the JARs. The stack is isolated (single
+Kafka broker, no published ports); both dedup versions share one state volume
+and `APPLICATION_ID`, with `WINDOW_SIZE=100` and `MAX_WINDOWS=2`.
+
+### Procedure and assertions
+
+1. Produce `transfer` records keyed `source_0_<offset>` for offsets 0–399,
+   omitting 5, 10–12 and 350. Start the legacy dedup and require JSON gap
+   records `source_0:0` with `[[5],[10,12]]` (window purged once offset 200
+   arrives) and `source_0:300` with `[[50]]`.
+2. Stop the legacy dedup, produce offsets 400–599 omitting 450, and start the
+   current dedup in place. Require a binary record `source:0:400`, the current
+   dedup still running, and no binary record for window 0, so that window
+   exists only in the legacy format. The new offsets push the restored
+   windows 200 and 300 out of range; require tombstones for both
+   `source:0:300` and `source_0:300` (REQ-54).
+3. Run the current `create` with `limit=all`. Require exit 0, no
+   `Failed to parse gap message`, no ERROR/FATAL records, and exactly one
+   legacy-record summary line.
+4. Require the bundle entry for `source`/0 to contain exactly
+   `[[5],[10,12],[450]]`: the legacy-only window purged before the upgrade
+   and the new post-upgrade gap. Gap 350 is absent because its window was
+   purged and tombstoned after the upgrade.
+
+### Expected result
+
+All checks and the final TC-41 verdict pass (green; red on failure).
+With `TC41_CREATE_REF=0.1.16-SNAPSHOT` the run fails: one parse ERROR per
+legacy record and a bundle without `[5]` and `[10,12]`. `NO_COLOR=1` disables
+colors. Successful runs remove containers and temporary files; failed runs
+retain artifacts at the printed path. `-pause` retains both.
+
+## TC-42 — Bounded gap topic: tombstones for purged windows
+
+Verify that dedup tombstones every purged window so the compacted gap topic
+keeps only the active windows.
+
+* Covers: REQ-54
+* Implemented in: 0.1.17-SNAPSHOT
+* Runner: `./run-testcase.sh 42`
+
+### Run
+
+```bash
+cd tests/env
+./run-testcase.sh 42
+# Optional: retain containers and artifacts.
+./run-testcase.sh 42 -pause
+```
+
+Requires host Go, Docker Compose and the current dedup fat JAR
+(`make build-java`); `TC42_CURRENT_DEDUP_JAR` overrides the JAR and
+`TC42_WAIT_SECONDS` (default 180) the compaction timeout. The stack is
+isolated (single Kafka broker, no published ports). Dedup runs with
+`WINDOW_SIZE=100`, `MAX_WINDOWS=2`, `GAP_EMIT_INTERVAL_SEC=1` and a WARN-level
+log4j configuration. The broker uses `log.cleaner.backoff.ms=1000` and the
+gap topic `cleanup.policy=compact`, `segment.ms=2000`,
+`min.cleanable.dirty.ratio=0.01`, `min.compaction.lag.ms=0` and
+`delete.retention.ms=1000`.
+
+### Procedure and assertions
+
+1. Start a console consumer on the gap topic that captures every record,
+   including tombstones, before they are compacted away.
+2. Produce 20 windows of `transfer` records keyed `source_0_<offset>`, one
+   window every 2 seconds, each missing offset `N*100+5`, so every window is
+   emitted and all but the last two are purged.
+3. Require the latest captured record to be a tombstone for 18 keys and a live
+   record only for `source:0:1800` and `source:0:1900`.
+4. Require 18 dedup WARN lines `left the detection range with 1 missing
+   offsets`.
+5. Require at most 2 distinct keys physically in the gap topic once
+   compaction and tombstone removal have run.
+6. Run `create` with `limit=all`. Require exit 0, no ERROR/FATAL records, and
+   the bundle entry for `source`/0 to be exactly `[[1805],[1905]]`.
+
+### Expected result
+
+All checks and the final TC-42 verdict pass (green; red on failure). With a
+dedup built before REQ-54 the tombstone, WARN and key-count checks fail (all
+20 keys remain) and the bundle contains every window's gap. `NO_COLOR=1`
+disables colors. Successful runs remove containers and temporary files;
+failed runs retain artifacts at the printed path. `-pause` retains both.
