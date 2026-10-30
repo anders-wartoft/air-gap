@@ -10,6 +10,7 @@ PatternLayout remains the default.
 
 - [Output format](#output-format)
 - [Repeated messages](#repeated-messages)
+  - [Message templates](#message-templates)
 - [Log integrity](#log-integrity)
 - [Attribute reference](#attribute-reference)
 - [Illustrative chain-link verification](#illustrative-chain-link-verification)
@@ -94,10 +95,55 @@ the next summary; callers needing an explicit final flush can use
 
 Only records with the same body, severity, and ordered semantic attributes are
 combined. Changing IDs, retry counts, or remote ports therefore keeps records
-distinct. FATAL records and
+distinct, unless the call site uses a message template (below). FATAL records and
 mandatory production-configuration warnings are never suppressed. Direct
 third-party text output (including Sarama's historical text writer) bypasses
 the application logger and is not suppressed.
+
+### Message templates
+
+Errors that repeat with a changing value, such as one failure per message
+during a Kafka outage, are logged with a template instead of a formatted
+string. The placeholders are OpenTelemetry attribute keys:
+
+```go
+Logger.ErrorT(logging.Event(logging.EventKafkaProduce,
+    logging.Str("messaging.destination.name", topic),
+    logging.Decimal("messaging.destination.partition.id", int64(partition)),
+    logging.ErrorType(err),
+    logging.ErrMessage(err),
+), "Failed to send message: topic={messaging.destination.name} partition={messaging.destination.partition.id} key={airgap.message.id} error={error.message}",
+    logging.Str("airgap.message.id", key))
+```
+
+- The attributes passed in `Event(...)` identify the record. Records with the
+  same severity, template and attributes are combined exactly like the
+  repeated messages above, using the same `AIRGAP_LOG_REPEAT_INTERVAL`.
+- The trailing parameters (here the message key) are values that do not
+  identify the record. They do not split a group, and a summary shows the
+  latest values.
+- The error text (`error.message`) is an identity attribute, so each distinct
+  cause gets its own count.
+- A placeholder is resolved from the attributes first and then from the
+  parameters. A placeholder that matches neither is written literally.
+- Text output is the rendered message, unchanged from a formatted call. OTLP
+  output also carries the parameters as attributes and the unexpanded
+  template as `airgap.message.template`.
+- Formatted calls (`Errorf` and so on) keep exact-match grouping. Templates are
+  opt-in per call site.
+
+During a 60-second Kafka outage at 20 events/s (TC-44), downstream writes 17
+lines for about 700 failed sends. An excerpt (keys and counts vary per run):
+
+```text
+[ERROR] Failed to send message: topic=transfer partition=0 key=tc44-random_0_2163 error=kafka: client has run out of available brokers to talk to
+[ERROR] Failed to send message: topic=transfer partition=0 key=tc44-random_0_2171 error=circuit breaker is open
+[ERROR] Message repeated 199 times: Failed to send message: topic=transfer partition=0 key=tc44-random_0_2370 error=circuit breaker is open
+[ERROR] Message repeated 7 times: Failed to send message: topic=transfer partition=0 key=tc44-random_0_2178 error=kafka: client has run out of available brokers to talk to
+```
+
+Templated call sites: downstream Kafka send failures, upstream consumer errors
+and Kafka startup retries, and upstream Kafka status changes.
 
 OTLP repeat records preserve the original body, event name, severity, resource,
 and semantic attributes. The integer attribute `airgap.repeat.count` gives the

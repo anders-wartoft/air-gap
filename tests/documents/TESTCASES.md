@@ -2,7 +2,8 @@
 
 Source of truth for air-gap functional test cases. (Originated as
 `tests/documents/Testfall.xlsx`; this document now supersedes the
-spreadsheet.)
+spreadsheet.) For shared environment setup, runner usage, and platform
+guidance, see the [integration test environment README](../env/README.md).
 
 Each test case:
 
@@ -6124,3 +6125,101 @@ dedup built before REQ-54 the tombstone, WARN and key-count checks fail (all
 20 keys remain) and the bundle contains every window's gap. `NO_COLOR=1`
 disables colors. Successful runs remove containers and temporary files;
 failed runs retain artifacts at the printed path. `-pause` retains both.
+
+## TC-43 — Upstream waits for Kafka at startup
+
+Verify that upstream with `source=kafka` survives a missing local Kafka at
+startup and forwards events once Kafka is up, without a restart.
+
+* Covers: REQ-55
+* Implemented in: 0.1.17-SNAPSHOT
+* Runner: `./run-testcase.sh 43`
+
+### Run
+
+```bash
+cd tests/env
+./run-testcase.sh 43
+# Optional: retain containers and artifacts.
+./run-testcase.sh 43 -pause
+```
+
+Requires host Go and Docker Compose. The stack is isolated (single Kafka
+broker, no published ports) and the containers have no restart policy.
+
+### Procedure and assertions
+
+1. Start downstream (`target=kafka`, topic translation `source` → `transfer`)
+   and upstream (`source=kafka`, topic `source`, `kafkaRetryInterval=500`)
+   while Kafka is not running.
+2. Require at least 3 upstream WARN lines `Kafka consumer group client
+   unavailable:`, no FATAL/PANIC, and the upstream container still running
+   with its original start time and restart count 0.
+3. Start Kafka and create the topics. Produce events to `source` until one
+   arrives in `transfer`. Require delivery within 120 seconds, no
+   FATAL/PANIC, and the same upstream process.
+4. Restart upstream against a closed port (`127.0.0.1:1`) with
+   `kafkaRetryInterval=60000`, wait for `Retrying in 1m0s`, then stop it with
+   a 10-second timeout. Require exit code 0 and the log line
+   `context cancelled while waiting for Kafka`.
+
+### Expected result
+
+All checks and the final TC-43 verdict pass (green; red on failure). With an
+upstream built before REQ-55 (and without `kafkaRetryInterval`, which it does
+not know) upstream logs `[FATAL] [PANIC] Error creating consumer group client
+after retry` and exits, so step 2 fails. `NO_COLOR=1` disables colors.
+Successful runs remove containers and temporary files; failed runs retain
+artifacts at the printed path. `-pause` retains both.
+
+## TC-44 — Kafka outage during a run: recovery and grouped error logging
+
+Verify that upstream and downstream survive a Kafka outage in the middle of a
+run, resume on their own, and summarize repeating errors.
+
+* Covers: REQ-56
+* Implemented in: 0.1.17-SNAPSHOT
+* Runner: `./run-testcase.sh 44`
+
+### Run
+
+```bash
+cd tests/env
+./run-testcase.sh 44
+# Optional: retain containers and artifacts.
+./run-testcase.sh 44 -pause
+```
+
+Requires host Go and Docker Compose. The stack is isolated (single Kafka
+broker, no published ports) and the containers have no restart policy. The
+default `AIRGAP_LOG_REPEAT_INTERVAL` (10 s) is used. `TC44_OUTAGE_SECONDS`
+(default 60) sets the outage length.
+
+### Procedure and assertions
+
+1. Start Kafka, downstream (`target=kafka`, translation `source` →
+   `transfer`), an upstream with `source=random` at 20 events/s, and an
+   upstream with `source=kafka` reading `source` with `logStatistics=5`.
+   Require an event produced to `source` to arrive in `transfer`.
+2. Stop Kafka for 60 seconds, then start it again.
+3. Require an event produced to `source` after the restart to arrive in
+   `transfer`, and the `transfer` offset to grow from the random upstream.
+4. Require all three containers to be the same processes (start time,
+   restart count 0), still running, with no FATAL/PANIC.
+5. Require downstream to write at most 60 `Failed to send message` lines for
+   the outage, with `Message repeated` summaries for at least 200 failures.
+6. Require the `source=kafka` upstream to write at most 40 `Kafka status
+   changed to error` lines, a `Kafka status restored to running` line after
+   the restart, and `kafka_status` `running` in its last STATISTICS line.
+
+The runner prints the compacted outage log lines (first records and
+`Message repeated` summaries) for downstream send failures and upstream status
+changes, in green when the logging check passes and red when it fails.
+
+### Expected result
+
+All checks and the final TC-44 verdict pass (green; red on failure). With
+binaries built before REQ-56 the processes recover, but downstream writes one
+line per failed send (about 700) and the logging check fails.
+`NO_COLOR=1` disables colors. Successful runs remove containers and temporary
+files; failed runs retain artifacts at the printed path. `-pause` retains both.

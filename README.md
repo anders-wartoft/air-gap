@@ -762,6 +762,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | bootstrapServers | AIRGAP_UPSTREAM_BOOTSTRAP_SERVERS | | Bootstrap url for Kafka, with port |
 | topic | AIRGAP_UPSTREAM_TOPIC | | Topic name in Kafka to read from |
 | groupID | AIRGAP_UPSTREAM_GROUP_ID | | The prefix for the group to use when reading from Kafka. The complete group id will be this value, concatenated with the name from the sendingThreads. This will give each sending thread a unique group id |
+| kafkaRetryInterval | AIRGAP_UPSTREAM_KAFKA_RETRY_INTERVAL | 5000 | Positive milliseconds to wait between failed Kafka consumer startup attempts (`source=kafka`). Temporary network/broker/not-ready errors retry indefinitely at WARN level; identifiable configuration, TLS certificate, and authentication/authorization errors remain fatal. Also accepts `--kafkaRetryInterval=N`. |
 | payloadSize | AIRGAP_UPSTREAM_PAYLOAD_SIZE | 0 | 0 - ask the NIC for the MTU and subtract 68 bytes from that (IPv6 + UDP header) or set manually to the payload size (available size of UDP packets, i.e., MTU - headers) |
 | from | AIRGAP_UPSTREAM_FROM | | Don't read anything from Kafka that was delivered to Kafka before this timestamp |
 | enryption | AIRGAP_UPSTREAM_ENCRYPTION | false | true - encrypt all payload when sending to downstream air-gap. Status messages are still in clear text to help configuration and set-up |
@@ -936,8 +937,18 @@ and network timeouts, so the interval is a delay **after** an unsuccessful
 attempt, not a total startup timeout. SIGINT/SIGTERM cancels startup, including
 the wait for an in-flight attempt, and exits cleanly. UDP traffic sent before
 the receiver is ready is not buffered by the application. This option affects
-downstream producer startup only, not upstream consumer startup or Kafka's
-established-connection retry behavior.
+producer startup only, not Kafka's established-connection retry behavior.
+Upstream has its own `kafkaRetryInterval` for consumer startup (see below).
+
+Upstream with `source=kafka` behaves the same way when its local Kafka is not
+reachable at startup, for example while the host is booting: each failed
+attempt to create the consumer group client logs a WARN
+`Kafka consumer group client unavailable: ... Retrying in ...` and retries after
+upstream's `kafkaRetryInterval` (default 5000 ms), indefinitely, without exiting
+for a systemd restart. Only configuration, TLS certificate and
+authentication/authorization errors are fatal. SIGINT/SIGTERM cancels the wait
+and exits cleanly. While Kafka is down the Kafka status changes are still logged
+at ERROR (and INFO `restored` when it comes back), but there is no FATAL record.
 
 For high throughput on high-end servers, set the numReceivers, channelBufferSize, batchSize, readBufferMultiplier and rcvBufSize to:
 

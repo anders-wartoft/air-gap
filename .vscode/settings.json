@@ -5,5 +5,6 @@
         "src/test/java"
     ],
     "java.configuration.updateBuildConfiguration": "disabled",
-    "FSharp.suggestGitignore": false
+    "FSharp.suggestGitignore": false,
+    "python-envs.defaultEnvManager": "ms-python.python:system"
 }

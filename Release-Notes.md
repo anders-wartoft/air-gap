@@ -2,6 +2,46 @@
 
 ## 0.1.17-SNAPSHOT
 
+### Upstream Kafka startup recovery
+
+- Upstream with `source=kafka` no longer exits with `[FATAL] [PANIC] Error
+  creating consumer group client after retry` when its local Kafka is not
+  reachable at startup (for example during a host reboot). It now retries
+  indefinitely, logging a WARN `Kafka consumer group client unavailable: ...
+  Retrying in ...` per attempt, and starts consuming in the same process once
+  Kafka answers, so systemd no longer restarts it. Only configuration, TLS
+  certificate and authentication/authorization errors are fatal. This matches
+  the downstream producer behaviour from 0.1.16.
+- New upstream setting `kafkaRetryInterval` (milliseconds, default 5000;
+  `AIRGAP_UPSTREAM_KAFKA_RETRY_INTERVAL`, `--kafkaRetryInterval`).
+- SIGINT/SIGTERM while waiting for Kafka now stops upstream cleanly.
+- Kafka status changes are still logged at ERROR while Kafka is down, and as
+  INFO `restored` afterwards.
+- New requirement REQ-55 with Go unit tests and TC-43.
+
+### Grouped error logging during Kafka outages
+
+- The Go logger has optional message templates (`ErrorT`, `WarnT`, `InfoT`,
+  `DebugT`) whose placeholders are OpenTelemetry attribute keys, for example
+  `Failed to send message: topic={messaging.destination.name}
+  key={airgap.message.id} error={error.message}`. Repeats with the same
+  template, severity and identity attributes are summarized every
+  `AIRGAP_LOG_REPEAT_INTERVAL` (default 10 s) even when values such as the
+  message key or retry count differ; the summary shows the latest values.
+  Each distinct error text keeps its own count. OTLP output adds the
+  parameters as attributes and `airgap.message.template`. See
+  [Logging](doc/Logging.md#message-templates).
+- Downstream no longer logs one ERROR per event that cannot be written while
+  Kafka is down: a 60-second outage at 20 events/s gives 17 lines instead of
+  about 700. Upstream consumer errors, Kafka startup retries and Kafka status
+  changes are grouped the same way, and status texts from Sarama no longer
+  include Sarama's timestamp.
+- Upstream now reports its Kafka status as running again (INFO `Kafka status
+  restored to running` and `kafka_status` in STATISTICS) as soon as a consumer
+  session starts after an outage. Previously the error status could remain
+  until the next rebalance.
+- New requirement REQ-56 with Go unit tests and TC-44.
+
 ### Graceful reading of legacy gap records
 
 - `create` and `gaps` now read gap-topic records in the JSON format written by

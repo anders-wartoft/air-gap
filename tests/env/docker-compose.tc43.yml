@@ -1,0 +1,22 @@
+# The TC-43 runner starts each application with --no-deps so Kafka can be
+# absent initially, without requiring provider-specific YAML reset tags.
+services:
+  downstream:
+    platform: linux/amd64
+    volumes:
+      - ${TC_WORK}:/airgap/work:z
+    entrypoint: ["/airgap/bin/downstream"]
+    command: ["/airgap/work/downstream.properties"]
+    environment:
+      AIRGAP_LOG_REPEAT_INTERVAL: "0"
+    restart: "no"
+
+  upstream:
+    platform: linux/amd64
+    volumes:
+      - ${TC_WORK}:/airgap/work:z
+    entrypoint: ["/airgap/bin/upstream"]
+    command: ["/airgap/work/upstream.properties"]
+    environment:
+      AIRGAP_LOG_REPEAT_INTERVAL: "0"
+    restart: "no"

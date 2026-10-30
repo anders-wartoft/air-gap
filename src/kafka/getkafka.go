@@ -79,7 +79,7 @@ func (w *saramaLogWriter) Write(p []byte) (n int, err error) {
 		strings.Contains(msg, "dial tcp") ||
 		strings.Contains(msg, "failed") ||
 		strings.Contains(msg, "error")) {
-		w.errorCallback("Kafka cluster issue: " + strings.TrimSpace(msg))
+		w.errorCallback("Kafka cluster issue: " + saramaMessageText(msg))
 	}
 
 	if logging.Logger.GetFormat() == logging.FormatOTel {
@@ -90,6 +90,16 @@ func (w *saramaLogWriter) Write(p []byte) (n int, err error) {
 	}
 
 	return logging.StdLogger.Writer().Write(p)
+}
+
+// saramaMessageText removes the "[SARAMA] " prefix and the log.LstdFlags
+// timestamp so that the same Sarama message always yields the same status text.
+func saramaMessageText(msg string) string {
+	text := strings.TrimSpace(strings.TrimPrefix(msg, "[SARAMA] "))
+	if len(text) >= 20 && text[4] == '/' && text[7] == '/' && text[10] == ' ' && text[13] == ':' && text[16] == ':' && text[19] == ' ' {
+		text = text[20:]
+	}
+	return text
 }
 
 func SetVerbose(enabled bool) {
@@ -545,6 +555,9 @@ type ConsumerSettings struct {
 	ChannelBufferSize int
 	MaxProcessingTime time.Duration
 	BeforeMessage     func(context.Context) error
+	// StartupRetryInterval is the delay after a transient failure to create
+	// the consumer group client (default DefaultStartupRetryInterval).
+	StartupRetryInterval time.Duration
 }
 
 func applyConsumerSettings(config *sarama.Config, settings ConsumerSettings) {
@@ -665,36 +678,51 @@ func ReadFromKafkaWithContextSettings(ctx context.Context, name string, offsetSe
 		delay:         time.Duration(offsetSeconds) * time.Second,
 		callback:      callbackFunction,
 		beforeMessage: settings.BeforeMessage,
+		onSetup:       func() { reportError("running") },
 	}
 
-	client, err := sarama.NewConsumerGroup(strings.Split(brokers, ","), group, config)
+	// Retry transient failures (for example local Kafka still starting at
+	// boot) until Kafka answers or ctx is canceled. Only configuration, TLS
+	// certificate and authorization errors are fatal.
+	retryInterval := settings.StartupRetryInterval
+	if retryInterval <= 0 {
+		retryInterval = DefaultStartupRetryInterval
+	}
+	brokerList := strings.Split(brokers, ",")
+	client, err := startWithRetry(ctx, retryInterval, func() (sarama.ConsumerGroup, error) {
+		return sarama.NewConsumerGroup(brokerList, group, config)
+	}, func(attempt int64, err error) {
+		Logger.WarnT(logging.Event(logging.EventKafkaConnect,
+			logging.Failure(),
+			logging.Str("server.address", brokers),
+			logging.Str("messaging.consumer.group.name", group),
+			logging.Str("airgap.kafka.consumer.name", name),
+			logging.Int("airgap.retry.delay_ms", retryInterval.Milliseconds()),
+			logging.Str("airgap.retry.delay", retryInterval.String()),
+			logging.ErrorType(err),
+			logging.ErrMessage(err),
+		), "Kafka consumer group client unavailable: {error.message}. Retrying in {airgap.retry.delay}...",
+			logging.Int("airgap.retry.count", attempt))
+		reportError(fmt.Sprintf("Kafka consumer group client unavailable: %v", err))
+	})
 	if err != nil {
-		errMsg := fmt.Sprintf("Error creating consumer group client: %v", err)
-		Logger.Errorf(logging.Event(logging.EventKafkaConnect,
+		if ctx.Err() != nil {
+			Logger.Info(logging.Event(logging.EventAppShutdown,
+				logging.Str("airgap.kafka.consumer.name", name),
+				logging.Str("airgap.shutdown.reason", "context.cancelled"),
+			), "terminating: context cancelled while waiting for Kafka (WithContext)")
+			return
+		}
+		Logger.Panicf(logging.Event(logging.EventKafkaConnect,
 			logging.Failure(),
 			logging.Str("server.address", brokers),
 			logging.Str("messaging.consumer.group.name", group),
 			logging.Str("airgap.kafka.consumer.name", name),
 			logging.ErrorType(err),
-			logging.Int("airgap.retry.delay_seconds", 5),
-		), "%s. Retrying in 5 seconds...", errMsg)
-		reportError(errMsg)
-		// Sleep and continue - will try again in the consumer loop
-		// This allows the consumer to retry if Kafka cluster is temporarily unavailable
-		time.Sleep(5 * time.Second)
-		// Retry once more
-		client, err = sarama.NewConsumerGroup(strings.Split(brokers, ","), group, config)
-		if err != nil {
-			Logger.Panicf(logging.Event(logging.EventKafkaConnect,
-				logging.Failure(),
-				logging.Str("server.address", brokers),
-				logging.Str("messaging.consumer.group.name", group),
-				logging.Str("airgap.kafka.consumer.name", name),
-				logging.ErrorType(err),
-				logging.Bool("airgap.retry.exhausted", true),
-			), "Error creating consumer group client after retry: %v", err)
-		}
+			logging.Bool("airgap.retry.permanent", true),
+		), "Error creating consumer group client (not retryable): %v", err)
 	}
+	reportError("running")
 
 	consumptionIsPaused := false
 	wg := &sync.WaitGroup{}
@@ -707,20 +735,21 @@ func ReadFromKafkaWithContextSettings(ctx context.Context, name string, offsetSe
 				if errors.Is(err, sarama.ErrClosedConsumerGroup) {
 					return
 				}
-				// Log error and retry instead of panicking
+				// Log error and retry instead of panicking. The attempt number
+				// is a parameter so an outage is summarized per distinct error.
 				retryCount++
-				errMsg := fmt.Sprintf("Error from consumer (attempt %d): %v", retryCount, err)
-				Logger.Errorf(logging.Event(logging.EventKafkaConsume,
+				Logger.ErrorT(logging.Event(logging.EventKafkaConsume,
 					logging.Failure(),
 					logging.Str("server.address", brokers),
 					logging.Str("messaging.destination.name", topics),
 					logging.Str("messaging.consumer.group.name", group),
 					logging.Str("airgap.kafka.consumer.name", name),
-					logging.Int("airgap.retry.count", int64(retryCount)),
 					logging.Int("airgap.retry.delay_seconds", 5),
 					logging.ErrorType(err),
-				), "%s. Will retry in 5 seconds...", errMsg)
-				reportError(errMsg)
+					logging.ErrMessage(err),
+				), "Error from consumer (attempt {airgap.retry.count}): {error.message}. Will retry in 5 seconds...",
+					logging.Int("airgap.retry.count", int64(retryCount)))
+				reportError(fmt.Sprintf("Error from consumer: %v", err))
 
 				// Sleep before retrying to avoid busy-wait loop
 				select {
@@ -742,7 +771,22 @@ func ReadFromKafkaWithContextSettings(ctx context.Context, name string, offsetSe
 		}
 	}()
 
-	<-consumer.ready
+	select {
+	case <-consumer.ready:
+	case <-ctx.Done():
+		Logger.Info(logging.Event(logging.EventAppShutdown,
+			logging.Str("airgap.kafka.consumer.name", name),
+			logging.Str("airgap.shutdown.reason", "context.cancelled"),
+		), "terminating: context cancelled before consumer was ready (WithContext)")
+		wg.Wait()
+		if err := client.Close(); err != nil {
+			Logger.Errorf(logging.Event(logging.EventAppShutdown,
+				logging.Failure(),
+				logging.Str("airgap.kafka.consumer.name", name),
+			).Merge(logging.Err(err)), "Error closing client: %v", err)
+		}
+		return
+	}
 	Logger.Infof(logging.Event(logging.EventAppReady,
 		logging.Str("airgap.kafka.consumer.name", name),
 		logging.Str("server.address", brokers),
@@ -839,10 +883,16 @@ type Consumer struct {
 	delay         time.Duration
 	callback      func(string, []byte, time.Time, []byte) bool
 	beforeMessage func(context.Context) error
+	onSetup       func()
 }
 
 // Setup is run at the beginning of a new session, before ConsumeClaim
 func (consumer *Consumer) Setup(sarama.ConsumerGroupSession) error {
+	// A session only starts when the brokers answer, so this is where a
+	// Kafka outage is known to be over.
+	if consumer.onSetup != nil {
+		consumer.onSetup()
+	}
 	// Mark the consumer as ready
 	close(consumer.ready)
 	return nil

@@ -1356,3 +1356,76 @@ Acceptance criteria:
 5. With a compacted gap topic, the number of keys physically present after
    compaction and tombstone removal is at most `MAX_WINDOWS` per source
    partition, and `create` exports only the gaps of the active windows.
+
+## REQ-55 — Upstream waits for Kafka at startup
+
+> When upstream reads from Kafka (`source=kafka`) and the Kafka cluster is not
+> reachable or not ready at startup, for example while the host is booting,
+> upstream must wait and retry until Kafka answers instead of exiting, and must
+> only exit on configuration, certificate or authorization errors.
+
+* Status: **Implemented**.
+* Implemented in: 0.1.17-SNAPSHOT
+* Covered by: Go unit tests (`src/kafka` `startup_retry_test.go`,
+  `src/upstream` configuration tests) and TC-43
+* Notes: Before 0.1.17 upstream retried once after 5 seconds and then logged
+  `[FATAL] [PANIC] Error creating consumer group client after retry`, so
+  systemd restarted it. Downstream got the same behaviour for its producer in
+  0.1.16 (TC-40); both now use the same error classification.
+
+Acceptance criteria:
+
+1. Unreachable brokers, refused connections, DNS failures and not-ready
+   brokers/coordinators are retried indefinitely, with one WARN
+   `Kafka consumer group client unavailable: ... Retrying in ...` per attempt
+   and no FATAL or PANIC record.
+2. The delay between attempts is `kafkaRetryInterval` milliseconds (default
+   5000), configurable in the properties file,
+   `AIRGAP_UPSTREAM_KAFKA_RETRY_INTERVAL` and `--kafkaRetryInterval`; values
+   below 1 are rejected.
+3. Configuration, TLS certificate, SASL authentication and authorization
+   errors are not retried and stop upstream.
+4. Once Kafka answers, the same process starts consuming and forwards events
+   without a restart.
+5. SIGINT/SIGTERM during the wait, including during an in-flight attempt,
+   stops upstream cleanly with exit code 0.
+
+## REQ-56 — Kafka outage during a run: recovery and grouped error logging
+
+> When Kafka becomes unavailable while upstream and downstream are running,
+> both must keep running and resume on their own when Kafka is back, upstream
+> must report its Kafka status as running again, and errors that repeat for
+> every message or retry must be summarized per cause instead of being logged
+> once per occurrence.
+
+* Status: **Implemented**.
+* Implemented in: 0.1.17-SNAPSHOT
+* Covered by: Go unit tests (`src/logging` `template_test.go`, `src/kafka`
+  `getkafka_logging_test.go`) and TC-44
+* Notes: Downstream cannot buffer events while its Kafka is down; events
+  received during the outage are dropped and are recovered by gap detection and
+  resend. Before 0.1.17 downstream logged one ERROR per dropped event, and
+  upstream logged a status change for every Sarama log line (each carried a
+  timestamp) and kept the error status after Kafka recovered.
+
+Acceptance criteria:
+
+1. The Go logger supports optional message templates whose placeholders are
+   OpenTelemetry attribute keys. Records with the same severity, template and
+   identity attributes are summarized every `AIRGAP_LOG_REPEAT_INTERVAL`
+   regardless of their parameter values, and the summary shows the latest
+   values. The error text is an identity attribute, so each distinct cause has
+   its own count. Existing formatted calls are unchanged.
+2. Downstream Kafka send failures, upstream consumer errors and startup
+   retries, and upstream Kafka status changes use templates. Upstream status
+   texts derived from Sarama do not contain Sarama's timestamp.
+3. Upstream sets its Kafka status to running when a consumer session starts,
+   so it logs `Kafka status restored to running` and reports
+   `kafka_status=running` in STATISTICS once Kafka is back.
+4. During and after a 60-second outage, no process exits, restarts or logs
+   FATAL/PANIC, and both a `source=kafka` and a `source=random` upstream
+   deliver again through the same processes.
+5. With the default repeat interval and 20 events/s, downstream writes at most
+   60 send-failure lines for the outage, with summaries for the suppressed
+   failures.
+

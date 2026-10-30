@@ -1,0 +1,30 @@
+# The TC-44 runner starts the applications with --no-deps and stops/starts
+# Kafka itself. The default AIRGAP_LOG_REPEAT_INTERVAL (10 s) is kept on
+# purpose: the test verifies that outage errors are summarized.
+services:
+  downstream:
+    platform: linux/amd64
+    volumes:
+      - ${TC_WORK}:/airgap/work:z
+    entrypoint: ["/airgap/bin/downstream"]
+    command: ["/airgap/work/downstream.properties"]
+    restart: "no"
+
+  upstream:
+    platform: linux/amd64
+    volumes:
+      - ${TC_WORK}:/airgap/work:z
+    entrypoint: ["/airgap/bin/upstream"]
+    command: ["/airgap/work/upstream.properties"]
+    restart: "no"
+
+  upstream-kafka:
+    platform: linux/amd64
+    image: localhost/airgap-testenv-kafka-transfer:local
+    hostname: upstream-kafka
+    volumes:
+      - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
+      - ${TC_WORK}:/airgap/work:z
+    entrypoint: ["/airgap/bin/upstream"]
+    command: ["/airgap/work/upstream-kafka.properties"]
+    restart: "no"

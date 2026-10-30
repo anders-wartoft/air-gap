@@ -1,128 +1,90 @@
-# Freestanding air-gap test environment
+# Air-gap integration test environment
 
-A Docker playground for running air-gap end-to-end from a Kafka source, over
-UDP or TCP (optionally through a diode or diode-restricted firewall), into a
-Kafka sink — plus optional dedup / create / resend processes.
+This directory contains the Docker Compose environment and runners for
+end-to-end tests of air-gap services. It can exercise the path from Kafka
+through upstream, UDP or TCP, and downstream to Kafka, with optional dedup,
+create, and resend services. Some cases use isolated Compose projects or
+require multiple Linux hosts.
 
-Independent from `tests/docker-compose.yml` (package-install smoke tests) and
-the repository root `docker-compose.yml` (RPM-installed demo).
+Use the [testcase catalogue](../documents/TESTCASES.md) for each case's scope,
+requirements, setup, procedure, assertions, and expected result. This README
+covers the shared environment, prerequisites, and ways to run and maintain it.
+The package-install smoke tests are separate; see the
+[package-test guide](../README.md).
+The repository-root Compose project is a separate RPM-installed demo.
 
-## Design goals
+## Environment overview
 
-| Axis           | How you update it                                                                              |
-| -------------- | ---------------------------------------------------------------------------------------------- |
-| OS             | Change `UPSTREAM_BASE_IMAGE` / `DOWNSTREAM_BASE_IMAGE` in `.env`, run `docker compose build`   |
-| Kafka          | Change `KAFKA_IMAGE` in `.env`, run `docker compose pull`                                      |
-| JVM (dedup)    | Change `DEDUP_IMAGE` in `.env`, run `docker compose pull`                                      |
-| Air-gap binary | Rebuild on the host. The container always runs the latest file in the mounted build directory. |
-| Air-gap config | Edit files under `../../config` (mounted read-only), or pick a different testcase via runner.  |
+| Component | How it is selected or updated |
+| --- | --- |
+| Upstream/downstream OS | Set `UPSTREAM_BASE_IMAGE` / `DOWNSTREAM_BASE_IMAGE` in `.env`, then build the service images. |
+| Kafka | Set `KAFKA_IMAGE` in `.env`, then pull or recreate the Kafka services. |
+| Dedup JVM | Set `DEDUP_IMAGE` in `.env`, then pull or recreate the dedup service. |
+| Air-gap binaries | Build on the host; containers use the mounted build directory. |
+| Air-gap configuration | Edit files under `../../config` or select a case with the runner. |
 
-The container image is deliberately minimal — an OS plus `iproute` / `ping` /
-`ps`. The upstream / downstream / create / resend binaries and the dedup jar
-are **not** baked in; they are bind-mounted from the host build directory.
+The service image is deliberately minimal. Air-gap binaries and the dedup JAR
+are mounted from the host rather than baked into it.
 
-## macOS and Rocky Linux 9
+## Platform and host requirements
 
-The Compose files support Docker Desktop on macOS and Docker Engine/Compose
-on Rocky Linux 9. They also avoid the Podman compatibility problems observed
-with Rocky's `docker` shim and `podman-compose`:
+Docker Compose v2 is the reference runtime. The Compose files support Docker
+Desktop on macOS and Docker Engine/Compose on Rocky Linux 9. Podman may work
+where its Compose provider supports the features used by the environment, but
+not every case is portable to every runtime, host, or architecture. Cases with
+systemd, cgroup, diode/network, or native Linux host-network requirements have
+additional prerequisites described in the [catalogue](../documents/TESTCASES.md).
 
-- Registry images use fully qualified names (`docker.io/...`), so unattended
-  startup never needs a short-name registry selection prompt. Built images
-  are tagged `localhost/airgap-testenv-...:local`; these are local build tags,
-  not images to pull from a registry.
-- Repository and testcase bind mounts use shared SELinux labeling (`z`).
-  Multiple containers mount the same files, so do not change this to private
-  `Z` labeling. Docker Desktop accepts these options without needing SELinux.
-  The systemd test uses a private cgroup namespace and the engine-provided
-  cgroup mount, not a bind mount of the host's cgroup hierarchy.
-- LogGenerator's entrypoint is a read-only bind-mounted script, invoked with
-  `/bin/sh`, rather than a Compose `configs:` entry. This works with providers
-  that do not implement file-backed configs or their executable mode.
-- The main stack pins container names to the existing
-  `airgap-testenv-<service>-1` convention used by the runner and verification
-  hooks. Standalone testcase projects retain their separate namespaces.
+On SELinux hosts, repository and testcase mounts use shared `z` labeling because
+multiple containers mount the same files. Do not change this to private `Z`
+labeling, disable SELinux, or recursively change repository ownership. Use a
+dedicated checkout and testcase work directories: the mount option relabels
+source paths. Docker Desktop accepts the same mount options without SELinux.
 
-If you already copied `.env.example` to `.env`, update any old short image
-names there too: `.env` and exported variables override the new defaults.
-Keep using the same non-root user for rootless Podman pulls, builds, and runs.
-Do not disable SELinux or recursively change repository ownership/permissions.
-The `z` option relabels the mounted source paths, so use a dedicated checkout
-and testcase work directories, not system directories or your entire home.
+Provision Docker Engine and non-root user access as part of machine setup.
+Test wrappers require access to the already-running engine; they do not start
+or stop the system daemon with sudo. Leave Docker running after tests; runners
+remove their test containers, not the shared engine.
 
-Standalone shell testcases that create a temporary `WORK` directory precreate
-`lost-events` with mode `0755` as the invoking user before starting containers.
-This keeps the directory host-owned so root-created payload files can be
-removed without sudo. It does not repair permissions in artifacts from older
-runs or in other container-created directories.
+The Kafka certificates generated for this environment are disposable test
+credentials. Do not use production credentials. Generated broker keystores,
+truststores, and password files are readable by the broker's container user
+(and other local users); the test CA private key is not made world-readable.
 
-TC-30 also precreates its sink counter as the host user, because the helper
-writes it with mode `0600`. It waits for the full TCP byte count independently
-of Kafka consumer lag; unreadable counters fail explicitly rather than
-appearing as zero delivery. TC-39 precreates its public trust-entry directories
-with mode `0700` so they remain removable by the invoking user.
+## Portability and regression checks
 
-For unattended runs, provision Docker Engine and non-root user access during
-machine setup (`sudo systemctl enable --now docker` on Rocky Linux, then log
-out and reconnect after Docker group changes). Test wrappers should check
-`docker info` and fail if access is unavailable, not start or stop the system
-daemon with sudo. Leave Docker running after tests; testcase teardown removes
-the test containers without stopping the shared engine.
+Validate Compose models and portability invariants without starting containers:
 
-`generate-kafka-certs.sh` makes disposable broker keystores, the combined
-truststore, and broker password files readable by the broker's container user,
-including existing files from earlier runs. This is necessary with rootless
-Podman's UID mapping. These test files are readable by other local users;
-the test CA private key's permissions are not changed. Do not use production
-credentials in this environment.
+```bash
+python3 -m unittest discover -s tests/env -p 'test_compose_portability.py'
+```
 
-After updating the files, stop the old run and remove its old containers
-before retrying. From this directory, this removes only the main test stack
-and its volumes (not standalone testcase projects):
+Run from the repository root. This requires the Docker Compose CLI but does
+not pull images or start containers. Run verifier and host-owned fixture
+regressions without a container engine:
+
+```bash
+bash tests/env/test-verifier-regressions.sh
+```
+
+When retrying a failed main-stack run after changing images or Compose files,
+remove the old stack and its volumes first. From this directory:
 
 ```bash
 docker compose --profile '*' down -v --remove-orphans
 ./run-testcases.sh --log-dir ../../tmp/logs 1 -- -- --build --force-recreate
 ```
 
-The two `--` separators forward Compose options through both runners.
-Start with testcase 1 before retrying the full suite. The runner prints the
-startup log path before `compose up -d`; tail that file if startup stalls.
-`LG_MAX_WAIT` bounds producer monitoring, not image pulls or Compose startup.
+The two `--` separators forward Compose options through both runners. The
+second command starts with testcase 1; retry other cases by number as needed.
+The runner prints the startup-log path before `compose up -d`; tail that file
+if startup stalls. `LG_MAX_WAIT` bounds producer monitoring, not image pulls
+or Compose startup.
 
-Docker Compose remains the reference provider. Podman support depends on the
-installed provider implementing profiles, conditional/optional `depends_on`,
-and the CLI options used by each testcase. The systemd/cgroup and diode/network
-tests have additional host requirements; rootless Podman is not a substitute
-for the privileged host setup those tests require. TC-16 still requires native
-Linux host networking. These portability changes do not make every testcase
-suitable for every runtime or architecture.
+### Standalone Compose testcases
 
-Validate all Compose models and portability invariants without a running
-container engine:
-
-```bash
-python3 -m unittest discover -s tests/env -p 'test_compose_portability.py'
-```
-
-Run that command from the repository root; it requires the Docker Compose CLI
-but does not pull images or start containers.
-
-Run verifier and host-owned fixture regressions without a container engine:
-
-```bash
-bash tests/env/test-verifier-regressions.sh
-```
-
-TC-20 verifies recovery ordering from a temporary log file rather than piping
-large binary-containing logs through early-closing commands. TC-8 additionally
-tests real systemd reloads in a privileged container, marks its container
-environment explicitly, and reports the container state if startup fails.
-
-### Standalone testcase Compose overrides
-
-Standalone testcases with the same single-Kafka transfer topology compose a
-shared base with a small testcase override:
+Some isolated cases share a Kafka-transfer base Compose file and add a small
+case-specific override. For example:
 
 ```bash
 TC_WORK=/tmp/tc34 docker compose \
@@ -131,89 +93,10 @@ TC_WORK=/tmp/tc34 docker compose \
   config
 ```
 
-The base owns Kafka, topic initialization, the standard upstream/downstream
-services, and the producer. The override selects testcase configuration and
-adds only testcase-specific services, profiles, or volumes. Keep the base file
-first: relative paths and merge behavior are resolved from that model. Validate
-each merged model with `docker compose ... config` when changing either file.
-
-TC-34 and TC-35 use this convention. Their runners set `TC_WORK` and invoke
-both files automatically. TC-36 is a standalone Python/Docker testcase and is
-documented in the [testcase catalogue](../documents/TESTCASES.md#tc-36--kibana-log-integrity-report).
-TC-36 and TC-37 build `Dockerfile.integrity-report`, which pins the in-process
-Python cryptography dependencies used by the operator verifier; neither test
-depends on the host's OpenSSL executable or LibreSSL behavior.
-
-TC-38 runs just the real upstream and downstream in an isolated Compose network,
-using the random source and command sink instead of Kafka. It checks JSON repeat
-attributes with suppression enabled/disabled, missing-client-certificate retry
-spacing, and successful delivery after installing a valid client certificate:
-
-```bash
-./run-testcase.sh 38
-```
-
-It builds current Linux AMD64 binaries into a temporary directory and requires
-host Go, Python 3, OpenSSL, and Docker Compose. Failure artifacts are retained;
-`-pause` leaves its isolated containers and files available for inspection.
-TC-38 prints green PASS/red FAIL checks, including explicit sender rate-limiting
-and log rate-limiting results. Set `NO_COLOR=1` for plain output.
-
-TC-39 tests properties comments in real upstream/downstream containers using
-pinned mutual TLS, a random source, and a command sink (no Kafka):
-
-```bash
-./run-testcase.sh 39
-```
-
-It verifies full-line and space/tab-delimited inline comments, literal embedded
-hashes (`id=tcp#1`), successful SIGHUP reloads in both roles, rejection of an
-uncommented unknown setting, and payload delivery over existing and fresh
-connections. Requires host Go and Docker Compose; it generates temporary TLS
-identities using the application binaries. Checks are green/red (`NO_COLOR=1`
-disables colors). Failure artifacts are retained; `-pause` retains containers.
-
-TC-40 verifies downstream Kafka startup recovery:
-
-```bash
-./run-testcase.sh 40
-```
-
-It starts downstream before Kafka without an automatic restart policy, requires
-multiple WARN retries without FATAL, then starts Kafka and verifies payload
-delivery without a downstream process restart. A separate shutdown control
-checks SIGTERM interrupts a 60-second retry wait and exits with code 0.
-Requires host Go and Docker Compose. Uses a temporary build directory and an
-isolated network without published ports; supports `-pause` and `NO_COLOR=1`.
-
-TC-41 verifies a graceful upgrade from legacy JSON gap records:
-
-```bash
-./run-testcase.sh 41
-```
-
-It builds the real dedup from git tag `0.1.10-SNAPSHOT` (cached under
-`~/.cache/airgap-tests/`), lets it write legacy JSON gap records including a
-purged window, upgrades in place to the current dedup JAR (`make build-java`),
-adds a new gap, and requires the current `create` to export the legacy-only
-gaps and the new gap with no per-record parse errors. It also requires
-tombstones for the restored windows the current dedup purges. `TC41_CREATE_REF=0.1.16-SNAPSHOT` runs
-the same scenario with the old `create` as a negative control (must fail).
-Requires host Go, git tags and Docker Compose; Maven is used from the host or
-a Maven container. Supports `-pause` and `NO_COLOR=1`.
-
-TC-42 verifies that the gap topic stays bounded:
-
-```bash
-./run-testcase.sh 42
-```
-
-It runs the current dedup (`WINDOW_SIZE=100`, `MAX_WINDOWS=2`) against a gap
-topic with aggressive compaction settings, produces 20 windows with one gap
-each, and requires a tombstone and a WARN for each of the 18 purged windows,
-at most 2 keys left in the topic after compaction, and a `create` bundle with
-only the active windows' gaps. Requires host Go and Docker Compose. Supports
-`-pause` and `NO_COLOR=1`.
+Keep the base file first because relative paths and merge behavior are
+resolved from that model. Validate merged models with `docker compose ...
+config` when changing either file. The testcase catalogue describes which
+cases use standalone projects and their case-specific requirements.
 
 ## CI batch runs and machine-readable results
 
@@ -295,42 +178,13 @@ The runner's exit code fails the job automatically; `when: always` preserves
 reports and logs even on a failing batch. Avoid `|| true` on the runner command,
 which would hide test failures.
 
-### Staged TC-16: one or two Linux machines
+### Staged performance testcase
 
-TC-16 declares a standalone staged runner. Both `./run-testcases.sh 16` and
-ranges such as `./run-testcases.sh 1-` execute its single-machine benchmark,
-reporting the delivery verdict without a fixed throughput threshold.
-Batch runs reset only the dedicated TC-16 stacks and Kafka volumes before
-starting and remove them afterward, on success or failure. Diagnostic files
-are captured before cleanup. Direct runs retain data and require explicit
-resets before another fresh run. Direct execution also supports separate machines:
-
-```bash
-./tests/env/run-testcase.sh 16       # all phases on one machine (loopback)
-./tests/env/run-testcase.sh TC-16-DS # machine 2: start first
-./tests/env/run-testcase.sh TC-16-US # machine 1: prefill Kafka, then send
-```
-
-Generation, UDP transfer, deduplication and verification are separate phases.
-DS starts only its Kafka cluster and receiver initially; dedup and the
-LogGenerator verifier start after their input backlogs are complete.
-LogGenerator **1.1-9+** is required for `--from-beginning true`.
-This stack uses native Linux host networking so the sender uses the host's
-static ARP/routes. It retains containers, Kafka data and timing evidence.
-See [TC-16: separate US/DS instructions](TC-16.md) for prerequisites, commands,
-one-machine operation, static ARP examples, measurement limitations and reset.
-
-Already in `tests/env`? Omit the `tests/env/` prefix and do not `cd tests/env`
-again. `TC-16-DS` only waits for traffic: start `TC-16-US` separately, or use
-`./run-testcase.sh 16` to orchestrate both halves on one machine.
-After Ctrl-C, containers remain running. Reset is a script subcommand, not
-a shell command (these delete the respective TC-16 Kafka data):
-
-```bash
-# From tests/env, after stopping any active TC-16 runner:
-bash tc16-performance.sh reset-ds
-bash tc16-performance.sh reset-us
-```
+TC-16 is a staged benchmark with a dedicated runner and is included in batch
+runs. Unlike the other cases, it requires native Linux host networking; its
+machine-specific procedures, prerequisites, reset commands, and measurement
+guidance are in the [TC-16 guide](TC-16.md) and
+[catalogue entry](../documents/TESTCASES.md#tc-16--performance--throughput).
 
 Runner/report regressions can be tested without Docker:
 
@@ -473,13 +327,12 @@ Teardown is always guaranteed: the runner installs a trap on
 `EXIT`/`INT`/`TERM`/`HUP`, so even Ctrl-C or `kill` on the runner leaves zero
 containers behind (except in `-pause` mode).
 
-Chain several test cases back-to-back (each terminates automatically when its
-LogGenerator producer is done — see "LogGenerator automation" below):
+Chain several test cases back-to-back:
 
 ```bash
-./run-all-testcases.sh                # every testcases/NN.env
-./run-all-testcases.sh --from 9 --to 14
-./run-all-testcases.sh 9 11 12
+./run-testcases.sh              # all available cases
+./run-testcases.sh 9-14
+./run-testcases.sh 9,11,12
 ```
 
 See [TESTCASES.md](../documents/TESTCASES.md) for the full catalogue and
@@ -739,10 +592,11 @@ brokers in this environment, so `LG_SED` is empty by default.
 
 ### Chaining
 
-`./run-all-testcases.sh` iterates over `testcases/NN.env` (optionally
-filtered with `--from`/`--to` or an explicit list of ids). Each case is run
-through `run-testcase.sh`, and the stack is torn down between cases, so the
-whole chain is a clean sequence of independent runs.
+`./run-testcases.sh` selects cases by ID, comma-separated list, or range.
+Each case runs through `run-testcase.sh`, with teardown between cases, so a
+batch is a sequence of independent runs. See the
+[batch runner guide](#ci-batch-runs-and-machine-readable-results) for examples
+and report options.
 
 ## Picking a testcase manually
 
@@ -912,16 +766,11 @@ Keep **stateful** matching (`-m conntrack`, `ct state established,related`)
 **out** of the ruleset. A stateful rule turns the firewall back into a
 bidirectional device and defeats the purpose of the test.
 
-## What this environment does *not* do yet
+## Scope boundaries
 
-* No automated LogGenerator inside the stack — many testcases describe
-  LogGenerator as the traffic source. Install it on either machine and point
-  it at the appropriate Kafka port manually, following `TESTCASES.md`.
-* No automated pass/fail assertions. The runner starts the right services with
-  the right configs; verification is still a human read of the logs.
-* No multi-instance dedup (`dedup@1`, `dedup@2`, …) in compose. Use the
-  bare-metal script in `config/testcases/launchDedup.sh` for that.
-* No TLS listener on the Kafka brokers by default. The real deployment also
-  exposes an `SSL://...:9094/8094` listener. Enable it per-testcase by
-  setting the `KAFKA_SSL_*` env vars and mounting a keystore (see TC-4,
-  TC-17, TC-18).
+This Compose environment focuses on integration and end-to-end testing; package
+installation smoke tests are covered separately in [`tests/`](../README.md).
+It does not model multiple concurrent dedup instances (`dedup@1`, `dedup@2`,
+and so on); use `config/testcases/launchDedup.sh` for that deployment shape.
+Cases that need real multi-host networking or special host privileges require
+the setup described in the [testcase catalogue](../documents/TESTCASES.md).

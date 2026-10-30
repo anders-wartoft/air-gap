@@ -2,16 +2,12 @@ package downstream
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"errors"
 	"fmt"
-	"io"
-	"net"
 	"strconv"
 	"time"
 
 	"github.com/IBM/sarama"
+	"sitia.nu/airgap/src/kafka"
 	"sitia.nu/airgap/src/logging"
 )
 
@@ -24,43 +20,7 @@ func parseKafkaRetryInterval(value string) (int, error) {
 }
 
 func retryableKafkaStartupError(err error) bool {
-	var configError sarama.ConfigurationError
-	var certificateError *tls.CertificateVerificationError
-	var unknownAuthority x509.UnknownAuthorityError
-	var hostnameError x509.HostnameError
-	var invalidCertificate x509.CertificateInvalidError
-	if errors.As(err, &configError) || errors.As(err, &certificateError) ||
-		errors.As(err, &unknownAuthority) || errors.As(err, &hostnameError) ||
-		errors.As(err, &invalidCertificate) {
-		return false
-	}
-	for _, permanent := range []error{
-		sarama.ErrSASLAuthenticationFailed, sarama.ErrUnsupportedSASLMechanism,
-		sarama.ErrTopicAuthorizationFailed, sarama.ErrGroupAuthorizationFailed,
-		sarama.ErrClusterAuthorizationFailed, sarama.ErrUnsupportedVersion,
-		sarama.ErrInvalidRequest,
-	} {
-		if errors.Is(err, permanent) {
-			return false
-		}
-	}
-	var networkError net.Error
-	if errors.As(err, &networkError) || errors.Is(err, io.EOF) ||
-		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, sarama.ErrOutOfBrokers) {
-		return true
-	}
-	for _, transient := range []error{
-		sarama.ErrBrokerNotAvailable, sarama.ErrLeaderNotAvailable,
-		sarama.ErrNotLeaderForPartition, sarama.ErrRequestTimedOut,
-		sarama.ErrNetworkException, sarama.ErrOffsetsLoadInProgress,
-		sarama.ErrConsumerCoordinatorNotAvailable, sarama.ErrNotCoordinatorForConsumer,
-		sarama.ErrReplicaNotAvailable,
-	} {
-		if errors.Is(err, transient) {
-			return true
-		}
-	}
-	return false
+	return kafka.RetryableStartupError(err)
 }
 
 func kafkaProducerAttempt(ctx context.Context, create func() (sarama.AsyncProducer, error)) (sarama.AsyncProducer, error) {

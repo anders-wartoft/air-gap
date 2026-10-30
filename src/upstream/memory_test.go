@@ -253,3 +253,24 @@ func TestApplyGoMemoryLimitUsesEffectiveLimit(t *testing.T) {
 		t.Fatalf("runtime limit=%d, want 700", got)
 	}
 }
+
+func TestKafkaRetryIntervalOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upstream.properties")
+	if err := os.WriteFile(path, []byte("kafkaRetryInterval=1500\n"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	fromFile, err := ReadParameters(path, DefaultConfiguration())
+	if err != nil || fromFile.kafkaRetryInterval != 1500 {
+		t.Fatalf("file kafkaRetryInterval = %d (err %v), want 1500", fromFile.kafkaRetryInterval, err)
+	}
+
+	t.Setenv("AIRGAP_UPSTREAM_KAFKA_RETRY_INTERVAL", "2500")
+	if fromEnvironment := overrideConfiguration(DefaultConfiguration()); fromEnvironment.kafkaRetryInterval != 2500 {
+		t.Fatalf("environment kafkaRetryInterval = %d, want 2500", fromEnvironment.kafkaRetryInterval)
+	}
+
+	fromCommandLine := parseCommandLineOverrides([]string{"upstream", "--kafkaRetryInterval=3500"}, DefaultConfiguration())
+	if fromCommandLine.kafkaRetryInterval != 3500 {
+		t.Fatalf("command-line kafkaRetryInterval = %d, want 3500", fromCommandLine.kafkaRetryInterval)
+	}
+}

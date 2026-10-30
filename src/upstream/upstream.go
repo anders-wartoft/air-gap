@@ -144,22 +144,24 @@ func UpdateKafkaStatus(newStatus string) {
 	if kafkaStatus != newStatus {
 		previousKafkaStatus = kafkaStatus
 		kafkaStatus = newStatus
+		// The new status is the record identity; the previous status is a
+		// parameter, so a status alternating during an outage is summarized.
 		if newStatus == "running" {
-			Logger.Infof(logging.Event(logging.EventKafkaConnectionRestored,
+			Logger.InfoT(logging.Event(logging.EventKafkaConnectionRestored,
 				logging.Str("server.address", config.bootstrapServers),
 				logging.Str("airgap.health.status", newStatus),
-				logging.Str("airgap.health.status.previous", previousKafkaStatus),
 				logging.Str("airgap.health.transition", "failed.to.healthy"),
-			), "Kafka status restored to running (was: %s)", previousKafkaStatus)
+			), "Kafka status restored to running (was: {airgap.health.status.previous})",
+				logging.Str("airgap.health.status.previous", previousKafkaStatus))
 		} else {
-			Logger.Errorf(logging.Event(logging.EventKafkaConnect,
+			Logger.ErrorT(logging.Event(logging.EventKafkaConnect,
 				logging.Failure(),
 				logging.Str("server.address", config.bootstrapServers),
 				logging.Str("airgap.health.status", newStatus),
-				logging.Str("airgap.health.status.previous", previousKafkaStatus),
 				logging.Str("airgap.health.transition", "healthy.to.failed"),
 				logging.Error("_OTHER"),
-			), "Kafka status changed to error: %s (was: %s)", newStatus, previousKafkaStatus)
+			), "Kafka status changed to error: {airgap.health.status} (was: {airgap.health.status.previous})",
+				logging.Str("airgap.health.status.previous", previousKafkaStatus))
 		}
 	}
 	kafkaStatusMu.Unlock()

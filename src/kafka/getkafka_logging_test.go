@@ -112,3 +112,15 @@ func TestSaramaTextOutputFollowsLogRotation(t *testing.T) {
 		t.Fatalf("Sarama output was written to the rotated log: %q", rotated)
 	}
 }
+
+func TestSaramaMessageTextRemovesPrefixAndTimestamp(t *testing.T) {
+	for input, want := range map[string]string{
+		"[SARAMA] 2026/10/29 14:44:22 Failed to connect to broker kafka:9092: dial tcp: connection refused\n": "Failed to connect to broker kafka:9092: dial tcp: connection refused",
+		"[SARAMA] client/metadata got error\n": "client/metadata got error",
+		"plain error":                          "plain error",
+	} {
+		if got := saramaMessageText(input); got != want {
+			t.Errorf("saramaMessageText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

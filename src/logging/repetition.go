@@ -17,13 +17,15 @@ var repetitions = make(map[repeatKey]*repeatState)
 var repeatTimer *time.Timer
 
 type repeatKey struct {
-	body  string
-	level LogLevel
-	attrs string
+	body     string // message, or the template of a templated record
+	level    LogLevel
+	attrs    string
+	template bool
 }
 
 type repeatState struct {
 	attrs       Attrs
+	params      []Attr // latest parameters of a templated record
 	count       int64
 	lastEmitted time.Time
 	lastSeen    time.Time
@@ -93,10 +95,15 @@ func flushRepetitionLocked(now time.Time, key repeatKey, entry *repeatState) {
 			break
 		}
 	}
-	body := fmt.Sprintf("Message repeated %d times: %s", entry.count, key.body)
+	message, recordAttrs := key.body, entry.attrs
+	if key.template {
+		message = renderTemplate(key.body, entry.attrs, entry.params)
+		recordAttrs = templateAttrs(entry.attrs, key.body, entry.params)
+	}
+	body := fmt.Sprintf("Message repeated %d times: %s", entry.count, message)
 	if logFormat == FormatOTel {
-		body = key.body
-		attrs = entry.attrs
+		body = message
+		attrs = recordAttrs
 		if entry.count != 1 {
 			attrs = Attrs{Int("airgap.repeat.count", entry.count)}.Merge(attrs)
 		}
@@ -107,6 +114,16 @@ func flushRepetitionLocked(now time.Time, key repeatKey, entry *repeatState) {
 }
 
 func suppressRepeatedLocked(now time.Time, level LogLevel, attrs Attrs, body string) bool {
+	return suppressLocked(now, level, attrs, body, false, nil)
+}
+
+// suppressRepeatedTemplateLocked groups templated records by template,
+// severity and identity attributes; params only update the latest values.
+func suppressRepeatedTemplateLocked(now time.Time, level LogLevel, attrs Attrs, template string, params []Attr) bool {
+	return suppressLocked(now, level, attrs, template, true, params)
+}
+
+func suppressLocked(now time.Time, level LogLevel, attrs Attrs, body string, template bool, params []Attr) bool {
 	if repeatInterval == 0 || level == FATAL {
 		resetRepetitionLocked(now)
 		return false
@@ -115,7 +132,7 @@ func suppressRepeatedLocked(now time.Time, level LogLevel, attrs Attrs, body str
 	for _, attr := range attrs {
 		fmt.Fprintf(&identity, "%q:%q:%t:%t;", attr.Key, attr.Value, attr.IsInt, attr.IsBool)
 	}
-	key := repeatKey{body: body, level: level, attrs: identity.String()}
+	key := repeatKey{body: body, level: level, attrs: identity.String(), template: template}
 	entry := repetitions[key]
 	if entry != nil && now.Sub(entry.lastSeen) >= repeatInterval {
 		flushRepetitionLocked(now, key, entry)
@@ -135,13 +152,14 @@ func suppressRepeatedLocked(now time.Time, level LogLevel, attrs Attrs, body str
 			delete(repetitions, oldest)
 		}
 		repetitions[key] = &repeatState{
-			attrs: slices.Clone(attrs), lastEmitted: now, lastSeen: now,
+			attrs: slices.Clone(attrs), params: slices.Clone(params), lastEmitted: now, lastSeen: now,
 		}
 		scheduleRepeatTimerLocked(now)
 		return false
 	}
 	entry.count++
 	entry.lastSeen = now
+	entry.params = slices.Clone(params)
 	if now.Sub(entry.lastEmitted) >= repeatInterval {
 		flushRepetitionLocked(now, key, entry)
 	}

@@ -299,13 +299,16 @@ func connectToKafka(ctx context.Context, config TransferConfiguration) error {
 			}
 
 			if producerErr != nil {
-				Logger.Errorf(logging.Event(logging.EventKafkaProduce,
+				// The message key is a parameter so failures with the same
+				// destination and error are summarized instead of logged per message.
+				Logger.ErrorT(logging.Event(logging.EventKafkaProduce,
 					logging.Failure(),
 					logging.Str("messaging.destination.name", topic),
 					logging.Decimal("messaging.destination.partition.id", int64(partition)),
-					logging.Str("airgap.message.id", key),
 					logging.ErrorType(producerErr.Err),
-				), "Failed to send message: topic=%s partition=%d key=%s error=%v", topic, partition, key, producerErr.Err)
+					logging.ErrMessage(producerErr.Err),
+				), "Failed to send message: topic={messaging.destination.name} partition={messaging.destination.partition.id} key={airgap.message.id} error={error.message}",
+					logging.Str("airgap.message.id", key))
 			} else {
 				Logger.Errorf(logging.Event(logging.EventKafkaProduce,
 					logging.Failure(),

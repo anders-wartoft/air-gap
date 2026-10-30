@@ -34,11 +34,15 @@ func kafkaConsumerSettings(config TransferConfiguration) (kafka.ConsumerSettings
 	if config.kafkaMaxProcessingTimeMs <= 0 || int64(config.kafkaMaxProcessingTimeMs) > maxProcessingTimeMs {
 		return kafka.ConsumerSettings{}, fmt.Errorf("kafkaMaxProcessingTimeMs must be between 1 and %d", maxProcessingTimeMs)
 	}
+	if config.kafkaRetryInterval <= 0 || int64(config.kafkaRetryInterval) > maxProcessingTimeMs {
+		return kafka.ConsumerSettings{}, fmt.Errorf("kafkaRetryInterval must be between 1 and %d", maxProcessingTimeMs)
+	}
 	return kafka.ConsumerSettings{
-		FetchDefaultBytes: int32(config.kafkaFetchDefaultBytes),
-		FetchMaxBytes:     int32(config.kafkaMaxMessageBytes),
-		ChannelBufferSize: config.kafkaChannelBufferSize,
-		MaxProcessingTime: time.Duration(int64(config.kafkaMaxProcessingTimeMs)) * time.Millisecond,
+		FetchDefaultBytes:    int32(config.kafkaFetchDefaultBytes),
+		FetchMaxBytes:        int32(config.kafkaMaxMessageBytes),
+		ChannelBufferSize:    config.kafkaChannelBufferSize,
+		MaxProcessingTime:    time.Duration(int64(config.kafkaMaxProcessingTimeMs)) * time.Millisecond,
+		StartupRetryInterval: time.Duration(int64(config.kafkaRetryInterval)) * time.Millisecond,
 	}, nil
 }
 

@@ -69,3 +69,24 @@ func TestKafkaConsumerSettingsRejectInt32Overflow(t *testing.T) {
 		})
 	}
 }
+
+func TestKafkaRetryIntervalDefaultAndSettings(t *testing.T) {
+	config := DefaultConfiguration()
+	settings, err := kafkaConsumerSettings(config)
+	if err != nil {
+		t.Fatalf("kafkaConsumerSettings() error = %v", err)
+	}
+	if settings.StartupRetryInterval != 5*time.Second {
+		t.Fatalf("StartupRetryInterval = %s, want 5s", settings.StartupRetryInterval)
+	}
+
+	config.kafkaRetryInterval = 250
+	if settings, err = kafkaConsumerSettings(config); err != nil || settings.StartupRetryInterval != 250*time.Millisecond {
+		t.Fatalf("StartupRetryInterval = %s (err %v), want 250ms", settings.StartupRetryInterval, err)
+	}
+
+	config.kafkaRetryInterval = 0
+	if _, err := kafkaConsumerSettings(config); err == nil {
+		t.Fatal("kafkaConsumerSettings() accepted a zero kafkaRetryInterval")
+	}
+}
