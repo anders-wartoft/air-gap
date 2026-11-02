@@ -12,7 +12,7 @@ import unittest
 
 
 HERE = Path(__file__).resolve().parent
-TRANSFER_OVERRIDES = {"tc34", "tc35", "tc40", "tc43", "tc44"}
+TRANSFER_OVERRIDES = {"tc34", "tc35", "tc40", "tc43", "tc44", "tc45"}
 
 
 @unittest.skipUnless(shutil.which("docker"), "Docker Compose CLI is required")

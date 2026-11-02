@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.1.17.2-SNAPSHOT
+
+### Mixed-version upgrade testcase
+
+- TC-45 builds the exact `0.1.10-SNAPSHOT` and `0.1.17.1-SNAPSHOT`
+  release tags and verifies Kafka event delivery over UDP and plain TCP in
+  both version directions, including empty and fragmented binary payloads.
+  Transport TLS is outside this testcase's scope.
+
 ## 0.1.17.1-SNAPSHOT
 
 ### Kafka statistics recovery

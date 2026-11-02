@@ -6223,3 +6223,78 @@ binaries built before REQ-56 the processes recover, but downstream writes one
 line per failed send (about 700) and the logging check fails.
 `NO_COLOR=1` disables colors. Successful runs remove containers and temporary
 files; failed runs retain artifacts at the printed path. `-pause` retains both.
+
+## TC-45 — Mixed-version upgrade: UDP and plain TCP
+
+Verify event compatibility between `0.1.10-SNAPSHOT` (legacy) and
+`0.1.17.1-SNAPSHOT` (modern), independently of the current working tree.
+
+* Covers: REQ-19 (fragmented payloads), REQ-35 (TCP transport).
+* Added in: 0.1.17.1-SNAPSHOT.
+* Runner: [tc45-mixed-version-upgrade-test.sh](../env/tc45-mixed-version-upgrade-test.sh),
+  selected by [45.env](../env/testcases/45.env).
+* Compose: [docker-compose.tc45.yml](../env/docker-compose.tc45.yml) over
+  the shared Kafka-transfer base.
+
+### Run
+
+```bash
+cd tests/env
+./run-testcase.sh 45
+# Optional: retain containers and artifacts.
+./run-testcase.sh 45 -pause
+```
+
+Requires host Git, Go, Make, Docker Compose, a running Docker daemon, and
+both release tags locally. Missing tags can be fetched with
+`git fetch origin tag 0.1.10-SNAPSHOT tag 0.1.17.1-SNAPSHOT`.
+The runner builds Linux AMD64 binaries from archived release sources,
+using each release's version generator, and records the resolved commit
+IDs. ARM64 Docker hosts require AMD64 emulation. No prebuilt application
+binaries or LogGenerator installation are required.
+
+### Matrix
+
+| Upstream | Downstream | Transport | Expected |
+| --- | --- | --- | --- |
+| 0.1.10-SNAPSHOT | 0.1.17.1-SNAPSHOT | UDP | Exact delivery |
+| 0.1.17.1-SNAPSHOT | 0.1.10-SNAPSHOT | UDP | Exact delivery |
+| 0.1.10-SNAPSHOT | 0.1.17.1-SNAPSHOT | Plain TCP | Exact delivery |
+| 0.1.17.1-SNAPSHOT | 0.1.10-SNAPSHOT | Plain TCP | Exact delivery |
+
+Transport TLS, including pinned keys, is intentionally excluded.
+`0.1.10-SNAPSHOT` does not implement transport TLS. This case does not
+certify encrypted UDP, compression, configuration-file migration, or a
+live rolling restart; it checks the mixed-version pairings encountered
+when either endpoint is upgraded first.
+
+### Procedure and assertions
+
+1. Start an isolated Kafka broker, with no published ports. For each matrix
+   row, create fresh single-partition source and destination topics.
+2. The [fixture](../env/lib/tc45fixture/main.go) seeds six deterministic
+   records of sizes 0, 1, 128, 1400, 8192, and 32768 bytes, checking source
+   offsets 0–5. Binary values include non-text bytes.
+3. Start downstream, wait up to 60 seconds for its listener log, then start
+   upstream. Use `source=kafka`, `target=kafka`, `payloadSize=1400`,
+   `encryption=false`, and compression disabled. Translate the source topic
+   to the destination; startup/status events go to a separate internal topic.
+   The larger records exercise multipart reassembly.
+4. Within 40 seconds, require exactly six destination records whose keys
+   are the original `sourceTopic_0_offset` identities and whose values
+   match byte-for-byte, including the empty value. Unknown identities,
+   altered values, consumer errors, missing records, and duplicates fail.
+   Observe for another two seconds after all six arrive to detect duplicates.
+5. Require both role containers still running with restart count zero and
+   no FATAL/PANIC log entries. Save per-scenario configs, logs, and verdicts,
+   stop the roles, and repeat for the next row.
+
+### Expected result and artifacts
+
+All four rows and the final TC-45 verdict pass. `NO_COLOR=1` disables colors.
+Normal success removes the isolated Compose stack and temporary files.
+Failure returns nonzero, removes the stack, and retains artifacts at the
+printed path. `-pause` retains both the stack and artifacts; the last
+scenario's roles have been stopped, while Kafka remains available.
+The artifact directory contains `legacy.commit`, `modern.commit`, archived
+sources and built binaries, plus each scenario's configurations and logs.

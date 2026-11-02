@@ -1,0 +1,23 @@
+services:
+  upstream:
+    platform: linux/amd64
+    volumes:
+      - ${TC_WORK}:/airgap/work:z
+    entrypoint: ["/airgap/work/${TC45_UPSTREAM:-modern}/upstream"]
+    command: ["/airgap/work/upstream.properties"]
+    restart: "no"
+
+  downstream:
+    platform: linux/amd64
+    volumes:
+      - ${TC_WORK}:/airgap/work:z
+    entrypoint: ["/airgap/work/${TC45_DOWNSTREAM:-modern}/downstream"]
+    command: ["/airgap/work/downstream.properties"]
+    restart: "no"
+
+  fixture:
+    platform: linux/amd64
+    image: localhost/airgap-testenv-kafka-transfer:local
+    volumes:
+      - ${TC_WORK}:/airgap/work:z
+    entrypoint: ["/airgap/work/fixture"]
