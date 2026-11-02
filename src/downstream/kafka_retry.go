@@ -62,6 +62,7 @@ func newKafkaProducerWithRetry(ctx context.Context, brokers string, interval tim
 		}
 		producer, err := kafkaProducerAttempt(ctx, create)
 		if err == nil {
+			UpdateKafkaStatus("running")
 			return producer, nil
 		}
 		if ctx.Err() != nil {
@@ -70,6 +71,7 @@ func newKafkaProducerWithRetry(ctx context.Context, brokers string, interval tim
 		if !retryableKafkaStartupError(err) {
 			return nil, err
 		}
+		UpdateKafkaStatus(fmt.Sprintf("Kafka producer unavailable: %v", err))
 		Logger.Warnf(logging.Event(logging.EventKafkaConnect,
 			logging.Failure(),
 			logging.Str("server.address", brokers),

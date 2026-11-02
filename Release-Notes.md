@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.1.17.1-SNAPSHOT
+
+### Kafka statistics recovery
+
+- Downstream clears its Kafka error status after startup connects or a
+  message is successfully acknowledged. Producer results now have a single
+  owner per channel, so status updates and failure logs cannot steal results
+  from each other.
+- Upstream health uses consumer errors, session establishment, and message
+  receipt, rather than matching words in Sarama diagnostic logs. A quiet
+  period alone no longer clears an error. Sarama diagnostics remain logged.
+
 ## 0.1.17-SNAPSHOT
 
 ### Upstream Kafka startup recovery

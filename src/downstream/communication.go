@@ -279,6 +279,17 @@ func connectToKafka(ctx context.Context, config TransferConfiguration) error {
 	if err != nil {
 		return err
 	}
+	monitorKafkaProducer(producer)
+	Logger.Infof(logging.Event(logging.EventKafkaConnect,
+		logging.Str("server.address", config.bootstrapServers),
+		logging.Int("airgap.kafka.batch.size", int64(config.batchSize)),
+	), "Connected to Kafka. Creating startup message...\n")
+	kafka.SetProducer(producer, config.batchSize)
+	return nil
+}
+
+// These are the sole readers of the producer result channels.
+func monitorKafkaProducer(producer sarama.AsyncProducer) {
 	go func() {
 		for producerErr := range producer.Errors() {
 			topic := ""
@@ -299,6 +310,7 @@ func connectToKafka(ctx context.Context, config TransferConfiguration) error {
 			}
 
 			if producerErr != nil {
+				UpdateKafkaStatus(fmt.Sprintf("Kafka producer error: %v", producerErr.Err))
 				// The message key is a parameter so failures with the same
 				// destination and error are summarized instead of logged per message.
 				Logger.ErrorT(logging.Event(logging.EventKafkaProduce,
@@ -310,6 +322,7 @@ func connectToKafka(ctx context.Context, config TransferConfiguration) error {
 				), "Failed to send message: topic={messaging.destination.name} partition={messaging.destination.partition.id} key={airgap.message.id} error={error.message}",
 					logging.Str("airgap.message.id", key))
 			} else {
+				UpdateKafkaStatus("Kafka producer error: unknown producer error")
 				Logger.Errorf(logging.Event(logging.EventKafkaProduce,
 					logging.Failure(),
 				), "Failed to send message: unknown producer error")
@@ -318,6 +331,10 @@ func connectToKafka(ctx context.Context, config TransferConfiguration) error {
 	}()
 	go func() {
 		for msg := range producer.Successes() {
+			if msg == nil {
+				continue
+			}
+			UpdateKafkaStatus("running")
 			if Logger.CanLog(logging.DEBUG) {
 				// Log at most 80 characters from msg. Note that msg can be shorter
 				valueBytes, err := msg.Value.Encode()
@@ -345,14 +362,4 @@ func connectToKafka(ctx context.Context, config TransferConfiguration) error {
 			}
 		}
 	}()
-	Logger.Infof(logging.Event(logging.EventKafkaConnect,
-		logging.Str("server.address", config.bootstrapServers),
-		logging.Int("airgap.kafka.batch.size", int64(config.batchSize)),
-	), "Connected to Kafka. Creating startup message...\n")
-	kafka.SetProducer(producer, config.batchSize)
-	// Set error callback to report Kafka errors to status
-	kafka.SetErrorCallback(UpdateKafkaStatus)
-	// Start a new goroutine for sending kafka messages
-	kafka.StartBackgroundThread()
-	return nil
 }

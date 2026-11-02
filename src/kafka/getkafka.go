@@ -52,35 +52,17 @@ type TLSConfiguration struct {
 
 // ConfigureSaramaLogger sets up the Sarama library logger with a [SARAMA] prefix
 // This should be called once at the start of any function that uses Sarama
-// Also provides a hook to report errors via callback if provided
-func ConfigureSaramaLogger(errorCallback ...func(string)) {
-	var callback func(string)
-	if len(errorCallback) > 0 {
-		callback = errorCallback[0]
-	}
-
-	sarama.Logger = log.New(&saramaLogWriter{
-		errorCallback: callback,
-	}, "[SARAMA] ", log.LstdFlags)
+func ConfigureSaramaLogger() {
+	sarama.Logger = log.New(&saramaLogWriter{}, "[SARAMA] ", log.LstdFlags)
 }
 
 // saramaLogWriter preserves the historical direct writer in text mode. In OTel
 // mode it routes Sarama through the application logger so third-party records
 // cannot corrupt an otherwise line-delimited OTLP/JSON stream.
-type saramaLogWriter struct {
-	errorCallback func(string)
-}
+type saramaLogWriter struct{}
 
 func (w *saramaLogWriter) Write(p []byte) (n int, err error) {
 	msg := string(p)
-
-	if w.errorCallback != nil && (strings.Contains(msg, "leaderless") ||
-		strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "dial tcp") ||
-		strings.Contains(msg, "failed") ||
-		strings.Contains(msg, "error")) {
-		w.errorCallback("Kafka cluster issue: " + saramaMessageText(msg))
-	}
 
 	if logging.Logger.GetFormat() == logging.FormatOTel {
 		logging.Logger.Info(logging.Event(logging.EventKafkaClient,
@@ -90,16 +72,6 @@ func (w *saramaLogWriter) Write(p []byte) (n int, err error) {
 	}
 
 	return logging.StdLogger.Writer().Write(p)
-}
-
-// saramaMessageText removes the "[SARAMA] " prefix and the log.LstdFlags
-// timestamp so that the same Sarama message always yields the same status text.
-func saramaMessageText(msg string) string {
-	text := strings.TrimSpace(strings.TrimPrefix(msg, "[SARAMA] "))
-	if len(text) >= 20 && text[4] == '/' && text[7] == '/' && text[10] == ' ' && text[13] == ':' && text[16] == ':' && text[19] == ' ' {
-		text = text[20:]
-	}
-	return text
 }
 
 func SetVerbose(enabled bool) {
@@ -593,7 +565,7 @@ func ReadFromKafkaWithContextSettings(ctx context.Context, name string, offsetSe
 	), "Starting a new Sarama consumer (WithContext): "+name+" with offset: "+fmt.Sprintf("%d", offsetSeconds))
 
 	// Configure Sarama logger with error callback to capture metadata issues
-	ConfigureSaramaLogger(errorCallback...)
+	ConfigureSaramaLogger()
 
 	// Helper function to report errors
 	reportError := func(msg string) {
@@ -678,7 +650,7 @@ func ReadFromKafkaWithContextSettings(ctx context.Context, name string, offsetSe
 		delay:         time.Duration(offsetSeconds) * time.Second,
 		callback:      callbackFunction,
 		beforeMessage: settings.BeforeMessage,
-		onSetup:       func() { reportError("running") },
+		onHealthy:     func() { reportError("running") },
 	}
 
 	// Retry transient failures (for example local Kafka still starting at
@@ -794,46 +766,26 @@ func ReadFromKafkaWithContextSettings(ctx context.Context, name string, offsetSe
 		logging.Str("messaging.consumer.group.name", group),
 	), "Sarama consumer (WithContext) %s up and running!...", name)
 
-	// Track if we've reported an error recently to avoid spam
-	var lastErrorTime time.Time
-	var lastErrorMsg string
-
-	// Monitor Kafka health with periodic checks
 	go func() {
-		healthCheckTicker := time.NewTicker(10 * time.Second)
-		defer healthCheckTicker.Stop()
-
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-healthCheckTicker.C:
-				// If we had an error but it's been more than 30 seconds, try to clear it
-				if lastErrorMsg != "" && time.Since(lastErrorTime) > 30*time.Second {
-					// Assume error has resolved if no new errors in last 30 seconds
-					Logger.Info(logging.Event(logging.EventKafkaConnectionRestored,
-						logging.Str("server.address", brokers),
-						logging.Str("airgap.kafka.consumer.name", name),
-						logging.Str("airgap.health.transition", "failed.to.healthy"),
-					), "Kafka cluster appears to have recovered")
-					reportError("running")
-					lastErrorMsg = ""
+			case err, ok := <-client.Errors():
+				if !ok {
+					return
 				}
-			case err := <-client.Errors():
 				if err != nil {
 					errMsg := fmt.Sprintf("Kafka error: %v", err)
-					if errMsg != lastErrorMsg {
-						Logger.Errorf(logging.Event(logging.EventKafkaConsume,
-							logging.Failure(),
-							logging.Str("server.address", brokers),
-							logging.Str("airgap.kafka.consumer.name", name),
-							logging.Str("airgap.health.transition", "healthy.to.failed"),
-							logging.ErrorType(err),
-						), "%s", errMsg)
-						reportError(errMsg)
-						lastErrorMsg = errMsg
-						lastErrorTime = time.Now()
-					}
+					Logger.ErrorT(logging.Event(logging.EventKafkaConsume,
+						logging.Failure(),
+						logging.Str("server.address", brokers),
+						logging.Str("airgap.kafka.consumer.name", name),
+						logging.Str("airgap.health.transition", "healthy.to.failed"),
+						logging.ErrorType(err),
+						logging.ErrMessage(err),
+					), "Kafka error: {error.message}")
+					reportError(errMsg)
 				}
 			}
 		}
@@ -883,15 +835,15 @@ type Consumer struct {
 	delay         time.Duration
 	callback      func(string, []byte, time.Time, []byte) bool
 	beforeMessage func(context.Context) error
-	onSetup       func()
+	onHealthy     func()
 }
 
 // Setup is run at the beginning of a new session, before ConsumeClaim
 func (consumer *Consumer) Setup(sarama.ConsumerGroupSession) error {
 	// A session only starts when the brokers answer, so this is where a
 	// Kafka outage is known to be over.
-	if consumer.onSetup != nil {
-		consumer.onSetup()
+	if consumer.onHealthy != nil {
+		consumer.onHealthy()
 	}
 	// Mark the consumer as ready
 	close(consumer.ready)
@@ -924,6 +876,9 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 					logging.Str("airgap.kafka.stage", "claim.closed"),
 				), "message channel was closed")
 				return nil
+			}
+			if consumer.onHealthy != nil {
+				consumer.onHealthy()
 			}
 			sleepTime := time.Until(message.Timestamp.Add(-consumer.delay))
 			if sleepTime > 0 {

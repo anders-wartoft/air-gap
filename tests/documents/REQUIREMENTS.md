@@ -637,6 +637,9 @@ upstream warns at startup when it is not.
 >   with `deliveryFilter`, `partitionOffset`, and similar);
 > * the encryption algorithm must be well documented, with its properties
 >   and non-properties clearly stated.
+>
+> Mutual authentication, session-key exchange, replay protection, and key
+> lifecycle requirements are specified in REQ-57.
 
 ## REQ-49 — SO_RXQ_OVFL kernel drop counter
 
@@ -960,6 +963,10 @@ Existing CA-based TCP tests and UDP/Kafka behavior must remain unchanged.
 Certificate wrappers keep REQ-45 applicable; trust does not require an
 issuer in pinned mode. REQ-46's TCP/UDP certificate reuse is not extended
 to raw pinned-key or automatic-rotation support by this requirement.
+
+REQ-58 defines a separate CA-issued credential lifecycle. It must not change
+pin matching, automatically authorize newly issued keys in pinned mode, or
+activate the pinned automatic-rotation protocol in CA mode.
 
 Before executable tests or implementation, approve exact configuration
 names, command/file formats, supported algorithm profile, reloadable
@@ -1428,4 +1435,401 @@ Acceptance criteria:
 5. With the default repeat interval and 20 events/s, downstream writes at most
    60 send-failure lines for the outage, with summaries for the suppressed
    failures.
+6. Downstream reports startup retry failures and clears the error after
+   producer creation succeeds or a message is acknowledged. Each producer
+   result channel has a single reader so status updates and logging observe
+   every result rather than competing for it.
+7. Upstream clears errors on consumer session establishment or message
+   receipt. Sarama diagnostic text remains logged but does not directly set
+   connection health; absence of errors for a fixed time is not evidence of
+   recovery. Actual consumer errors and failed operations remain observable.
 
+## REQ-57 — Mutually authenticated UDP encryption
+
+> UDP transfer must provide confidentiality, integrity, and mutual
+> authentication between each upstream and its intended downstream. A
+> downstream must support multiple independently authorized upstreams. The
+> protocol must work over a one-way diode and must not depend on a return path.
+
+* Status: **Proposed; implementation and testcase coverage pending**.
+* Scope: Upstream-to-downstream UDP data and protocol messages. TCP and Kafka
+  security are unchanged.
+* Relationship: This refines the UDP crypto profile in REQ-48. Existing
+  unauthenticated or legacy encrypted packets must not be accepted when
+  authenticated encryption is required. REQ-58 adds CA-issued identities and
+  preprovisioned recipient certificates as an explicit trust option; it does
+  not turn CA trust into exact-key pinning or vice versa.
+
+### REQ-57.01 — Peer identity and authorization
+
+1. Upstream must encrypt only to the explicitly configured downstream public
+   key. Downstream must accept packets only for an explicitly authorized
+   upstream identity and signing key. A claimed `upstream_id`, network
+   address, or key identifier alone must never grant authorization.
+2. Downstream must be able to authorize multiple upstream identities, with
+   separate key and session state for each. The same key must not implicitly
+   authorize another identity or role.
+3. Public-key identifiers are lookup hints, not proof of identity. Before
+   accepting a key, each endpoint must verify its full cryptographic
+   fingerprint and configured identity-to-key binding, or validate the
+   certificate chain and peer authorization under REQ-58 in CA mode.
+   A fingerprint collision or conflicting binding must fail closed.
+4. UDP sender signatures should use the existing pinned-TLS peer identity key
+   and trust binding when that key type supports the approved signature
+   profile. The UDP signature must be domain-separated from TLS and every
+   other protocol use. Reusing an identity key does not authorize a different
+   peer, role, or protocol. If safe reuse cannot be demonstrated for the
+   selected profile, the design must explain and minimize any additional
+   signing-key provisioning.
+5. Session-key protection must use a supported key-establishment or
+   public-key-encryption key. The existing pinned-TLS ECDSA P-256 identity
+   key is currently provisioned for signing; its certificate and private-key
+   configuration do not automatically authorize key agreement. An EC key
+   pair can technically be used for ECDH, but that is key agreement
+   (`keyAgreement`), not certificate key encipherment (`keyEncipherment`),
+   and reusing one private key for ECDSA and ECDH creates cross-protocol key
+   reuse. The default design should use a distinct recipient key-agreement
+   key pair, bound to the same independently trusted peer identity. Reuse of
+   the existing identity key is permitted only if the certificate usage,
+   implementation, and approved cryptographic profile explicitly support
+   both operations and a security review accepts the cross-protocol and
+   compromise risks; it must never be enabled merely by changing a
+   certificate flag. The design must document the selected choice and its
+   key provisioning and rotation.
+6. Private keys must remain on their owning endpoint. Key generation,
+   provisioning, supported key types, file formats, permissions, and
+   independent verification of provisioned public keys must be documented.
+   The protocol must not use trust-on-first-use.
+
+### REQ-57.02 — Authenticated session-key exchange
+
+1. Each session key must be generated from a cryptographically secure random
+   source and be independent of all previous session keys. The selected key
+   length and algorithms must meet the approved UDP cryptographic profile.
+2. The session key must be protected for the intended downstream using
+   RFC 9180 HPKE base mode under REQ-57.09 and authenticated by a signature
+   from the authorized upstream private key. The protocol must use distinct
+   signing and key-establishment roles, or document and validate a
+   cryptographic profile that safely supports any shared key use.
+3. The signature must cover an unambiguous, versioned, canonical encoding of
+   the complete exchange, including the sender and recipient identities and
+   key fingerprints, protocol and algorithm identifiers, session identity,
+   key generation, and protected session key. It must be domain-separated
+   from signatures used by other protocols.
+4. Downstream must validate message size and format, authorization, signature,
+   intended recipient, and freshness before installing a session key.
+   Decryption of the protected key by itself is not evidence that the sender
+   is authorized. Invalid, stale, or conflicting exchanges must not replace
+   active state.
+5. Repeated identical exchanges must be idempotent. Reuse of a session
+   identity or generation with different authenticated content must be
+   rejected and reported. Out-of-order exchanges must not roll back the
+   accepted generation or prevent bounded acceptance of delayed data from a
+   still-valid prior session.
+6. Exchange messages must be retransmitted without a return channel, at a
+   bounded and documented rate, so loss of an individual UDP exchange does
+   not permanently prevent decryption. Retransmission must not be triggered
+   without a bound by every received data packet.
+
+### REQ-57.03 — Authenticated UDP packet format
+
+1. Every data packet, including every fragment, must be protected by the
+   selected authenticated-encryption-with-associated-data (AEAD) algorithm.
+   The approved profile must specify the algorithm, key and tag sizes, nonce
+   format, and per-key usage limits. Authentication tags must not be
+   truncated unless the approved profile explicitly permits it.
+2. Associated data must bind the protocol version, message type, authorized
+   upstream and downstream identities, session identity and generation,
+   Kafka topic, partition and offset, and fragment/message identity and
+   position. Encoding must be canonical and unambiguous. Fields already
+   present in the packet envelope must be authenticated in place, not copied
+   into a second header solely to form associated data.
+3. Downstream must authenticate every fragment before using its contents.
+   Fragments from different messages, sessions, senders, or Kafka records
+   must not be combinable into an accepted message. A message must not be
+   forwarded or acted upon until all required fragments have been
+   authenticated and reassembled consistently.
+4. Status and other control messages that can affect application state must
+   be authenticated. Plaintext or unauthenticated messages must not be
+   accepted as a fallback when authenticated encryption is enabled.
+5. The wire format must use the existing packet framing and Kafka identity
+   fields wherever possible. A data packet must not repeat full peer
+   identities, public keys, fingerprints, or algorithm descriptions that
+   can be bound during provisioning or session exchange. It must carry only
+   the compact session reference and nonce/sequence information needed to
+   select the key, authenticate the packet, and ensure nonce uniqueness.
+6. Before implementation, the approved design must state and measure the
+   added bytes per packet and fragment, including the session reference,
+   nonce/sequence field, and AEAD tag. It must define an overhead budget and
+   test that budget at the supported MTU and fragmentation boundaries.
+
+### REQ-57.04 — Nonce uniqueness and key usage limits
+
+1. A nonce must never be reused with the same session key, including across
+   concurrent sender workers, failed sends, SIGHUP reloads, or process
+   restarts. Nonce allocation must be safe under concurrency and must not
+   depend on packet delivery order.
+2. Session-instance identifiers and counters must not collide or roll back
+   while a key may still be used, including across concurrent senders,
+   process restarts, and restored snapshots. The selected identifier width,
+   generation strategy, and collision bound must be justified against the
+   expected number of peers, rotations, and process starts. A 32-bit random
+   session identifier is not sufficient. The wire representation should use
+   a compact reference to the full session identity established by the
+   authenticated key exchange.
+3. The sender must rotate to a fresh session key before the nonce space or
+   approved AEAD per-key packet, byte, or time limit is exhausted. If safe
+   rotation is unavailable, encryption must stop and report an error rather
+   than reuse a nonce or send plaintext.
+4. The receiver must identify the exact session used by each packet and
+   reconstruct or validate its nonce from authenticated protocol fields.
+   Nonce and key-usage limits, including the action at their boundary, must
+   be documented and testable.
+
+### REQ-57.05 — Receive validation and replay handling
+
+1. Downstream must authenticate a packet before delivering its plaintext to
+   Kafka, gap detection, resend, status handling, or other application
+   processing. Unknown sessions, unauthorized identities, malformed
+   packets, and invalid authentication tags must be rejected without
+   plaintext fallback.
+2. Downstream must detect and reject replayed authenticated datagrams while
+   tolerating UDP reordering within a documented, bounded acceptance window.
+   Replay state must be isolated by authorized sender and session. Invalid
+   unauthenticated packets must not advance or allocate replay state.
+3. Rejected replays and authentication failures must not be treated as valid
+   application events or refresh a session's retention lifetime. The replay
+   horizon and behavior for packets outside the window must be documented.
+4. Duplicate handling by Kafka identity or deduplication does not replace
+   protocol-level replay handling. The system must not claim exactly-once
+   delivery solely because packets are authenticated or replay-filtered.
+
+### REQ-57.06 — Rotation and session retirement
+
+1. Session-key rotation must not cause nonce reuse, downgrade, or an
+   unbounded period in which old keys remain accepted. Downstream must allow
+   a bounded overlap so delayed and reordered packets from a previous
+   session can be handled.
+2. Session retention must have a hard maximum lifetime measured from
+   authenticated installation. Packet activity, including replayed packets,
+   must not extend that maximum. Idle expiration may be used in addition to,
+   but not instead of, the hard maximum.
+3. The number of retained sessions must be bounded globally and per
+   authorized upstream. Eviction and expiry must be deterministic and must
+   not evict the only valid current session for an authorized peer without
+   reporting the condition.
+4. Long-term key or trust changes must be reloadable through the documented
+   configuration mechanism. Reload must validate a complete new identity
+   and trust snapshot before activation; a failed reload must report an
+   error and retain the last valid snapshot. Rotation and revocation behavior,
+   including any overlap, must be documented.
+
+### REQ-57.07 — Resource limits and observability
+
+1. Packet parsing, fragment reassembly, key-exchange processing, replay
+   tracking, and session storage must have documented size, count, and
+   lifetime limits. Unauthenticated input must not cause unbounded memory,
+   CPU, file, or log growth.
+2. Invalid packets and exchanges must be rate-limited or summarized for
+   logging. Logs and statistics must distinguish missing sessions, rejected
+   identities, invalid signatures/tags, replayed packets, and expired
+   sessions without exposing private keys, session keys, plaintext payloads,
+   or passphrases.
+3. Counters for rejected packets and missing sessions must remain accurate
+   under concurrent receive processing and must not be reset by log
+   suppression.
+
+### REQ-57.08 — Cryptographic specification and compatibility
+
+1. Before implementation, the protocol specification must define the exact
+   cryptographic algorithms, key roles and encodings, canonical wire format,
+   nonce construction, counter boundaries, key-usage limits, session
+   freshness rules, replay-window behavior, key-reuse analysis, per-packet
+   overhead budget, and error handling. It must state security properties
+   and non-properties, including whether traffic metadata is exposed.
+2. The specification must include fixed test vectors for key exchange,
+   signature verification, nonce construction, packet encryption and
+   decryption, associated-data validation, fragmentation, and rejection of
+   malformed or tampered inputs.
+3. Enabling authenticated UDP encryption must be explicit. A configuration
+   error, unsupported algorithm, missing key, failed key reload, or
+   authentication failure must never cause a silent fallback to plaintext
+   or a weaker authentication mode. Existing plaintext operation remains
+   available only when explicitly configured.
+4. UDP encryption must continue to work over a one-way diode and with
+   multiple authorized upstreams. The change must not alter TCP TLS or Kafka
+   security behavior.
+5. The design review must explicitly approve which existing TCP pinned
+   identity keys are reused for UDP signatures, what additional
+   key-establishment material is required, and the measured wire overhead
+   before executable testcases or implementation begin.
+
+### REQ-57.09 — HPKE session establishment
+
+1. Session-key protection must use
+   [Hybrid Public Key Encryption (RFC 9180)](https://www.rfc-editor.org/rfc/rfc9180.html)
+   in base mode, with an externally signed exchange as required by
+   REQ-57.02. HPKE base mode alone must not be treated as authenticating
+   upstream. HPKE authenticated modes must not be substituted by treating
+   an ECDSA signing credential as an HPKE sender-authentication key.
+2. Before executable testcases or implementation, approve one concrete HPKE
+   suite, specifying its KEM, KDF, and AEAD identifiers, recipient public-key
+   encoding, and certificate key-usage requirements. Use a maintained
+   implementation with RFC test-vector coverage, not a custom reconstruction
+   of HPKE primitives. Unsupported suites and incompatible recipient keys
+   must be rejected explicitly without algorithm fallback or negotiation
+   driven by unauthenticated input.
+3. Use a fresh HPKE encapsulation for each new session exchange to protect
+   the independently generated session secret. Retransmission must repeat
+   the already-created signed exchange rather than reuse an HPKE context
+   to encrypt new plaintext with reset sequence state. The outer signature
+   must bind the encapsulated key, ciphertext, suite, and exchange metadata.
+   HPKE `info` and associated data must bind the application protocol and
+   canonical session context with documented domain separation.
+4. HPKE protects the session secret, not the stream of UDP event packets.
+   The event AEAD layer must use explicit packet sequence information and
+   the nonce and replay rules of REQ-57.03 through REQ-57.05, independently
+   of HPKE's implicit message sequence. Dropped or reordered datagrams must
+   not desynchronize packet decryption.
+5. Certificate validation, peer authorization, exchange freshness, session
+   expiry, and replay handling remain application responsibilities. HPKE
+   to a static recipient key must not be claimed to provide forward secrecy
+   against later compromise of that private key: recorded exchanges and
+   their event traffic may then be decrypted.
+6. Acceptance vectors must cover the selected HPKE suite and the signed
+   application envelope, including independent interoperability, wrong
+   recipient keys, altered encapsulations/ciphertexts/context, invalid
+   signatures, and duplicate exchanges. Wire-overhead accounting must include
+   encapsulation, ciphertext tag, signature, and certificate-chain costs
+   separately from per-event overhead.
+
+## REQ-58 — CA bundles and unattended certificate lifecycle
+
+> Administrators must be able to provision CA-backed credentials and scheduled
+> downstream recipient public keys for at least five years of unattended
+> upstream operation, without routine reprovisioning of upstream. This does
+> not guarantee uninterrupted operation after compromise, clock failure, or
+> a cryptographic vulnerability.
+
+* Status: **Proposed; implementation and testcase coverage pending**.
+* Scope: Certificate provisioning and lifecycle for CA-based TCP TLS and
+  authenticated UDP under REQ-57. Existing pinned TCP behavior under REQ-51,
+  Kafka security, and explicitly configured plaintext operation are unchanged.
+* Notes: CA trust authenticates credentials, not unsigned plaintext events.
+  UDP session establishment and packet authentication remain subject to
+  REQ-57; no return channel across the diode may be assumed.
+
+### REQ-58.01 — Provisioning command and trust hierarchy
+
+1. A documented `air-gap-certificates.sh` command must support creating an
+   offline root CA (`--create-root-ca`) or using an existing root/intermediate
+   issuer (`--ca`), and producing role-specific upstream and downstream
+   deployment bundles. Issuing requires access to the issuer's private key,
+   not merely its certificate. The root private key must never be included
+   in deployment bundles.
+2. Operators must be able to configure one or more root or intermediate trust
+   anchors. The command must validate issuer/key consistency, CA constraints,
+   permitted signing usage, and the chain's validity and delegation limits
+   before issuance. It must not issue outside the parent chain's validity.
+3. Each upstream must receive a dedicated issuing intermediate with
+   `pathLenConstraint=0`, permitted to issue leaf credentials but not further
+   intermediate CAs. Downstream must bind that verified issuer to an
+   authorized upstream identity and allowed roles; a valid chain or claimed
+   CN alone must not permit impersonating another upstream.
+4. Upstream leaf keys must be generated locally. Where centrally generated
+   downstream keys are used, only downstream's private bundle may contain
+   them. Public deployment bundles must contain no private keys, passwords,
+   or issuer signing secrets.
+
+### REQ-58.02 — Scheduled downstream certificates
+
+1. The command must support an explicit UTC coverage interval (`--from`,
+   `--to`), period (`--length`), overlap (`--overlap`), peer identity, and
+   approved cryptographic profile. Calendar periods, interval endpoints, and
+   overlap semantics must be defined unambiguously.
+2. It must calculate the required certificate count and generate independent
+   key pairs for every period, with continuous coverage of the entire
+   requested interval. It must reject invalid intervals, gaps, impossible
+   issuer lifetimes, excessive schedules, or unsupported algorithms.
+3. Upstream receives the complete scheduled downstream public certificates
+   and needed chain material. Downstream receives corresponding certificates
+   and private keys, or uses a documented staged private-key installation
+   workflow. Bundles must identify recipient identity, purpose, validity,
+   and key fingerprint unambiguously.
+4. The sender must select deterministically among valid authorized recipient
+   certificates, preferring the latest `NotBefore`, with a documented stable
+   tie-breaker. Downstream must support the corresponding overlapping keys.
+   A compact recipient-key identifier in the authenticated session exchange
+   must select the key directly; downstream must not trial-decrypt with all
+   keys. This identifier need not be repeated in every data packet.
+5. Certificate, issuer, and session expiry must have documented interaction:
+   session validity must not silently extend expired credentials. Overlap
+   must accommodate the configured clock tolerance and session transition
+   period. If no usable recipient credential remains, fail explicitly
+   without plaintext or expired-key fallback.
+
+### REQ-58.03 — Local issuance and runtime renewal
+
+1. On startup, upstream must generate fresh purpose-appropriate leaf keys
+   and certificates using its deployed intermediate. It must also renew
+   before expiry during continuous operation; renewal must not depend on
+   restarting the process or contacting a CA across the diode.
+2. Certificates must specify the approved identity, key usage, and extended
+   key usage where applicable. TCP client authentication, UDP signing, and
+   recipient key establishment are distinct purposes. A common issuing CA
+   does not justify unsafe reuse of signing and key-establishment keys.
+3. Renewal must activate complete validated credentials atomically, retaining
+   the last valid credentials on failure while reporting the failure.
+   Expiry must not be bypassed if renewal continues to fail. Key rotation
+   must not intentionally discard queued events or reuse session nonces.
+4. The unattended deployment horizon must fit within every necessary issuer,
+   trust-anchor policy, and recipient schedule lifetime. Local leaf renewal
+   must not be represented as renewing an expired issuing intermediate.
+
+### REQ-58.04 — Validation, revocation, and secret protection
+
+1. CA mode must validate chains, certificate signatures, constraints,
+   validity, allowed algorithms, purpose, and locally authorized peer
+   identity. It must not fetch arbitrary certificate URLs from untrusted
+   input. Clock source, permitted skew, rollback handling, and behavior when
+   time is unreliable must be documented and tested.
+2. A documented local revocation mechanism must reject a compromised issuer
+   or leaf and invalidate sessions authorized by it. Its activation and
+   recovery procedure must work without online revocation services.
+   An inaccessible upstream cannot learn of a compromised downstream key
+   over a one-way diode; incident response may require reprovisioning it.
+3. Issuer and recipient private keys must be protected by restrictive file
+   permissions and encrypted storage or hardware-backed protection.
+   Unattended unlocking must document where the unlocking secret is held.
+   An encrypted password file stored with its decryption secret must not be
+   claimed to protect against complete storage or endpoint compromise.
+4. The lifecycle documentation must explain that installing every future
+   private key together exposes future periods if those keys are stolen.
+   Support staged installation of future downstream private keys, and
+   document retirement of old keys, backups, and recoverability tradeoffs.
+   Scheduled rotation alone must not be claimed to provide forward secrecy.
+
+### REQ-58.05 — Transport integration and design gate
+
+1. CA-issued TCP credentials must use explicit CA-based TLS authentication,
+   with mutual authentication when required. Issuance must not authorize
+   a new public key in pinned mode, change existing pins, or enable CA
+   validation as a fallback after pin rejection. Existing pinned TCP
+   generation, rotation, and authorization remain supported unchanged.
+2. UDP must authenticate the signing certificate chain and signed exchange
+   before accepting a session. Certificate chains and signatures belong in
+   bounded session-establishment messages, not every event packet.
+   Certificate trust must not be presented as authenticating unsigned
+   plaintext events.
+3. The approved cryptographic profile must specify algorithms and parameters,
+   not only a generic key length. UDP recipient certificates must contain
+   keys compatible with the selected HPKE suite under REQ-57.09; a TLS
+   signing certificate or RSA key must not be assumed compatible.
+   Evaluate exchange size, certificate-chain size, bounded fragmentation,
+   CPU cost, and MTU behavior; RSA-8192 must not be selected merely because
+   a larger number appears stronger.
+4. Before executable testcases or implementation, approve exact command and
+   bundle formats, algorithms, identity constraints, trust modes, validity
+   and schedule rules, runtime renewal behavior, secret-unlocking mechanism,
+   revocation and failure handling, and overhead limits. No implementation
+   or existing acceptance coverage is implied by these requirements.
