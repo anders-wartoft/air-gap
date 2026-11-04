@@ -4284,7 +4284,7 @@ Kafka-backed delivery/rebalance integration run or Linux runtime verification.
 
 ## TC-27 — Pinned TLS provisioning, reload, rotation, and revocation
 
-* Covers: REQ-51.01 through REQ-51.16.
+* Covers: REQ-51.01 through REQ-51.16; REQ-35 idle-connection regression.
 * Status: **First, lifecycle, and core rotation batches implemented / partial REQ-51 acceptance**.
   An isolated Docker red-thread smoke test is available through
   `tests/env/run-testcase.sh 27` and can participate in the Docker chain.
@@ -4329,6 +4329,7 @@ stay untrusted for the rejection phases.
 | Phase | Required evidence |
 | --- | --- |
 | Trusted A/S | Generated JSON peer names (`client-1` and `server-1`) and exact SPKI fingerprints authenticate on both sides, TLS 1.3, and at least five distinct application messages received by downstream. |
+| Idle A/S | Pause upstream twice for seven seconds each, without stopping either endpoint. After each unpause, downstream receives at least five additional distinct messages. Both logs must show exactly one connection, no repeated connection summaries, no TCP read errors, and no failed send attempts. |
 | Unknown client U/S | Downstream explicitly rejects U's fingerprint; no received application messages during the rejection window; both services remain running. |
 | Trusted A/unknown server U | Upstream explicitly rejects U's fingerprint; no received application messages during the rejection window; both services remain running. |
 | Restore A/S | Fresh exact-fingerprint authentication and at least five distinct received messages prove recovery, not merely a successful dial/write. |
@@ -4351,6 +4352,31 @@ the runner prints the exact project/fixture inspection and teardown commands;
 remove retained private-key fixtures afterward. Split-machine roles and
 extra profiles are unsupported. The test also participates in
 `./run-testcases.sh 27` or a range containing 27.
+
+### Idle-connection regression
+
+The idle phase was confirmed failing before the 0.1.17.2 correction:
+downstream logged `TCP read error ... i/o timeout` after five idle seconds,
+and upstream reconnected after each pause. Successful delivery alone would
+miss this bug, so the Docker verdict also requires connection reuse.
+Container pause support is required for this phase.
+
+[tcp_idle_test.go](../../src/downstream/tcp_idle_test.go) additionally tests
+plain TCP, CA-mTLS, and mutually pinned TLS against the actual receiver:
+
+* Deliver a frame, idle for six seconds, then deliver another exact frame
+  on the original connection.
+* Begin a frame after four idle seconds and finish two seconds later.
+  Completion must use a fresh five-second frame deadline, not the remaining
+  idle-poll deadline.
+* Send an incomplete header or payload. Downstream must close it after the
+  five-second frame timeout without delivering a partial message.
+
+Run these regressions and the existing idle-shutdown check from repository root:
+
+```bash
+go test -race ./src/downstream -run '^TestTCP(ConnectionSurvivesIdleBetweenMessages|IncompleteMessageStillTimesOut|MessageDeadlineStartsAfterIdle)$|^TestProductionWarningsCleanupClosesIdleTCPConnections$' -count=1
+```
 
 ### Common setup and evidence
 

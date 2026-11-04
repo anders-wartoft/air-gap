@@ -612,12 +612,22 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 		default:
 		}
 
-		// Set read deadline to avoid blocking indefinitely
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-
-		// Read a message from the connection
-		// The protocol message format includes a length prefix (first 4 bytes)
-		msg, err := t.readMessage(reader)
+		// An idle connection is healthy. Poll for shutdown until the first
+		// byte arrives, then bound completion of the entire frame.
+		var msg []byte
+		err := conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if err == nil {
+			_, err = reader.Peek(1)
+			if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+				continue
+			}
+		}
+		if err == nil {
+			err = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		}
+		if err == nil {
+			msg, err = t.readMessage(reader)
+		}
 		if err != nil {
 			if t.isClosed() {
 				return

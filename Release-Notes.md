@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.1.18-SNAPSHOT
+
+### TCP connections survive idle traffic
+
+- Downstream no longer closes a healthy TCP connection after five seconds
+  without traffic. This caused repeated reconnects and transient upstream
+  send warnings with bursty traffic, including mutually pinned TLS.
+  The five-second timeout still closes incomplete messages once their first
+  byte arrives. Applies to plain TCP, CA-based TLS, and pinned TLS.
+- Regression coverage includes receiver tests for all three modes and
+  two seven-second traffic pauses in the TC-27 Docker pinned-TLS test.
+
 ## 0.1.17.2-SNAPSHOT
 
 ### Mixed-version upgrade testcase

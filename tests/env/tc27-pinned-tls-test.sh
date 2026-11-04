@@ -129,25 +129,29 @@ wait_for() {
     report_check "$subject" "$text within 30s" "timed out" 1
 }
 
+delivery_count() {
+    awk '
+        match($0, /Random message [0-9]+/) {
+            number = substr($0, RSTART, RLENGTH)
+            sub(/Random message /, "", number)
+            seen[number] = 1
+        }
+        END { for (number in seen) count++; print count + 0 }
+    ' "$TC27_WORK_DIR/downstream.log"
+}
+
 wait_delivery() {
-    local subject="$1" deadline=$((SECONDS + 30)) count
+    local subject="$1" minimum="${2:-5}" deadline=$((SECONDS + 30)) count
     while (( SECONDS < deadline )); do
         capture downstream
-        count="$(awk '
-            match($0, /Random message [0-9]+/) {
-                number = substr($0, RSTART, RLENGTH)
-                sub(/Random message /, "", number)
-                seen[number] = 1
-            }
-            END { for (number in seen) count++; print count + 0 }
-        ' "$TC27_WORK_DIR/downstream.log")"
-        if (( count >= 5 )); then
-            report_check "$subject" "at least 5 distinct received application messages" "$count received" 0
+        count="$(delivery_count)"
+        if (( count >= minimum )); then
+            report_check "$subject" "at least $minimum distinct received application messages" "$count received" 0
             return
         fi
         sleep 1
     done
-    report_check "$subject" "at least 5 received application messages within 30s" "$count received" 1
+    report_check "$subject" "at least $minimum received application messages within 30s" "$count received" 1
 }
 
 restart_pair() {
@@ -182,6 +186,28 @@ wait_delivery "Trusted pinned TLS data path"
 assert_contains upstream-a "Pinned TLS authenticated server peer=server-1 fingerprint=$SERVER" "Client pins exact server key from generated JSON"
 assert_contains downstream "Pinned TLS authenticated client peer=client-1 fingerprint=$CLIENT" "Server pins exact client key from generated JSON"
 assert_contains downstream "TLS 1.3 /" "TLS 1.3 negotiated"
+
+echo "TC-27: two idle intervals must preserve the authenticated connection"
+for burst in 1 2; do
+    compose pause upstream-a
+    sleep 7
+    capture downstream
+    baseline="$(delivery_count)"
+    compose unpause upstream-a
+    wait_delivery "Delivery after idle interval $burst" "$((baseline + 5))"
+done
+for service in upstream-a downstream; do
+    capture "$service"
+    pattern="Connected to TCP server at"
+    [[ "$service" != downstream ]] || pattern="New TCP connection from"
+    count="$(awk -v text="$pattern" 'index($0, text) { count++ } END { print count + 0 }' "$TC27_WORK_DIR/$service.log")"
+    result=0
+    if (( count != 1 )) || grep -qE 'Send attempt .*failed|TCP read error|Message repeated .*Connected to TCP server|Message repeated .*New TCP connection' \
+        "$TC27_WORK_DIR/$service.log"; then
+        result=1
+    fi
+    report_check "$service idle connection" "one connection, no read errors or failed sends" "$count connection log entries" "$result"
+done
 
 echo "TC-27: valid but untrusted client key must not deliver"
 export TC27_CLIENT_KEY=2

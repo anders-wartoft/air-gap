@@ -522,8 +522,15 @@ upstream warns at startup when it is not.
 
 > Upstream and downstream must be configurable to use TCP instead of UDP.
 
+Healthy connections must survive idle intervals between messages, including
+CA-based and pinned TLS. Idle polling must not trigger reconnects. Once a
+message starts, an incomplete header or payload must still time out within
+five seconds; shutdown must continue to close idle connections promptly.
+
 * Implemented in: 0.1.8-SNAPSHOT
-* Covered by: TC-20
+* Idle-connection correction: 0.1.17.2-SNAPSHOT.
+* Covered by: TC-20; TC-27 Docker idle regression;
+  `src/downstream/tcp_idle_test.go` (plain TCP, CA-mTLS, pinned TLS).
 
 ## REQ-36 — Multi-cluster, same-topic fan-in
 
