@@ -67,7 +67,7 @@ If a cell is blank it means the spreadsheet left that cell blank.
 > side.
 
 * Implemented in: 0.1.3-SNAPSHOT
-* Covered by: TC-9, TC-10
+* Covered by: TC-9, TC-10, TC-46 (transaction-safe dedup crash recovery)
 
 ## REQ-5 — Resume from last known log entry
 
@@ -1840,3 +1840,43 @@ Acceptance criteria:
    and schedule rules, runtime renewal behavior, secret-unlocking mechanism,
    revocation and failure handling, and overhead limits. No implementation
    or existing acceptance coverage is implied by these requirements.
+
+## REQ-59 — Bounded, transaction-safe dedup state
+
+> Deduplication history must remain persistable as retained windows grow,
+> and a committed event must not lose its duplicate history after a crash.
+> Existing state must migrate without silently discarding received offsets.
+
+* Status: **Implemented**.
+* Implemented in: 0.1.18-SNAPSHOT
+* Covered by: TC-46; Java unit tests `DedupPersistenceTest` and
+  `GapDetectorStoreTest`.
+* Notes: Complements REQ-4 (duplicate suppression) and REQ-54 (bounded external
+  gap-topic keys). This requirement concerns the internal state changelog,
+  not the size of individual gap-emission payloads.
+
+Acceptance criteria:
+
+1. A fragmented legacy detector larger than 1 MiB migrates to bounded state
+   values and continues processing with dedup's default 1 MiB producer limit.
+   The current layout uses bitmap blocks of exactly 8,192 bytes; metadata
+   remains smaller and does not grow with the number of retained windows.
+2. State updates, output and consumed input offsets participate in the same
+   Kafka transaction. After a hard crash following commit, a fresh-directory
+   changelog restore suppresses a delayed copy of the committed event.
+3. If the crash occurs before commit, uncommitted output is aborted and the
+   input is replayed. A `read_committed` consumer observes each event once.
+4. Migration preserves received history and subsequent gap fills, writes the
+   new state and tombstones the legacy detector key atomically. Filtered
+   empty-payload events remain registered but are not forwarded.
+5. New changelogs explicitly use `cleanup.policy=compact`, independently of
+   broker defaults. An existing delete-only changelog is repaired to compact
+   before processing; failure to verify or repair must not silently proceed.
+6. Corrupt or incomplete state fails explicitly instead of creating an empty
+   detector. Eviction removes the old window's state blocks while retaining
+   duplicate history for active windows.
+
+TC-46 exercises criteria 1–3 and changelog policies in Docker-backed Kafka.
+The Java unit suite covers filtered offsets, corruption/incomplete state,
+block boundaries, window ordering, gap fills and eviction. These tests do not
+certify a production-scale soak or recover history already deleted by Kafka.

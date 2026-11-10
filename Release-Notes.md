@@ -2,6 +2,49 @@
 
 ## 0.1.18-SNAPSHOT
 
+### Accurate lost-event test counts
+
+- TC-32 counts marker occurrences in the binary TCP capture rather than
+  matching lines. Multiple delivered records on one line previously appeared
+  as one guard and one small event, producing false failures.
+
+### Deterministic dedup artifacts in upgrade tests
+
+- TC-41 and TC-42 now select the Linux AMD64 JAR matching the current Maven
+  project version instead of the alphabetically first leftover build.
+  Stale 0.1.14 artifacts could otherwise run without newer gap-tombstone
+  behavior and produce misleading failures. Explicit JAR overrides remain
+  supported; selected paths and batch verdict blocks are printed.
+
+### Bounded, transaction-safe deduplication state
+
+- Dedup no longer writes a partition's entire received-offset history as one
+  changelog value. State uses fixed metadata, per-window descriptors and 8 KiB
+  bitmap blocks, preventing the 1 MiB producer-limit crash loop even with
+  fragmented, uncompressible histories.
+- State updates now participate in every processed record's Kafka transaction,
+  including filtered empty-payload events. Output and input offsets cannot
+  commit ahead of dedup state merely because a periodic snapshot has not run.
+  `COMMIT_INTERVAL_MS` controls commits; `PERSIST_INTERVAL_MS` is deprecated
+  and retained only for configuration/JMX compatibility.
+- Existing Java-serialized detectors migrate in place on their next standard
+  event; the old key is tombstoned atomically with the new state. Unreadable or
+  incomplete state now fails explicitly instead of resetting duplicate history.
+  Stop all old instances before upgrading; mixed-version operation and
+  in-place downgrade after migration are not supported.
+- Changelogs explicitly use `cleanup.policy=compact`. Startup repairs existing
+  delete-only or `compact,delete` changelogs before processing; the Kafka
+  principal needs DescribeConfigs and, for repair, AlterConfigs permissions.
+  Already deleted history cannot be recovered by this fix.
+- [Topic configuration specifications](doc/Deduplication.md#kafka-topic-configuration-specification)
+  cover the external gap topic and internal changelog, tombstone retention,
+  replication, record sizing and safe upgrade operations. Transactional output
+  consumers must use `read_committed`.
+- Unit and Docker Kafka regressions cover oversized legacy migration, hard
+  crashes before/after commit, cold restoration, delayed duplicates, filtered
+  offsets, state corruption and changelog cleanup policies. The Docker suite
+  is registered as TC-46 for REQ-4 and REQ-59 (`./run-testcase.sh 46`).
+
 ### TCP connections survive idle traffic
 
 - Downstream no longer closes a healthy TCP connection after five seconds

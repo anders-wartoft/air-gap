@@ -276,7 +276,7 @@ public class JmxSupport {
             attrList.add(new MBeanAttributeInfo("GAP_TOPIC", "java.lang.String", "Gap topic name", true, false, false));
             attrList.add(new MBeanAttributeInfo("BOOTSTRAP_SERVERS", "java.lang.String", "Kafka bootstrap servers", true, false, false));
             attrList.add(new MBeanAttributeInfo("STATE_DIR_CONFIG", "java.lang.String", "Kafka Streams state directory", true, false, false));
-            attrList.add(new MBeanAttributeInfo("PERSIST_INTERVAL_MS", "java.lang.String", "GapDetector persist interval (ms)", true, false, false));
+            attrList.add(new MBeanAttributeInfo("PERSIST_INTERVAL_MS", "java.lang.String", "Deprecated; state updates per record, commit.interval.ms controls commits", true, false, false));
             attrList.add(new MBeanAttributeInfo("GAP_EMIT_INTERVAL_SEC", "java.lang.String", "Gap emit interval (seconds)", true, false, false));
             attrList.add(new MBeanAttributeInfo("assignedRawPartitions", "java.lang.String", "Partitions assigned to this instance for the raw topic", true, false, false));
             attrList.add(new MBeanAttributeInfo("APPLICATION_ID", "java.lang.String", "Kafka Streams application.id", true, false, false));

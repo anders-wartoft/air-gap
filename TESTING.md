@@ -42,6 +42,55 @@ cd java-streams && mvn test
 
 This runs JUnit 5 tests for `GapDetector`, `GapDetectorSerialization`, and `PartitionDedupApp`.
 
+### TC-46: dedup state regression tests with Docker Kafka
+
+```bash
+cd tests/env
+./run-testcase.sh 46
+# Also available through the batch runner:
+./run-testcases.sh 46
+```
+
+See [TC-46](tests/documents/TESTCASES.md#tc-46--bounded-dedup-state-and-transaction-safe-crash-recovery)
+and [REQ-59](tests/documents/REQUIREMENTS.md#req-59--bounded-transaction-safe-dedup-state)
+for the procedure and acceptance criteria. The standalone
+`bash tests/env/verify-dedup-state.sh` command (from the repository root)
+remains supported.
+
+The script starts an isolated single-broker Compose project, runs Maven unit
+tests and the `docker-tests` integration profile, then removes only that
+project's containers/volumes. It needs Docker, Maven and Java 17+; it does not
+need a prebuilt JAR. The broker binds to localhost port 19092. Override
+`DEDUP_TEST_KAFKA_PORT` if that port is in use, or `KAFKA_IMAGE` for an
+alternative compatible broker image.
+
+Tests use unique topics/application IDs and child dedup JVMs with fresh local
+state directories. They verify hard crashes before/after transaction commit,
+cold changelog restoration, delayed-copy suppression, migration of a fragmented
+legacy value larger than 1 MiB, bounded new state records, repair of existing
+delete-only changelogs and compaction for newly created changelogs. Consumers
+assert committed output using `read_committed`. The broker allows the oversized
+legacy fixture, but dedup retains its default 1 MiB producer limit.
+
+Reports are under `java-streams/target/failsafe-reports/`; child JVM logs are
+retained under `java-streams/target/dedup-it-logs/`. The integration tests do not
+run in plain `mvn test`; the normal unit suite does not require Docker.
+
+After packaging, also run the existing Kafka-outage/restart checks against the
+exact Java 17 runtime JAR (rather than an older JAR left in the build directory):
+
+```bash
+TC9_RESTART_JAR_NAME=air-gap-deduplication-fat-0.1.18-SNAPSHOT-linux-amd64.jar \
+  bash tests/env/verify-tc9-dedup-restart.sh
+```
+
+TC-41 and TC-42 select the Linux AMD64 JAR matching the current Maven project
+version and print the selected path. Rebuild when that exact artifact is
+missing; stale JARs in `target` are not used as a fallback. Explicit
+`TC41_CURRENT_DEDUP_JAR` / `TC42_CURRENT_DEDUP_JAR` overrides remain available.
+Their artifact-selection regressions run with
+`bash tests/env/test-dedup-jar.sh` (no Docker required).
+
 Build the universal fat JAR and every platform-specific fat JAR with:
 
 ```bash

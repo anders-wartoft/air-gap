@@ -23,7 +23,7 @@ export GAP_TOPIC=gaps
 export BOOTSTRAP_SERVERS=localhost:9092
 export STATE_DIR_CONFIG=/tmp/dedup_state_a/
 export GAP_EMIT_INTERVAL_SEC=60
-export PERSIST_INTERVAL_MS=10000
+export COMMIT_INTERVAL_MS=5000
 export FAIL_FAST=false
 export FAIL_FAST_STARTUP_TIMEOUT_MS=30000
 export FAIL_FAST_CHECK_INTERVAL_MS=10000
@@ -69,7 +69,8 @@ java -jar java-streams/target/air-gap-deduplication-fat-<version>.jar
 | `BOOTSTRAP_SERVERS`            | Kafka bootstrap servers                                                                         | `kafka-downstream.sitia.nu:9092`    |
 | `STATE_DIR_CONFIG`             | Writable directory for local state                                                              | `/tmp/var/lib/kafka-streams/state`  |
 | `GAP_EMIT_INTERVAL_SEC`        | How often to emit gaps to `GAP_TOPIC` (seconds)                                                 | `60`                                |
-| `PERSIST_INTERVAL_MS`          | How often local state is synchronized with Kafka (milliseconds)                                 | `5000`                              |
+| `COMMIT_INTERVAL_MS`           | Kafka Streams transaction commit interval (milliseconds); commits input offsets, output and dedup state together | `5000`                 |
+| `PERSIST_INTERVAL_MS`          | Deprecated compatibility setting, still exposed in JMX; no longer schedules state snapshots     | `5000`                              |
 | `FAIL_FAST`                    | If `true`, terminate on terminal Kafka Streams errors                                           | `false`                             |
 | `FAIL_FAST_STARTUP_TIMEOUT_MS` | Diagnostic interval while waiting for `RUNNING`; recovery continues after it (milliseconds)     | `30000`                             |
 | `FAIL_FAST_CHECK_INTERVAL_MS`  | Interval between runtime Kafka connectivity diagnostics (milliseconds)                          | `10000`                             |
@@ -83,6 +84,99 @@ When `FAIL_FAST=true`, the process exits with a non-zero status code on terminal
 When `FAIL_FAST=false`, the process stays alive and retries with exponential backoff and jitter. On startup, if source topics are temporarily unavailable, startup is delayed and retried using the same backoff settings.
 
 When `INSTANCE_ID` is set, dedup uses it as Kafka's static `group.instance.id`, reducing rebalance delays when the same service instance restarts. An explicit `KAFKA_GROUP_INSTANCE_ID` takes precedence. The identity must be unique among simultaneously running members of the same application.
+
+### Durable state and upgrades from earlier versions
+
+Starting with 0.1.18-SNAPSHOT, each processed standard event updates the state
+store before forwarding output. State, output and consumed input offsets are
+committed together by Kafka Streams (`exactly_once_v2`). This also registers
+empty-payload filtered events without forwarding their payloads. A hard crash
+before commit replays the input; after commit, a delayed copy is suppressed.
+Consumers of transactional output must use `isolation.level=read_committed`.
+
+The `gap-tracker-store` now stores fixed detector metadata, individual window
+descriptors and 8,192-byte bitmap blocks (65,536 offset positions each).
+No individual bitmap value grows with `MAX_WINDOWS` or `WINDOW_SIZE`.
+Completed windows remain available for deduplication until normal window
+eviction; missing offsets do not change the retention policy. The total state
+size and restore time still depend on the configured history and partition count.
+
+Existing Java-serialized detectors are read in place. On the first standard
+event for a restored detector, its history is migrated and its old key is
+tombstoned in the same transaction. Keep `APPLICATION_ID`, input partitioning
+and local state directories unchanged. Stop **all** old dedup instances before
+starting the new version: mixed-version operation and in-place downgrade after
+migration are not supported. Back up state and Kafka data before upgrading;
+rollback requires a coordinated restore of state, input offsets and output,
+not just replacing the JAR.
+
+Unreadable or inconsistent state now stops processing with an explicit error
+instead of silently creating an empty detector. State already lost through
+retention or earlier resets cannot be reconstructed by this migration.
+
+### Kafka topic configuration specification
+
+`GAP_TOPIC` and the internal state changelog serve different purposes. Configure
+both explicitly; do not rely on broker-wide defaults.
+
+| Property | Gap topic (`GAP_TOPIC`, normally `gaps`) | State changelog (`<APPLICATION_ID>-gap-tracker-store-changelog`) |
+| --- | --- | --- |
+| `cleanup.policy` | **`compact` only** | **`compact` only** |
+| `retention.ms`, `retention.bytes` | `-1` recommended; never enable time/size deletion via `compact,delete` | `-1` recommended; never use `delete` or `compact,delete` |
+| `delete.retention.ms` | At least the longest full gap-topic scan; start with `86400000` (24 h) | At least the longest full state restoration; start with `86400000` |
+| `min.compaction.lag.ms` | `0` recommended | `0` recommended |
+| `max.compaction.lag.ms` | `3600000` suggested operational target, not a hard size bound | Size for write rate and restoration requirements |
+| `segment.ms` | `3600000` suggested to make low-volume segments eligible for cleaning | Size for changelog write rate and recovery requirements |
+| `max.message.bytes` | Allow the largest **serialized** gap bitmap, key and record/batch overhead; `1048588` is adequate for `WINDOW_SIZE=5000000` | New bitmap values are 8 KiB; allow existing legacy values during migration/restoration |
+| Partitions | Pre-create with the receive-topic partition count; keep key partitioning stable | Managed by Streams to match topology tasks; do not manually resize |
+| Replication | Production: replication factor `3`, `min.insync.replicas=2` (requires three brokers) | Same production recommendation; Streams uses `KAFKA_REPLICATION_FACTOR` for newly created internal topics |
+
+`retention.ms=-1` alone does **not** make a delete-only topic a valid changelog.
+Compaction preserves the latest value of each key, whereas time-based deletion
+can remove even the only durable copy of a detector/block. An idle detector may
+not produce an update for days. Enable broker log cleaning, monitor its progress
+and disk usage, and allow tombstones to survive a complete consumer scan/restore.
+
+For example, create a production gap topic (substitute partition count and Kafka
+security options as appropriate):
+
+```sh
+kafka-topics.sh --bootstrap-server localhost:9092 --create \
+  --topic gaps --partitions 300 --replication-factor 3 \
+  --config cleanup.policy=compact --config retention.ms=-1 \
+  --config retention.bytes=-1 --config delete.retention.ms=86400000 \
+  --config min.compaction.lag.ms=0 --config max.compaction.lag.ms=3600000 \
+  --config segment.ms=3600000 --config max.message.bytes=1048588 \
+  --config min.insync.replicas=2
+```
+
+For an existing deployment, fix both policies **before** restarting dedup:
+
+```sh
+kafka-configs.sh --bootstrap-server localhost:9092 --alter \
+  --entity-type topics --entity-name gaps \
+  --add-config cleanup.policy=compact,retention.ms=-1,retention.bytes=-1,delete.retention.ms=86400000,min.compaction.lag.ms=0,max.compaction.lag.ms=3600000,segment.ms=3600000
+
+kafka-configs.sh --bootstrap-server localhost:9092 --alter \
+  --entity-type topics --entity-name dedup-gap-app-gap-tracker-store-changelog \
+  --add-config cleanup.policy=compact,retention.ms=-1,retention.bytes=-1,delete.retention.ms=86400000
+
+kafka-configs.sh --bootstrap-server localhost:9092 --describe --all \
+  --entity-type topics --entity-name dedup-gap-app-gap-tracker-store-changelog
+```
+
+The application explicitly requests `compact` for new changelogs. At startup it
+also checks an existing changelog and repairs `delete` or `compact,delete` to
+`compact` before processing. The Kafka principal needs `DescribeConfigs` and,
+when repair is necessary, `AlterConfigs` on this topic, in addition to normal
+Streams permissions. Permission failures stop startup; transient connectivity
+failures delay startup and retry. The application does not modify the external
+gap topic or recover records that Kafka has already deleted.
+
+When increasing gap-record limits, coordinate the topic/broker limit,
+`KAFKA_PRODUCER_MAX_REQUEST_SIZE`, broker replication fetch limits and consumer
+fetch limits. Raising only the broker limit does not fix a producer-side
+`RecordTooLargeException`.
 
 One of the benefits of this software is that, ideally, it should be able to support exactly-once-delivery. Since upstream can be configured to send the same events several times, we need a mechanism to de-duplicate the received data stream.
 
@@ -197,17 +291,21 @@ Each message written to the gap topic uses a compact binary format:
 
 Bit position `P` is set when the event at absolute offset `windowMin + P` has **not** been received. The tail of the window (events not yet received at emit time) is excluded from the bitmap so consumers see only genuine gaps, not merely undelivered future events.
 
-The maximum message size for a window of size `W` is `17 + ⌈W / 8⌉` bytes in the worst case (every other event missing). For the default `WINDOW_SIZE=1000` this is approximately 142 bytes — well within Kafka's default 1 MB limit.
+The bitmap data for a window of size `W` can approach `ceil(W / 8)` bytes,
+plus Roaring container headers, the 17-byte application header, the Kafka key
+and record/batch overhead. For `WINDOW_SIZE=5000000`, reserve approximately
+0.63 MB plus protocol overhead for a fragmented bitmap.
 
 > **Warning — large WINDOW_SIZE and Kafka message size limit**
 >
 > Kafka's default maximum message size is **1 MB** (`max.message.bytes = 1048576`). If your `WINDOW_SIZE` is very large the gap bitmap can exceed this limit and the deduplicator will fail to emit gap messages (you will see producer errors in the logs).
 >
-> The critical threshold is:
+> There is no exact safe threshold based only on `W / 8`: Roaring and Kafka
+> headers also consume space. Test fragmented gap patterns with your largest
+> window and leave margin below both producer and broker/topic limits.
 >
-> $$WINDOW\_SIZE > (max.message.bytes - 17) \times 8 = (1\,048\,576 - 17) \times 8 = 8\,388\,712$$
->
-> If you need a larger window, increase `max.message.bytes` in the broker configuration for the gap topic:
+> If you need a larger window, coordinate the producer and broker/topic limits.
+> To change the gap topic limit:
 >
 > ```sh
 > kafka-configs.sh --bootstrap-server localhost:9092 \
@@ -229,9 +327,16 @@ Because purged windows are tombstoned, the number of live keys in the gap topic 
 
 $$\text{live keys} = \text{source partitions} \times \text{MAX\_WINDOWS}$$
 
-After full compaction this is the entire topic, plus tombstones of recently purged windows. The cleaner keeps a tombstone for `delete.retention.ms` (default 24 hours) after compacting it, so with the defaults the topic also holds one small tombstone per window purged in the last day. `create` reads the whole topic on every run, so a lower `delete.retention.ms` (for example one hour) is safe and keeps the topic smaller. Example: 6 partitions × 5 windows × ~300 bytes ≈ **9 KB** of live records.
+After compaction the topic contains current values and retained tombstones.
+Set `delete.retention.ms` (default 24 hours) longer than the slowest full
+gap-topic scan, even though `create` starts from the beginning each time.
+Do not shorten it without measuring that scan time. Example: 6 partitions
+times 5 windows times approximately 300 bytes is about **9 KB** of live values.
 
-Before compaction the topic grows at roughly one message per active window per `GAP_EMIT_INTERVAL_SEC`. With Kafka's default `min.cleanable.dirty.ratio=0.5` and no compaction lag, the cleaner triggers almost immediately and the topic stays near its compacted size.
+Before compaction the topic grows at roughly one message per active window per
+`GAP_EMIT_INTERVAL_SEC`. Compaction is asynchronous, only cleans eligible
+segments, and depends on segment rolling and cleaner capacity. The live-key
+bound is not a hard on-disk size bound.
 
 **The main risk is `min.compaction.lag.ms`.** If this is set on the gap topic, messages cannot be compacted until they are older than that value:
 

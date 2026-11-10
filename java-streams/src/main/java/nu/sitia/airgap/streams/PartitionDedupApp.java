@@ -29,6 +29,12 @@ import org.slf4j.LoggerFactory;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.AlterConfigOp;
+import org.apache.kafka.clients.admin.ConfigEntry;
+import org.apache.kafka.common.config.ConfigResource;
+import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.RetriableException;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
@@ -47,6 +53,7 @@ import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.processor.Cancellable;
 
 import nu.sitia.airgap.gapdetector.GapDetector;
+import nu.sitia.airgap.gapdetector.GapDetectorStore;
 
 import java.time.Duration;
 import java.net.InetAddress;
@@ -132,7 +139,7 @@ public class PartitionDedupApp {
     public static final String STORE_GAP = "gap-tracker-store"; // gap detector needs its own state
     public static final String GAP_EMIT_INTERVAL_SEC = System.getenv().getOrDefault("GAP_EMIT_INTERVAL_SEC", "60");
 
-    // Persistence interval in milliseconds (configurable)
+    // Retained for configuration/JMX compatibility; state now updates per record.
     public static final long PERSIST_INTERVAL_MS = Long
             .parseLong(System.getenv().getOrDefault("PERSIST_INTERVAL_MS", "5000"));
 
@@ -355,7 +362,7 @@ public class PartitionDedupApp {
         // Warm standby replicas for faster failover of state (tune as desired)
         props.put(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, NUM_STANDBY_REPLICAS);
 
-        // Optional: commit interval (EOS v2 ignores this for transactional commits)
+        // Controls transactional commits, including output, input offsets and dedup state.
         props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, COMMIT_INTERVAL_MS);
 
         // Allow Kafka client security/tls/sasl configuration via environment variables.
@@ -404,7 +411,8 @@ public class PartitionDedupApp {
         Log.info(LOG, configAttrs("maxWindows", MAX_WINDOWS), "MAX_WINDOWS={}", MAX_WINDOWS);
         Log.info(LOG, configAttrs("gapEmitIntervalSec", GAP_EMIT_INTERVAL_SEC), "GAP_EMIT_INTERVAL_SEC={}", GAP_EMIT_INTERVAL_SEC);
         Log.info(LOG, configAttrs("missingReportIntervalSec", MISSING_REPORT_INTERVAL_SEC), "MISSING_REPORT_INTERVAL_SEC={}", MISSING_REPORT_INTERVAL_SEC);
-        Log.info(LOG, configAttrs("persistIntervalMs", PERSIST_INTERVAL_MS), "PERSIST_INTERVAL_MS={}", PERSIST_INTERVAL_MS);
+        Log.info(LOG, configAttrs("persistIntervalMs", PERSIST_INTERVAL_MS),
+                "PERSIST_INTERVAL_MS={} (deprecated; dedup state updates per record)", PERSIST_INTERVAL_MS);
         Log.info(LOG, configAttrs("failFast", FAIL_FAST), "FAIL_FAST={}", FAIL_FAST);
         Log.info(LOG, configAttrs("failFastStartupTimeoutMs", FAIL_FAST_STARTUP_TIMEOUT_MS), "FAIL_FAST_STARTUP_TIMEOUT_MS={}", FAIL_FAST_STARTUP_TIMEOUT_MS);
         Log.info(LOG, configAttrs("failFastCheckIntervalMs", FAIL_FAST_CHECK_INTERVAL_MS), "FAIL_FAST_CHECK_INTERVAL_MS={}", FAIL_FAST_CHECK_INTERVAL_MS);
@@ -492,6 +500,17 @@ public class PartitionDedupApp {
                         }
                         continue;
                     }
+                }
+
+                if (!ensureChangelogCompaction(props)) {
+                    try {
+                        Thread.sleep(applyJitter(Math.max(1L, RETRY_BACKOFF_MS)));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        terminateRequested.set(true);
+                        break;
+                    }
+                    continue;
                 }
 
                 Topology topology = buildTopology();
@@ -1059,6 +1078,47 @@ public class PartitionDedupApp {
         }
     }
 
+    static boolean ensureChangelogCompaction(Properties props) {
+        String topic = props.getProperty(StreamsConfig.APPLICATION_ID_CONFIG) + "-" + STORE_GAP + "-changelog";
+        ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topic);
+        Admin admin = Admin.create(createAdminProps(props));
+        try {
+            org.apache.kafka.clients.admin.Config config = admin.describeConfigs(List.of(resource))
+                    .all().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS).get(resource);
+            String policy = config.get(TopicConfig.CLEANUP_POLICY_CONFIG).value();
+            if (!TopicConfig.CLEANUP_POLICY_COMPACT.equals(policy)) {
+                Log.warn(LOG, Attrs.event(Events.CONFIG_APPLIED).with("messaging.destination.name", topic),
+                        "Repairing changelog cleanup.policy from {} to compact before processing; "
+                                + "time-based deletion can discard dedup history", policy);
+                admin.incrementalAlterConfigs(Map.of(resource, List.of(new AlterConfigOp(
+                        new ConfigEntry(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT),
+                        AlterConfigOp.OpType.SET)))).all().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            }
+            return true;
+        } catch (java.util.concurrent.ExecutionException e) {
+            if (e.getCause() instanceof UnknownTopicOrPartitionException) {
+                // Kafka Streams creates a missing changelog with the explicit compact policy.
+                return true;
+            }
+            if (e.getCause() instanceof RetriableException) {
+                Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT).exception(e.getCause()),
+                        "Cannot verify changelog policy yet; delaying startup until Kafka is available");
+                return false;
+            }
+            throw new IllegalStateException("Cannot verify/repair cleanup.policy=compact for " + topic
+                    + "; check DescribeConfigs/AlterConfigs permissions", e.getCause());
+        } catch (java.util.concurrent.TimeoutException e) {
+            Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT).exception(e),
+                    "Timed out verifying changelog policy; delaying startup until Kafka is available");
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } finally {
+            admin.close(Duration.ofSeconds(5));
+        }
+    }
+
     public static Topology buildTopology() {
         StreamsBuilder builder = new StreamsBuilder();
 
@@ -1067,7 +1127,7 @@ public class PartitionDedupApp {
         StoreBuilder<KeyValueStore<String, byte[]>> gapStoreBuilder = Stores
                 .keyValueStoreBuilder(gapSupplier, Serdes.String(), Serdes.ByteArray())
                 .withCachingEnabled()
-                .withLoggingEnabled(new HashMap<>());
+                .withLoggingEnabled(Map.of(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT));
         builder.addStateStore(gapStoreBuilder);
 
         // Parse RAW_TOPICS env
@@ -1119,17 +1179,16 @@ public class PartitionDedupApp {
     public static class DedupAndGapProcessor
             implements org.apache.kafka.streams.processor.api.Processor<String, byte[], String, byte[]> {
         private int partition = -1;
-        private final long persistIntervalMs;
         private static final Logger LOG = LoggerFactory.getLogger(DedupAndGapProcessor.class);
         private final long windowSize;
         private final int maxWindows;
 
         private org.apache.kafka.streams.processor.api.ProcessorContext<String, byte[]> context;
         private KeyValueStore<String, byte[]> gapStore;
+        private GapDetectorStore detectorStore;
         private Map<String, GapDetector> gapDetectors = new HashMap<>();
         // Legacy gap-topic keys ("topic_partition:windowMin") of windows restored from state.
         private final java.util.Set<String> restoredLegacyGapKeys = new java.util.HashSet<>();
-        private Cancellable persistSchedule;
         private Cancellable emitSchedule;
 
         private static final Map<Integer, Long> lastTotalMissing = new java.util.concurrent.ConcurrentHashMap<>();
@@ -1147,7 +1206,6 @@ public class PartitionDedupApp {
         private static final ObjectMapper REPORT_MAPPER = new ObjectMapper();
 
         public DedupAndGapProcessor() {
-            this.persistIntervalMs = PERSIST_INTERVAL_MS;
             this.windowSize = WINDOW_SIZE;
             this.maxWindows = MAX_WINDOWS;
             // Register DynamicMBean for gapDetectors
@@ -1178,61 +1236,20 @@ public class PartitionDedupApp {
 
             this.gapStore = (KeyValueStore<String, byte[]>) context.getStateStore(STORE_GAP);
 
-            // Load gapDetectors only for this thread's partition key
-            try (org.apache.kafka.streams.state.KeyValueIterator<String, byte[]> iter = gapStore.all()) {
-                while (iter.hasNext()) {
-                    org.apache.kafka.streams.KeyValue<String, byte[]> entry = iter.next();
-                    GapDetector gd = deserializeGapDetector(entry.value, entry.key);
-                    if (gd != null) {
-                        gapDetectors.put(entry.key, gd);
-                        // Restored windows may have legacy gap records (dedup 0.1.10 and
-                        // earlier); remember their keys so purging also removes them.
-                        for (GapDetector.Window w : gd.getWindows()) {
-                            restoredLegacyGapKeys.add(entry.key + ":" + w.getMinOffset());
-                        }
-                        Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "Registered GapDetector for key: {}", entry.key);
-                        JmxSupport.registerProcessorMBean(this);
-                    }
+            this.detectorStore = new GapDetectorStore(gapStore);
+            try {
+                gapDetectors = detectorStore.restore();
+            } catch (RuntimeException e) {
+                Log.error(LOG, Attrs.event(Events.STATE_STORE).failure(),
+                        "Failed to restore dedup state for task {}; refusing to reset history", context.taskId(), e);
+                throw e;
+            }
+            for (Map.Entry<String, GapDetector> entry : gapDetectors.entrySet()) {
+                for (GapDetector.Window w : entry.getValue().getWindows()) {
+                    restoredLegacyGapKeys.add(entry.getKey() + ":" + w.getMinOffset());
                 }
             }
-
-            // Persist this partition’s detector periodically
-            Log.debug(LOG, Attrs.event(Events.STATE_STORE)
-                    .with("airgap.persist.interval_ms", persistIntervalMs), "Scheduling periodic gap detector persistence every {} ms", persistIntervalMs);
-            this.persistSchedule = this.context.schedule(
-                    java.time.Duration.ofMillis(persistIntervalMs),
-                    org.apache.kafka.streams.processor.PunctuationType.WALL_CLOCK_TIME,
-                    ts -> {
-                        long startNs = System.nanoTime();
-                        int persisted = 0;
-                        long totalBytes = 0;
-                        for (Map.Entry<String, GapDetector> entry : gapDetectors.entrySet()) {
-                            try {
-                                byte[] data = serializeGapDetector(entry.getValue());
-                                if (data != null) {
-                                    totalBytes += data.length;
-                                }
-                                gapStore.put(entry.getKey(), data);
-                                persisted++;
-                            } catch (Exception e) {
-                                Log.error(LOG, Attrs.event(Events.STATE_STORE)
-                                        .with("db.record.key", entry.getKey()), "Failed to serialize GapDetector for {}", entry.getKey(), e);
-                            }
-                        }
-                        if (LOG.isDebugEnabled()) {
-                            long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
-                            Log.debug(LOG, Attrs.event(Events.STATE_STORE)
-                                    .with("messaging.destination.partition.id", String.valueOf(partition))
-                                    .with("db.operation.batch.size", persisted)
-                                    .with("db.response.size", totalBytes)
-                                    .with("db.operation.duration_ms", durationMs),
-                                    "Persisted gap detectors (partition={}, count={}, totalBytes={}, durationMs={})",
-                                    partition,
-                                    persisted,
-                                    totalBytes,
-                                    durationMs);
-                        }
-                    });
+            JmxSupport.registerProcessorMBean(this);
 
             Log.debug(LOG, Attrs.event(Events.GAP_DETECTED), "Emit gap: Started gap detection for partition {}", partition);
             // Emit gaps only for this partition’s detector
@@ -1255,10 +1272,6 @@ public class PartitionDedupApp {
             if (emitSchedule != null) {
                 emitSchedule.cancel();
                 emitSchedule = null;
-            }
-            if (persistSchedule != null) {
-                persistSchedule.cancel();
-                persistSchedule = null;
             }
             if (partition >= 0) {
                 assignedRawPartitions.remove(partition);
@@ -1454,6 +1467,16 @@ public class PartitionDedupApp {
                 }
             });
 
+            try {
+                if (alreadyReceived != 1 || detectorStore.requiresMigration(topicPartition)) {
+                    detectorStore.persist(topicPartition, gapDetector, offset);
+                }
+            } catch (RuntimeException e) {
+                Log.error(LOG, Attrs.event(Events.STATE_STORE).failure().with("db.record.key", topicPartition),
+                        "Failed to persist dedup state; aborting record processing", e);
+                throw e;
+            }
+
             // * alreadyReceived is 1 if this number was already received, 0 if it’s newly
             // received and -1 if it fills a gap.
             // * If the number is less than the lowest known offset, it is considered unseen
@@ -1564,49 +1587,6 @@ public class PartitionDedupApp {
     }
 
 
-    /**
-     * Deserialize a GapDetector from a byte array using Java serialization.
-     * Returns null if the byte array is null or deserialization fails.
-     */
-    private static GapDetector deserializeGapDetector(byte[] data, String detectorKey) {
-        if (data == null) {
-            Log.warn(LOG, Attrs.event(Events.STATE_STORE).failure(), "deserializeGapDetector called with null data (detectorKey={}), creating empty detector",
-                    detectorKey);
-            return new GapDetector("", WINDOW_SIZE, MAX_WINDOWS);
-        }
-        try (java.io.ByteArrayInputStream bis = new java.io.ByteArrayInputStream(data);
-                java.io.ObjectInputStream ois = new java.io.ObjectInputStream(bis)) {
-            Object obj = ois.readObject();
-            if (obj instanceof GapDetector) {
-                Log.debug(LOG, Attrs.event(Events.STATE_STORE), "Successfully deserialized GapDetector (detectorKey={})", detectorKey);
-                return (GapDetector) obj;
-            } else {
-                Log.error(LOG, Attrs.event(Events.STATE_STORE),
-                        "Deserialized object is not a recognized GapDetector for detectorKey {}: {}. Returning a new instance.",
-                        detectorKey,
-                        obj.getClass());
-            }
-        } catch (Exception e) {
-            Log.error(LOG, Attrs.event(Events.STATE_STORE), "Failed to deserialize GapDetector for detectorKey {}; creating empty detector", detectorKey,
-                    e);
-        }
-        return new GapDetector("", WINDOW_SIZE, MAX_WINDOWS);
-    }
-
-    /**
-     * Serialize a GapDetector to a byte array using Java serialization.
-     */
-    private static byte[] serializeGapDetector(GapDetector detector) throws java.io.IOException {
-        if (detector == null)
-            return null;
-        try (java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
-                java.io.ObjectOutputStream oos = new java.io.ObjectOutputStream(bos)) {
-            oos.writeObject(detector);
-            oos.flush();
-            return bos.toByteArray();
-        }
-    }
-
     /** Gap-topic key for a window: {@code topic:partition:windowMin}. */
     static String gapKey(String topic, int partition, long windowMin) {
         return topic + ":" + partition + ":" + windowMin;
@@ -1657,11 +1637,9 @@ public class PartitionDedupApp {
      *   [N bytes] 32-bit RoaringBitmap (portable format) of MISSING relative positions
      * </pre>
      *
-     * <p>The maximum payload size is 17 + ceil(windowSize / 8) bytes.
-     * With the default Kafka max.message.bytes of 1 048 576 (1 MiB) this means
-     * WINDOW_SIZE must be smaller than (1 048 576 - 17) * 8 = 8 388 712 events.
-     * If WINDOW_SIZE exceeds that limit the deduplicator will fail to emit gaps
-     * until Kafka is reconfigured with a larger max.message.bytes.
+     * <p>Fragmented bitmaps approach ceil(windowSize / 8) bytes plus Roaring
+     * headers and this 17-byte header. Kafka keys and batch headers also count
+     * toward producer/topic limits; size both with margin for the largest window.
      *
      * @param windowMin  absolute start offset of the window
      * @param windowMax  absolute end offset of the window (inclusive)

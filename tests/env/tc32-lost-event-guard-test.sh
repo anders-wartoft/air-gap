@@ -78,7 +78,8 @@ done
 sleep 2
 
 compose logs --no-color --no-log-prefix upstream >"$WORK/upstream.log" 2>&1
-guard_count="$(grep -c "AIRGAP LOST EVENT" "$WORK/sink.capture" 2>/dev/null || true)"
+# TCP capture is binary framed and has no line boundaries between events.
+guard_count="$(LC_ALL=C grep -ao "AIRGAP LOST EVENT" "$WORK/sink.capture" | wc -l | tr -d '[:space:]')" || [[ $? == 1 ]]
 stored_count="$(docker exec "$UPSTREAM_CID" sh -c 'ls -1 /airgap/work/lost-events 2>/dev/null | wc -l' | tr -d ' ')"
 stored_bytes="$(docker exec "$UPSTREAM_CID" sh -c 'cat /airgap/work/lost-events/* 2>/dev/null | wc -c' | tr -d ' ')"
 restart_count="$(docker inspect --format '{{.RestartCount}}' "$UPSTREAM_CID")"
@@ -138,7 +139,7 @@ if grep "\[ERROR\] Event transfer" "$WORK/upstream.log" | grep -q "{"; then
 else
     report_check "lost-event templates expanded" "no unresolved placeholders" "all substituted" 0 || rc=1
 fi
-small_delivered="$(grep -c "AIRGAP_00000" "$WORK/sink.capture" 2>/dev/null || true)"
+small_delivered="$(LC_ALL=C grep -ao "AIRGAP_00000" "$WORK/sink.capture" | wc -l | tr -d '[:space:]')" || [[ $? == 1 ]]
 if (( small_delivered >= SMALL_RECORDS )); then
     report_check "small records unaffected" "at least $SMALL_RECORDS original payloads delivered" "$small_delivered" 0 || rc=1
 else

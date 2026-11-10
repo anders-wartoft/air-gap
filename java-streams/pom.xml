@@ -4,7 +4,7 @@
   <groupId>nu.sitia.airgap.streams</groupId>
   <artifactId>air-gap-deduplication</artifactId>
   <packaging>jar</packaging>
-  <version>0.1.17.2-SNAPSHOT</version>
+  <version>0.1.18-SNAPSHOT</version>
   <name>air-gap Deduplication</name>
   <url>http://maven.apache.org</url>
   <properties>
@@ -24,6 +24,12 @@
       <groupId>org.apache.kafka</groupId>
       <artifactId>kafka-streams</artifactId>
       <version>3.9.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-streams-test-utils</artifactId>
+      <version>3.9.1</version>
+      <scope>test</scope>
     </dependency>
 
     <dependency>
@@ -76,6 +82,25 @@
     </dependency>
   </dependencies>
 
+  <profiles>
+    <profile>
+      <id>docker-tests</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <version>3.5.4</version>
+            <executions>
+              <execution>
+                <goals><goal>integration-test</goal><goal>verify</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
   <build>
     <plugins>
       <!-- Maven compiler plugin -->

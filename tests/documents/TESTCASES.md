@@ -5312,7 +5312,9 @@ guards.
 2. Require upstream's Sarama consumer to become ready.
 3. Produce six records alternating 1 KiB and 4 MiB payloads.
 4. Wait until Kafka reports consumer-group lag zero.
-5. Require exactly three guards in the captured TCP stream.
+5. Require exactly three guards in the captured TCP stream. Count marker
+   occurrences as binary-safe text, not matching lines: TCP framing does not
+   insert newline separators between events.
 6. Require one guard to match the OTLP-shaped JSON template, including topic,
    partition, offset, reason, upstream id, lost-event file, configured record
    ceiling, and JSON-escaped quote and backslash characters.
@@ -6068,7 +6070,11 @@ Requires host Go, git tags, Docker Compose and the current dedup fat JAR
 `TC41_LEGACY_TAG` (default `0.1.10-SNAPSHOT`) with host Maven, or the
 `maven:3.9-eclipse-temurin-17` image when Maven is absent, and cached under
 `${XDG_CACHE_HOME:-~/.cache}/airgap-tests/`. `TC41_LEGACY_DEDUP_JAR` and
-`TC41_CURRENT_DEDUP_JAR` override the JARs. The stack is isolated (single
+`TC41_CURRENT_DEDUP_JAR` override the JARs. Without a current-JAR override,
+host Maven resolves the exact project version from `java-streams/pom.xml`;
+the runner requires that version's Linux AMD64 JAR and logs its path.
+It never falls back to an older or higher-version artifact left in `target`.
+The stack is isolated (single
 Kafka broker, no published ports); both dedup versions share one state volume
 and `APPLICATION_ID`, with `WINDOW_SIZE=100` and `MAX_WINDOWS=2`.
 
@@ -6120,7 +6126,11 @@ cd tests/env
 
 Requires host Go, Docker Compose and the current dedup fat JAR
 (`make build-java`); `TC42_CURRENT_DEDUP_JAR` overrides the JAR and
-`TC42_WAIT_SECONDS` (default 180) the compaction timeout. The stack is
+`TC42_WAIT_SECONDS` (default 180) the compaction timeout. Without a JAR
+override, host Maven resolves the exact project version and the runner
+requires that version's Linux AMD64 JAR, not the first filename in `target`.
+The selected path is logged; missing builds fail with instructions to rebuild.
+The stack is
 isolated (single Kafka broker, no published ports). Dedup runs with
 `WINDOW_SIZE=100`, `MAX_WINDOWS=2`, `GAP_EMIT_INTERVAL_SEC=1` and a WARN-level
 log4j configuration. The broker uses `log.cleaner.backoff.ms=1000` and the
@@ -6324,3 +6334,86 @@ printed path. `-pause` retains both the stack and artifacts; the last
 scenario's roles have been stopped, while Kafka remains available.
 The artifact directory contains `legacy.commit`, `modern.commit`, archived
 sources and built binaries, plus each scenario's configurations and logs.
+
+## TC-46 — Bounded dedup state and transaction-safe crash recovery
+
+* Covers: REQ-4, REQ-59.
+* Implemented in: 0.1.18-SNAPSHOT.
+* Runner: [verify-dedup-state.sh](../env/verify-dedup-state.sh),
+  selected by [46.env](../env/testcases/46.env).
+* Compose: [docker-compose.dedup-state.yml](../env/docker-compose.dedup-state.yml).
+* Assertions: [DedupStateIT.java](../../java-streams/src/test/java/nu/sitia/airgap/streams/DedupStateIT.java).
+
+### Run and setup
+
+```bash
+cd tests/env
+./run-testcase.sh 46
+# Or include it in the automated chain:
+./run-testcases.sh 46
+```
+
+Requires Docker Compose with a running Docker daemon, Maven and Java 17+.
+No prebuilt JAR, Go binary or LogGenerator is required. The runner builds the
+current working tree and runs the normal Java unit suite plus the Maven
+`docker-tests` integration profile.
+
+Kafka runs in an isolated Docker Compose project; dedup runs as separate host
+JVM processes with real RocksDB state. The broker binds only to localhost port
+19092; set `DEDUP_TEST_KAFKA_PORT` to use another free port, or `KAFKA_IMAGE`
+to select another compatible broker image. Each test uses unique
+application/topic names and fresh temporary local state directories.
+
+The broker defaults to delete-only, 12-hour retention, reproducing the unsafe
+changelog defaults found during soak testing. Its message limit is increased
+only so the oversized legacy fixture can be seeded; dedup's producer retains
+the default `max.request.size=1048576`.
+
+### Procedure and assertions
+
+1. **Crash after commit:** start dedup with a ten-minute legacy snapshot
+   interval and a 100 ms commit interval. Send `export_0_1` and wait for its
+   committed output. Force-kill dedup, restart with an empty local state
+   directory, then send the delayed copy and `export_0_2`. Require committed
+   output keys exactly `[export_0_1, export_0_2]`.
+2. **Oversized legacy migration:** seed a Java-serialized detector with two
+   five-million-offset windows containing alternating received/missing
+   offsets. Require the fixture to exceed 1 MiB. Start dedup, send the next
+   unique event, and require committed output without an oversized-record
+   crash. Kill it, cold-restore again, send old duplicates and a new marker.
+   Require only the unique events and inspect committed changelog records:
+   new nonlegacy state values must be at most 8,192 bytes.
+3. **Existing changelog policy:** pre-create a delete-only changelog. Start
+   dedup and require its effective policy to be `compact` before processing.
+4. **New changelog policy:** remove the pre-created changelog, start dedup
+   against the delete-only broker default, and require the Streams-created
+   changelog to use `compact`.
+5. **Crash before commit:** start dedup with a five-second commit interval.
+   Observe the first output physically with a `read_uncommitted` consumer
+   and confirm it is not visible with `read_committed`. Force-kill dedup,
+   cold-restore, resend the original event and a new marker. Require
+   committed keys exactly `[export_0_1, export_0_2]`: the abandoned
+   transaction must not introduce a visible duplicate.
+
+### Expected result, evidence and limits
+
+All five integration tests and the normal unit suite pass; Maven and the
+runner exit zero and print a final TC-46 PASS summary. Any assertion, startup,
+build or teardown failure returns nonzero.
+
+Before the fix, the first three regression scenarios failed: the crash test
+produced `[export_0_1, export_0_1, export_0_2]`, oversized state failed at the
+producer limit, and the changelog remained delete-only. After the fix, these
+scenarios pass along with the two additional policy/abort-replay checks.
+
+Maven reports remain under `java-streams/target/surefire-reports/` and
+`java-streams/target/failsafe-reports/`; child JVM logs remain under
+`java-streams/target/dedup-it-logs/`. The isolated stack is removed on success
+or failure. `-pause` is unsupported and explicitly rejected.
+
+This case proves bounded state writes and transaction-safe duplicate history
+across hard crashes and cold restoration. It does not test the UDP transport,
+TLS/ACL enforcement, actual 12-hour retention expiry, production-scale
+throughput or a 30-day soak. State already deleted before upgrade is not
+reconstructed. TC-9 separately checks the packaged Java 17 container's
+Kafka-outage and restart stability.

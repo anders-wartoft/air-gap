@@ -16,6 +16,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/lib/report.sh"
+source "$HERE/lib/dedup-jar.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc41.XXXXXX")"
 chmod 0755 "$WORK"
 PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
@@ -46,6 +47,9 @@ cleanup() {
             echo "TC-41 failure artifacts retained at $WORK" >&2
         fi
     fi
+    echo "─── testcase 41 verdict ───"
+    echo "  exit code : $rc"
+    if (( rc != 0 )); then echo "  evidence : $WORK"; fi
     report_summary "TC-41 graceful upgrade of legacy gap records" "$rc" || true
     exit "$rc"
 }
@@ -86,15 +90,7 @@ legacy_jar() {
 }
 
 current_jar() {
-    local jar="${TC41_CURRENT_DEDUP_JAR:-}"
-    if [[ -z "$jar" ]]; then
-        jar="$(ls "$ROOT"/java-streams/target/air-gap-deduplication-fat-*-linux-amd64.jar 2>/dev/null | head -1 || true)"
-    fi
-    if [[ -z "$jar" || ! -s "$jar" ]]; then
-        echo "TC-41: no current dedup fat JAR; build it with 'make build-java' or set TC41_CURRENT_DEDUP_JAR" >&2
-        exit 2
-    fi
-    echo "$jar"
+    current_dedup_jar "$ROOT" "${TC41_CURRENT_DEDUP_JAR:-}" "TC41"
 }
 
 # produce FROM TO SKIP... — write keys source_0_<offset> for FROM..TO except SKIP.

@@ -107,6 +107,7 @@ services:
       FAIL_FAST_STARTUP_TIMEOUT_MS: ${TC9_RESTART_STARTUP_TIMEOUT_MS:-5000}
       FAIL_FAST_CHECK_INTERVAL_MS: ${TC9_RESTART_CHECK_INTERVAL_MS:-4000}
       FAIL_FAST_CHECK_TIMEOUT_MS: ${TC9_RESTART_CHECK_TIMEOUT_MS:-8000}
+      DEDUP_JAR_NAME: ${TC9_RESTART_JAR_NAME:-}
     volumes:
       - ../../java-streams/target:/airgap/dedup-jar:ro,z
       - ../../config:/airgap/config:ro,z
@@ -119,7 +120,12 @@ services:
       - -c
       - |
         set -eu
-        JAR=$$(ls /airgap/dedup-jar/air-gap-deduplication-fat-*-linux-amd64.jar 2>/dev/null | head -1)
+        if [ -n "$$DEDUP_JAR_NAME" ]; then
+          JAR="/airgap/dedup-jar/$$DEDUP_JAR_NAME"
+          test -r "$$JAR"
+        else
+          JAR=$$(ls /airgap/dedup-jar/air-gap-deduplication-fat-*-linux-amd64.jar 2>/dev/null | head -1)
+        fi
         if [ -z "$$JAR" ]; then
           echo "[dedup] no fat jar under /airgap/dedup-jar/. Build it with: make build-java" >&2
           exit 2

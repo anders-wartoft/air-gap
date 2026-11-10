@@ -335,6 +335,8 @@ public class GapDetector implements java.io.Serializable {
 
     /** Represents a single window */
     public static class Window implements java.io.Serializable {
+        // Preserve the implicit UID of legacy serialized windows during migration.
+        private static final long serialVersionUID = -7186946582250807937L;
     // Track sticky empty emission state (not serialized)
     public transient boolean[] lastEmittedNonEmpty = null;
         // No-arg constructor for Jackson
@@ -349,9 +351,13 @@ public class GapDetector implements java.io.Serializable {
         final Roaring64NavigableMap received = new Roaring64NavigableMap();
 
         Window(long minOffset, long maxOffset) {
+            this(minOffset, maxOffset, System.currentTimeMillis());
+        }
+
+        Window(long minOffset, long maxOffset, long createdAt) {
             this.minOffset = minOffset;
             this.maxOffset = maxOffset;
-            this.createdAt = System.currentTimeMillis();
+            this.createdAt = createdAt;
         }
 
         public long getMinOffset() {
