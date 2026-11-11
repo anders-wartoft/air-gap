@@ -1,6 +1,6 @@
 # Release Notes
 
-## 0.1.18-SNAPSHOT
+## 0.1.19-SNAPSHOT
 
 ### Testcase-scoped Docker projects and image overrides
 
@@ -63,6 +63,8 @@
 - Survival still fails the control. Watermark diagnostics distinguish actual
   WARN transitions from configuration templates and no longer report a kill
   when the container remains running.
+
+## 0.1.18-SNAPSHOT
 
 ### Deterministic dedup artifacts in upgrade tests
 
