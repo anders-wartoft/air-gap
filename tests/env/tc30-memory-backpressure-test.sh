@@ -2,6 +2,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 cd "$HERE"
 # shellcheck source=lib/report.sh
 source "$HERE/lib/report.sh"
@@ -11,7 +12,7 @@ mkdir -m 0755 "$WORK/lost-events"
 # Keep the sink's counter host-owned when its container writes with mode 0600.
 printf '0\n' >"$WORK/sink.bytes"
 chmod 0600 "$WORK/sink.bytes"
-PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
+airgap_init_test 30
 export TC30_WORK="$WORK"
 COMPOSE_FILE="$HERE/docker-compose.tc30.yml"
 CAP_BYTES=$((192 * 1024 * 1024))

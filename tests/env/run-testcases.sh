@@ -63,6 +63,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CALLER_DIR="$PWD"
 cd "$HERE"
+source "$HERE/lib/docker-test.sh"
 
 usage() { sed -n '2,/^set -euo pipefail/{ /^set -euo pipefail/d; p; }' "$0"; exit "${1:-1}"; }
 
@@ -355,6 +356,7 @@ for id in "${IDS[@]}"; do
         continue
     fi
     LOG="$CASE_LOGDIR/tc-${id}.log"
+    airgap_init_test "$id"
     tc_start_epoch="$(date +%s)"
     set +e
     if [[ "$id" == 16 ]]; then

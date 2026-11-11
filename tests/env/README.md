@@ -17,14 +17,62 @@ The repository-root Compose project is a separate RPM-installed demo.
 
 | Component | How it is selected or updated |
 | --- | --- |
-| Upstream/downstream OS | Set `UPSTREAM_BASE_IMAGE` / `DOWNSTREAM_BASE_IMAGE` in `.env`, then build the service images. |
+| Common OS baseline | Set `AIRGAP_BASE_IMAGE` in `.env`; applies to upstream, downstream and the systemd fixture. |
+| Role-specific OS | Override `UPSTREAM_BASE_IMAGE`, `DOWNSTREAM_BASE_IMAGE` or `SYSTEMD_BASE_IMAGE` independently. |
 | Kafka | Set `KAFKA_IMAGE` in `.env`, then pull or recreate the Kafka services. |
 | Dedup JVM | Set `DEDUP_IMAGE` in `.env`, then pull or recreate the dedup service. |
+| LogGenerator JVM | Set `LG_IMAGE`; defaults to `DEDUP_IMAGE`. |
+| Elasticsearch / Kibana | Set `ELASTIC_STACK_VERSION` for both, or `ELASTICSEARCH_IMAGE` / `KIBANA_IMAGE` individually. |
+| Integrity verifier | Set `INTEGRITY_BASE_IMAGE` (Python base); dependencies remain pinned by its requirements file. |
+| Other test helpers | Set `TC7_GO_IMAGE`, `TC8_SETTLE_IMAGE`, `BUSYBOX_IMAGE` or `MAVEN_IMAGE`. |
 | Air-gap binaries | Build on the host; containers use the mounted build directory. |
 | Air-gap configuration | Edit files under `../../config` or select a case with the runner. |
 
 The service image is deliberately minimal. Air-gap binaries and the dedup JAR
 are mounted from the host rather than baked into it.
+
+Image defaults live in [lib/docker-images.sh](lib/docker-images.sh).
+All numbered runners load them, including standalone scripts and Docker-run
+helpers. Image settings in the shared, shell-compatible `.env` override those
+defaults; exported environment settings take precedence over `.env`. Separate
+upstream/downstream image tags prevent one role's build from silently replacing
+the other role's OS. These project-local images are built, not pulled from a
+registry. A common OS override still needs to provide the tools
+required by each fixture (in particular `dnf` and systemd for TC-8).
+
+For example, from the repository root:
+
+```bash
+AIRGAP_BASE_IMAGE=docker.io/library/rockylinux:9 \
+KAFKA_IMAGE=docker.io/confluentinc/confluent-local:7.6.1 \
+  bash tests/env/run-testcases.sh 26,30
+```
+
+Changing an image does not adapt broker settings or certify compatibility
+with a new major Kafka release; rerun the relevant regressions after changes.
+
+### Testcase project names and isolation
+
+Numbered tests use `airgap-tcNN-<unique-run-id>` Compose projects, for example
+`airgap-tc08-a12b34c56d78`. Container and network names use that project rather
+than fixed `airgap-testenv` names. Nested TC-8 systemd and TC-9 restart fixtures
+add a descriptive suffix to their parent project's name. Docker-run helpers
+carry the same project label. Runners print their project name, and paused
+stacks print inspection/teardown instructions using it.
+
+Batch cleanup targets only the current case's project, never another run's
+stack. Export the printed `COMPOSE_PROJECT_NAME` when inspecting or explicitly
+reusing a retained stack; leave it unset for a fresh independent run.
+Project-scoped names do not remove other concurrency constraints: TC-16 uses
+fixed host-network ports, TC-46's published broker port is configurable, and
+some tests still share host evidence/build/certificate paths.
+
+TC-16 saves each side's project name in `TC16_RESULTS_DIR` (`us.project` and
+`ds.project`) so `verify`, `stop-us` and `reset-*` address the original stacks
+across invocations. Use a separate results directory for independent runs.
+The unnumbered package and chaos suites retain descriptive suite names;
+they also accept `COMPOSE_PROJECT_NAME` and image overrides in their Compose
+files.
 
 ## Platform and host requirements
 
@@ -57,10 +105,13 @@ Validate Compose models and portability invariants without starting containers:
 
 ```bash
 python3 -m unittest discover -s tests/env -p 'test_compose_portability.py'
+bash tests/env/test-docker-settings.sh
 ```
 
 Run from the repository root. This requires the Docker Compose CLI but does
-not pull images or start containers. Run verifier and host-owned fixture
+not pull images or start containers. These checks cover all Compose models,
+testcase-scoped names/networks, role-specific image overrides and shared
+`.env`/environment precedence. Run verifier and host-owned fixture
 regressions without a container engine:
 
 ```bash
@@ -286,6 +337,7 @@ protocol (or run both side-by-side for comparison).
 ```bash
 cd tests/env
 cp .env.example .env
+source lib/docker-test.sh                            # shared image defaults/overrides for manual Compose
 docker compose up --build                             # single pair, default configs
 docker compose --profile dual --profile second-cluster up  # two upstreams, two upstream clusters
 docker compose down -v                                # clean shutdown + wipe volumes
@@ -299,6 +351,9 @@ Run a specific test case by number:
 ./run-testcase.sh 11 down-only       # downstream half only
 ./run-testcase.sh 11 -pause          # run, then LEAVE containers up for inspection
 ```
+
+For a paused stack, first export the `COMPOSE_PROJECT_NAME` printed by the
+runner before issuing manual Compose commands.
 
 With `-pause` (also `--pause` / `-p`), the stack stays up after `lg-producer`
 finishes so you can inspect topics, copy log files, and open shells inside

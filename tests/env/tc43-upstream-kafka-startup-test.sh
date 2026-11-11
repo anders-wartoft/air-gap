@@ -4,11 +4,12 @@
 # and the same process must forward events once Kafka answers.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/lib/report.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc43.XXXXXX")"
 mkdir -m 0755 "$WORK/lost-events"
-PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
+airgap_init_test 43
 export TC_WORK="$WORK" AIRGAP_BIN_DIR="$WORK" COMPOSE_PROGRESS=plain
 
 compose() {

@@ -35,11 +35,12 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 cd "$HERE"
 # shellcheck source=lib/report.sh
 source "$HERE/lib/report.sh"
 
-PROJECT="${PROJECT_NAME:-airgap-testenv}"
+airgap_init_test 24
 UPSTREAM_A_CTR="${PROJECT}-upstream-a-1"
 DOWNSTREAM_CTR="${PROJECT}-downstream-1"
 
@@ -69,7 +70,7 @@ net_name="$(docker inspect "$DOWNSTREAM_CTR" --format '{{range $k, $v := .Networ
 if [[ -z "$net_name" ]]; then
     report_check "Resolve downstream's docker network" "found" "NOT found" 1 || rc=1
 else
-    docker run --rm --network "$net_name" busybox:latest \
+    airgap_docker_run --rm --network "$net_name" "$BUSYBOX_IMAGE" \
         sh -c 'echo "not a tls handshake" | nc -w 2 downstream 1234' >/dev/null 2>&1 || true
     sleep 2
     downstream_log="$(docker logs "$DOWNSTREAM_CTR" 2>&1 || true)"

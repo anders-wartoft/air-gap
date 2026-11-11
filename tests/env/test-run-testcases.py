@@ -24,6 +24,8 @@ class BatchRunnerTests(unittest.TestCase):
         (self.runner / "lib").mkdir()
         shutil.copy2(HERE / "run-testcases.sh", self.runner)
         shutil.copy2(HERE / "lib/chain-report.py", self.runner / "lib")
+        for name in ("docker-test.sh", "docker-images.sh"):
+            shutil.copy2(HERE / "lib" / name, self.runner / "lib")
         for number in (1, 2, 3):
             (self.runner / f"testcases/{number:02}.env").write_text("TC_RUNNER=stub\n")
         (self.runner / "testcases/16.env").write_text(

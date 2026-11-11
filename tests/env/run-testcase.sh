@@ -62,6 +62,7 @@ cd "$HERE"
 
 # shellcheck source=lib/report.sh
 source "$HERE/lib/report.sh"
+source "$HERE/lib/docker-test.sh"
 
 # TC-16 owns its staged stack; the generic runner starts all roles at once.
 case "${1-}" in
@@ -105,6 +106,7 @@ print_pause_hints() {
 Set the active profiles once in your shell so the commands below are short:
 
   export COMPOSE_PROFILES=${csv}
+  export COMPOSE_PROJECT_NAME=${PROJECT_NAME}
   cd $(pwd)
 
 Inspect Kafka topics (plaintext listener on broker-1):
@@ -122,14 +124,14 @@ Read / tail logs:
   docker compose logs upstream-a upstream-b downstream
 
 Copy log files out of a container:
-  docker cp airgap-testenv-dedup-1:/var/log/airgap ./dedup-logs
-  docker cp airgap-testenv-downstream-1:/var/log/airgap ./downstream-logs
+  docker cp ${PROJECT_NAME}-dedup-1:/var/log/airgap ./dedup-logs
+  docker cp ${PROJECT_NAME}-downstream-1:/var/log/airgap ./downstream-logs
 
 Open a shell inside a container:
   docker compose exec kafka-upstream bash
   docker compose exec dedup          sh
 
-Re-run the testcase (reuses the running stack where possible):
+Re-run the testcase (reuses this project while COMPOSE_PROJECT_NAME is exported):
   ./run-testcase.sh ${TC_ID} -pause
 
 Tear everything down when you're finished:
@@ -140,6 +142,7 @@ EOF
 TC_ID="$1"
 shift
 TC_PADDED="$(printf '%02d' "$TC_ID")"
+airgap_init_test "$TC_ID"
 MANIFEST="testcases/${TC_PADDED}.env"
 [[ -f "$MANIFEST" ]] || { echo "no manifest: $MANIFEST" >&2; exit 2; }
 
@@ -318,36 +321,12 @@ echo
 bash "$HERE/generate-kafka-certs.sh"
 
 if [[ -n "$AUTO_EXIT_FROM" ]]; then
-    # docker-compose.yml pins container_name to airgap-testenv-<service>-1
-    # for both Docker Compose and podman-compose. Defined early (before
-    # PRE_UP_SCRIPT, which needs it)
-    # rather than down by the AUTO_EXIT polling loop where it's also used.
-    PROJECT_NAME="airgap-testenv"
-
     UP_ARGS=()
     if ((${#PASSTHROUGH[@]})); then
         UP_ARGS+=("${PASSTHROUGH[@]}")
     fi
     if ((${#SERVICES[@]})); then
         UP_ARGS+=("${SERVICES[@]}")
-    fi
-
-    # Reap any orphan `docker compose logs -f` streams left over from a
-    # previous aborted run on the same project. If they survive they keep a
-    # connection open to the Docker API and new `docker inspect` / `docker
-    # wait` calls can queue behind them, making the runner appear to hang
-    # even though lg-producer has already exited.
-    orphans="$(pgrep -f 'docker compose .*logs -f.*airgap-testenv' 2>/dev/null || true)"
-    if [[ -z "$orphans" ]]; then
-        orphans="$(pgrep -f 'docker compose .*logs -f.*lg-producer'   2>/dev/null || true)"
-    fi
-    if [[ -n "$orphans" ]]; then
-        echo "runner: killing stale docker-compose-logs orphans: $(echo "$orphans" | tr '\n' ' ')" >&2
-        # shellcheck disable=SC2086
-        kill $orphans 2>/dev/null || true
-        sleep 1
-        # shellcheck disable=SC2086
-        kill -9 $orphans 2>/dev/null || true
     fi
 
     # Install cleanup trap BEFORE `up -d` so Ctrl-C, SIGTERM, or any script
@@ -768,7 +747,7 @@ if [[ -n "$AUTO_EXIT_FROM" ]]; then
     # so it's passed explicitly, same as the VERIFY_SCRIPT convention.
     # The script runs with cwd=tests/env so `docker compose --profile X
     # run --rm X` joins the already-running stack's project/network (the
-    # compose file pins `name: airgap-testenv` so this works regardless of
+    # COMPOSE_PROJECT_NAME is exported so this works regardless of
     # cwd nesting). A non-zero exit here is fatal to the testcase, same as
     # a producer failure — the hook is doing real pipeline work, not just
     # reporting.

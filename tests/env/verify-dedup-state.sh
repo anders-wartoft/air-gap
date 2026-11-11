@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 source "$HERE/lib/report.sh"
 if [[ "${TC_PAUSE:-0}" != 0 ]]; then
     echo "TC-46 does not support -pause; child JVM logs and Maven reports are retained under java-streams/target" >&2
     exit 2
 fi
-PROJECT="airgap-dedup-state-$$"
+airgap_init_test 46
 compose() { docker compose -p "$PROJECT" -f "$HERE/docker-compose.dedup-state.yml" "$@"; }
 cleanup() {
     local rc=$?

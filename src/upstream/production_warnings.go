@@ -1,5 +1,7 @@
 package upstream
 
+import "fmt"
+
 func (c TransferConfiguration) WarnProductionConfiguration(phase string) {
 	warn := func(setting string, value interface{}, risk string) {
 		Logger.ProductionWarning(phase, setting, value, risk)
@@ -18,6 +20,21 @@ func (c TransferConfiguration) WarnProductionConfiguration(phase string) {
 	}
 	if c.source == "kafka" && c.caFile == "" {
 		warn("caFile", "", "Kafka input uses an unencrypted connection.")
+	}
+	if c.source == "kafka" {
+		if c.memoryHighWatermarkPercent-c.memoryLowWatermarkPercent < 5 {
+			warn("memoryHighWatermarkPercent", c.memoryHighWatermarkPercent,
+				fmt.Sprintf("High watermark %d%% is fewer than 5 percentage points above memoryLowWatermarkPercent=%d; small memory fluctuations can cause frequent pause/resume cycles and repeated reclamation. Increase the gap between watermarks while retaining Go memory headroom.",
+					c.memoryHighWatermarkPercent, c.memoryLowWatermarkPercent))
+		}
+		if c.goMemoryLimitPercent == 0 {
+			warn("goMemoryLimitPercent", 0,
+				"Go memory limit override is disabled; the inherited GOMEMLIMIT may leave insufficient headroom for admission to resume. Set a Go target at least 10 percentage points below memoryLowWatermarkPercent and size live Kafka buffers to fit.")
+		} else if c.memoryLowWatermarkPercent-c.goMemoryLimitPercent < 10 {
+			warn("goMemoryLimitPercent", c.goMemoryLimitPercent,
+				fmt.Sprintf("Go target %d%% leaves fewer than 10 percentage points below memoryLowWatermarkPercent=%d; non-Go or live memory can keep Kafka admission paused. Lower the Go target or increase the memory budget; headroom does not guarantee every workload fits.",
+					c.goMemoryLimitPercent, c.memoryLowWatermarkPercent))
+		}
 	}
 	if c.transport == "tcp" {
 		if c.tcpRetryTimes > 0 {

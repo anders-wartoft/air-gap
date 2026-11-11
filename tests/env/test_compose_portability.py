@@ -24,9 +24,10 @@ class ComposePortabilityTests(unittest.TestCase):
         cls.environment = {
             key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ
         }
+        cls.environment["COMPOSE_PROJECT_NAME"] = "airgap-tc08-portability"
         for name in (
             "TC_WORK", "TC27_WORK_DIR", "TC30_WORK", "TC31_WORK", "TC32_WORK",
-            "TC33_WORK", "TC35_LEAK_BIN", "TC38_WORK", "TC39_WORK",
+            "TC33_WORK", "TC35_LEAK_BIN", "TC38_WORK", "TC39_WORK", "TC48_WORK",
         ):
             cls.environment[name] = cls.temporary.name
         cls.models = {}
@@ -90,12 +91,69 @@ class ComposePortabilityTests(unittest.TestCase):
         main = self.models["docker-compose.yml"]
         for name, service in main["services"].items():
             self.assertEqual(
-                service["container_name"], f"airgap-testenv-{name}-1", name
+                service["container_name"], f"airgap-tc08-portability-{name}-1", name
             )
+        self.assertEqual(main["networks"]["airgap"]["name"], "airgap-tc08-portability_airgap")
         for filename, model in self.models.items():
             if filename != "docker-compose.yml":
                 for service in model["services"].values():
                     self.assertNotIn("container_name", service, filename)
+
+    def test_application_images_are_project_scoped_with_matching_build_bases(self):
+        for filename, model in self.models.items():
+            images = {}
+            for name, service in model["services"].items():
+                image = service.get("image", "")
+                if not image.startswith("localhost/"):
+                    continue
+                with self.subTest(file=filename, service=name):
+                    self.assertTrue(image.startswith("localhost/airgap-tc08-portability-"), image)
+                    self.assertEqual(service["pull_policy"], "build")
+                    base = service["build"]["args"]["BASE_IMAGE"]
+                    if image in images:
+                        self.assertEqual(images[image], base, "different bases share an image tag")
+                    images[image] = base
+
+    def test_every_compose_image_and_build_base_is_overridable(self):
+        for path in sorted(HERE.glob("docker-compose*.yml")):
+            for line in path.read_text().splitlines():
+                if re.match(r"\s+(?:image|BASE_IMAGE):", line):
+                    self.assertIn("${", line, f"{path.name}: {line}")
+
+    def test_role_image_overrides_reach_every_service(self):
+        overrides = {
+            "UPSTREAM_BASE_IMAGE": "example.org/test/upstream:override",
+            "DOWNSTREAM_BASE_IMAGE": "example.org/test/downstream:override",
+            "KAFKA_IMAGE": "example.org/test/kafka:override",
+            "DEDUP_IMAGE": "example.org/test/jvm:override",
+            "LG_IMAGE": "example.org/test/lg:override",
+            "SYSTEMD_BASE_IMAGE": "example.org/test/systemd:override",
+            "ELASTICSEARCH_IMAGE": "example.org/test/elasticsearch:override",
+            "KIBANA_IMAGE": "example.org/test/kibana:override",
+            "TC7_GO_IMAGE": "example.org/test/go:override",
+            "TC8_SETTLE_IMAGE": "example.org/test/busybox:override",
+        }
+        for filename, original in self.models.items():
+            command = ["docker", "compose", "--env-file", os.devnull, "--profile", "*"]
+            if Path(filename).stem.split(".")[-1] in TRANSFER_OVERRIDES:
+                command += ["-f", str(HERE / "docker-compose.kafka-transfer.yml")]
+            command += ["-f", str(HERE / filename), "config", "--format", "json"]
+            completed = subprocess.run(
+                command, cwd=HERE, env={**self.environment, **overrides},
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            changed = json.loads(completed.stdout)
+            for name, before in original["services"].items():
+                after = changed["services"][name]
+                with self.subTest(file=filename, service=name):
+                    if "build" in before:
+                        role = "SYSTEMD" if name == "systemd" else (
+                            "UPSTREAM" if "upstream" in name or name == "resend" else "DOWNSTREAM"
+                        )
+                        self.assertEqual(after["build"]["args"]["BASE_IMAGE"], overrides[f"{role}_BASE_IMAGE"])
+                    elif "image" in before:
+                        self.assertNotEqual(before["image"], after["image"], name)
 
     def test_loggenerator_uses_readonly_script_mount_and_shell(self):
         for filename in ("docker-compose.yml", "docker-compose.tc16.yml"):
@@ -115,6 +173,33 @@ class ComposePortabilityTests(unittest.TestCase):
                     self.assertEqual(len(mounts), 1)
                     self.assertEqual(mounts[0]["source"], str(HERE / "lg-entrypoint.sh"))
                     self.assertTrue(mounts[0]["read_only"])
+
+    def test_auxiliary_compose_images_are_overridable(self):
+        root = HERE.parent.parent
+        overrides = {
+            name: f"example.org/test/{name.lower()}:override"
+            for name in (
+                "ROCKY_IMAGE", "UBUNTU_IMAGE", "ALPINE_IMAGE", "KAFKA_IMAGE",
+                "UPSTREAM_BASE_IMAGE", "DOWNSTREAM_BASE_IMAGE", "CHAOS_BASE_IMAGE",
+                "DEDUP_IMAGE", "DEDUP_PACKAGE_BASE_IMAGE",
+            )
+        }
+        for path in (
+            root / "docker-compose.yml",
+            root / "tests/docker-compose.yml",
+            root / "tests/chaos-testing/docker-compose.yml",
+        ):
+            completed = subprocess.run(
+                ["docker", "compose", "--env-file", os.devnull, "-f", str(path),
+                 "config", "--format", "json"],
+                cwd=root, env={**self.environment, **overrides},
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            for name, service in json.loads(completed.stdout)["services"].items():
+                with self.subTest(file=path, service=name):
+                    self.assertIn(service["image"], overrides.values())
+                    self.assertNotIn("container_name", service)
 
 
 class BrokerPermissionTests(unittest.TestCase):

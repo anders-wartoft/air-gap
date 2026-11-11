@@ -123,7 +123,7 @@ If a cell is blank it means the spreadsheet left that cell blank.
 > the effective process memory limit is exhausted.
 
 * Implemented in: 0.1.14-SNAPSHOT
-* Covered by: TC-30, TC-31
+* Covered by: TC-30, TC-31, TC-47
 
 For a Kafka-backed upstream:
 
@@ -1880,3 +1880,57 @@ TC-46 exercises criteria 1–3 and changelog policies in Docker-backed Kafka.
 The Java unit suite covers filtered offsets, corruption/incomplete state,
 block boundaries, window ordering, gap fills and eviction. These tests do not
 certify a production-scale soak or recover history already deleted by Kafka.
+
+## REQ-60 — Upstream memory-throttle recovery
+
+> Kafka admission paused by memory pressure must be able to resume when
+> the excess memory is reclaimable, without restarting upstream or relying
+> on another process to exit.
+
+* Implemented in: 0.1.18-SNAPSHOT
+* Covered by: TC-47, TC-48; upstream memory recovery and stall-alert unit tests
+* Related: REQ-8a (memory bounds) and REQ-8c (watermark messages)
+
+Acceptance criteria:
+
+1. The default Go runtime memory target is below the admission resume
+   watermark, leaving headroom for memory not accounted for by Go.
+   Enabled targets at or above the resume watermark fail explicitly.
+   Zero leaves the existing runtime limit unchanged. For Kafka input,
+   startup and shutdown production checks warn when the enabled target is
+   fewer than ten percentage points below the low watermark, or when the
+   runtime-limit override is disabled. Warnings use the effective settings
+   after file/environment/CLI overrides and remain visible at ERROR/FATAL
+   log levels.
+   The same checks warn independently when the high watermark is fewer than
+   five percentage points above the low watermark, indicating insufficient
+   hysteresis and potential pause/resume cycling.
+2. Paused admission collects garbage and returns idle Go heap pages to the
+   OS even without allocation-driven GC. Reclamation is shared across
+   partition claims, never concurrent, and limited to once per second.
+3. Admission resumes only when measured total memory reaches the low
+   watermark. Persistent unreclaimable pressure remains bounded and the
+   wait remains cancellable; it must not bypass admission or drop records.
+4. In a real 1 GiB cgroup, 60 concurrent claim-like waiters recover after
+   the same process accumulates reclaimable heap above the high watermark.
+   No external helper releases the pressure to make recovery possible.
+5. A preloaded backlog exceeding one million records across 30 partitions
+   drains through both the immediate and delayed sending groups under the
+   default memory settings. Both groups reach lag zero and TCP output
+   contains at least the combined payload bytes, without restart, OOM or
+   abandoned partition subscriptions.
+6. A continuous memory pause emits a local WARN and a downstream `STATUS`
+   after `memoryStallStatusIntervalSeconds` (default 60 seconds), repeating
+   at that interval until recovery. The alert includes upstream identity,
+   pause duration, measured bytes, limit, resume threshold and memory source.
+   The timer resets on resume; independent short pauses do not accumulate.
+   Zero disables periodic alerts; negative or overflowing durations fail
+   startup validation. File, environment and CLI overrides are supported.
+   Alerts are independent of statistics and Kafka health status; downstream
+   routes them to its internal topic. Slow or failed delivery must not block
+   reclamation, local warnings or cancellation. Delivery failures and skipped
+   sends while a previous delivery is blocked are reported explicitly.
+
+These checks do not prove that live Kafka buffers or unrelated processes
+fit every memory budget. Reclamation cannot free live or non-Go allocations;
+adequate fetch bounds and memory sizing remain necessary.

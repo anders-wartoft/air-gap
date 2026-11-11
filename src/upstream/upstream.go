@@ -398,6 +398,17 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 		}
 	}
 
+	if adapter, ok := kafkaClient.(*KafkaAdapter); ok && adapter.memory != nil && config.memoryStallStatusIntervalSeconds > 0 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			monitorMemoryStalls(ctx, adapter.memory, udpClient, config,
+				time.Duration(config.memoryStallStatusIntervalSeconds)*time.Second, ticker.C)
+		}()
+	}
+
 	for _, thread := range config.sendingThreads {
 		workers.Add(1)
 		go func(thread map[string]int) {

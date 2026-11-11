@@ -20,11 +20,12 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 cd "$HERE"
 # shellcheck source=lib/report.sh
 source "$HERE/lib/report.sh"
 
-PROJECT="${PROJECT_NAME:-airgap-testenv}"
+airgap_init_test 25
 DOWNSTREAM_CTR="${PROJECT}-downstream-1"
 
 rc=0

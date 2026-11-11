@@ -2,11 +2,67 @@
 
 ## 0.1.18-SNAPSHOT
 
+### Testcase-scoped Docker projects and image overrides
+
+- Numbered Docker tests use `airgap-tcNN-<unique-run-id>` projects, including
+  the shared runner and nested fixtures. Container names, networks, helper
+  labels, inspection instructions and batch cleanup follow the selected
+  project rather than a fixed `airgap-testenv` stack.
+- Shared image defaults and `.env`/environment overrides cover OS, Kafka,
+  JVMs, systemd, Python verifier, Elasticsearch/Kibana and helper tools.
+  `AIRGAP_BASE_IMAGE` sets a common OS baseline; role-specific overrides
+  remain available. Upstream/downstream builds no longer share mutable tags
+  when their bases differ.
+- TC-16 retains per-side project names for later inspection/reset commands.
+  Unique names do not remove its fixed host-port constraints. Package,
+  chaos and RPM-demo Compose images are also overridable.
+
+### Upstream recovers from memory-watermark pauses
+
+- Paused Kafka admission now forces GC and returns idle Go heap pages to the
+  OS. Reclamation is shared across partition claims, never concurrent, and
+  limited to once per second while pressure persists. Total cgroup memory
+  still must reach the low watermark before admission resumes.
+- The default Go memory target is now 60% of the effective limit, leaving
+  headroom below the default 70% resume threshold. Enabled Go targets at or
+  above the low watermark are rejected with an explicit configuration error.
+  **Upgrade action:** change any explicit `goMemoryLimitPercent=70` paired
+  with `memoryLowWatermarkPercent=70`, for example to 60/70.
+- Startup and shutdown production checks warn when Kafka input has fewer
+  than ten percentage points between its Go target and low watermark, or
+  when the Go limit override is disabled (`0`). The README documents property,
+  environment and CLI names, override precedence and rejected/warned examples.
+- Kafka startup/shutdown checks also warn when the high and low watermarks
+  are fewer than five percentage points apart, since small memory
+  fluctuations can cause frequent pause/resume cycles and reclamation.
+- Prolonged memory pauses emit a local WARN and downstream `STATUS` after
+  60 seconds and every 60 seconds thereafter, independent of statistics.
+  `memoryStallStatusIntervalSeconds` configures this interval; `0` disables
+  periodic alerts. Alerts include duration, usage, limit and resume threshold,
+  reset on recovery, and route to downstream's internal topic. Slow or failed
+  delivery cannot block reclamation or local warnings. TC-48 covers real
+  upstream/downstream routing, recovery and disabled alerts.
+- TC-47 exercises recovery of a process's own idle heap in a real 1 GiB
+  cgroup with 60 waiters, plus a million-record Kafka backlog across 30
+  partitions and two sending groups. The pre-fix cgroup regression stalled
+  above the low watermark. This does not reclaim live or non-Go allocations;
+  capacity planning and bounded Kafka fetches remain necessary.
+
 ### Accurate lost-event test counts
 
 - TC-32 counts marker occurrences in the binary TCP capture rather than
   matching lines. Multiple delivered records on one line previously appeared
   as one guard and one small event, producing false failures.
+
+### Reliable unsafe-memory negative control
+
+- TC-31 acknowledges its full Kafka backlog before releasing upstream, with
+  cgroup pressure and sampling already active. Its unsafe fetch size leaves
+  room below Sarama's response ceiling for Kafka framing, avoiding decoding
+  errors that bypass the intended memory test.
+- Survival still fails the control. Watermark diagnostics distinguish actual
+  WARN transitions from configuration templates and no longer report a kill
+  when the container remains running.
 
 ### Deterministic dedup artifacts in upgrade tests
 

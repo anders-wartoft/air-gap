@@ -154,7 +154,8 @@ memoryLimitBytes=0
 memoryHighWatermarkPercent=80
 memoryLowWatermarkPercent=70
 memoryCheckIntervalMs=100
-goMemoryLimitPercent=70
+memoryStallStatusIntervalSeconds=60
+goMemoryLimitPercent=60
 ```
 
 `memoryLimitBytes=0` detects the effective cgroup v2/v1 limit, falling back to
@@ -172,6 +173,120 @@ memoryLowWatermarkLog=NONE
 The resume event is `NONE` by default: the pause is the event worth alerting
 on, and a pause that resolves itself does not need a record. Set it to a
 `LEVEL:message` value to measure how long throttling lasted.
+
+While paused, upstream forces garbage collection and returns idle Go heap
+pages to the OS, at most once per second across all partition claims. This
+allows recovery even when stopped admission no longer allocates enough to
+trigger GC. Admission still waits for **total measured memory** to reach the
+low watermark; it never bypasses the limit or drops records to make progress.
+Live buffers, other processes in the cgroup, and non-Go memory cannot be
+reclaimed this way and still require an adequate memory budget.
+
+If admission stays continuously paused for `memoryStallStatusIntervalSeconds`
+(default **60 seconds**), upstream writes a local WARN and sends a downstream
+`STATUS`, repeating at that interval until recovery. Each alert identifies
+the upstream, pause duration, measured bytes, effective limit, resume threshold
+and memory source. Downstream routes these records to `internalTopic`, not the
+event topic. Separate short pauses do not accumulate; the timer resets on
+resume. Set the interval to **0** to disable both periodic alerts (watermark
+transition logs remain independently configurable).
+
+This interval is independent of `logStatistics`; alerts still run when
+statistics are disabled. Delivery is best effort, not an acknowledgment that
+the downstream received the alert. Transport errors are logged; only one
+STATUS delivery may be in flight, with no pending-message queue. A blocked
+delivery does not stop local warnings, memory reclamation or shutdown.
+Normal log-level filtering applies to local WARNs. These alerts describe
+memory backpressure and do not change Kafka cluster health status.
+
+#### Admin response to a sustained memory stall
+
+When the stall warning repeats, use the upstream ID and the reported
+`current`, `limit`, `resume_at`, and `source` values to identify the affected
+instance and its memory budget. Check the upstream service and recent logs
+(`systemctl status upstream` and `journalctl -u upstream` on the example
+systemd installation), then check its cgroup memory usage and Kafka consumer
+lag. A short pause that resumes is expected backpressure; the stall timer
+resets on resume.
+
+If usage remains above `resume_at`, determine what is holding memory. Review
+large-record and fetch settings (`kafkaMaxMessageBytes`,
+`kafkaFetchDefaultBytes`, `kafkaChannelBufferSize`) and the number of active
+sending threads, as well as downstream send speed. Reduce fetch sizes,
+buffering, record size, or concurrency when they exceed the available budget;
+otherwise, increase the service memory budget only if the host has capacity.
+Keep the high/low watermark gap valid and the enabled Go target below the low
+watermark. Forced garbage collection cannot release live buffers or memory
+used by other processes, so restarting or repeatedly collecting garbage is
+not a durable fix for a working set that does not fit.
+
+Use the local WARN as the source of truth if a downstream STATUS is missing:
+STATUS delivery is best effort. A memory-stall alert is not by itself evidence
+of a Kafka outage; investigate Kafka connectivity separately if its own logs
+or metrics indicate a problem.
+
+The Go soft memory target defaults to 60%, below the 70% resume threshold,
+leaving headroom for memory outside the Go runtime. An enabled
+`goMemoryLimitPercent` must be strictly below `memoryLowWatermarkPercent`;
+existing explicit 70/70 configurations must be changed before upgrading.
+Ten percentage points of headroom is a starting point, not a guarantee for
+every partition count or payload size. A value of `0` leaves the runtime
+limit unchanged, including any `GOMEMLIMIT` supplied in the environment.
+
+#### Setting the memory values
+
+All percentages use the same effective byte limit, not a percentage of one
+another. With `MemoryMax=1G` (1 GiB), the defaults give a Go soft target of
+about 614 MiB, resume at 717 MiB, and pause at 819 MiB. Go's target covers
+runtime-managed memory, not all memory charged to the cgroup, and is soft:
+the runtime may exceed it when the live working set cannot be collected.
+
+| Properties key | Environment override | CLI override |
+|---|---|---|
+| `goMemoryLimitPercent` | `AIRGAP_UPSTREAM_GO_MEMORY_LIMIT_PERCENT` | `--goMemoryLimitPercent=60` |
+| `memoryLowWatermarkPercent` | `AIRGAP_UPSTREAM_MEMORY_LOW_WATERMARK_PERCENT` | `--memoryLowWatermarkPercent=70` |
+| `memoryHighWatermarkPercent` | `AIRGAP_UPSTREAM_MEMORY_HIGH_WATERMARK_PERCENT` | `--memoryHighWatermarkPercent=80` |
+| `memoryLimitBytes` | `AIRGAP_UPSTREAM_MEMORY_LIMIT_BYTES` | `--memoryLimitBytes=1073741824` |
+| `memoryCheckIntervalMs` | `AIRGAP_UPSTREAM_MEMORY_CHECK_INTERVAL_MS` | `--memoryCheckIntervalMs=100` |
+| `memoryStallStatusIntervalSeconds` | `AIRGAP_UPSTREAM_MEMORY_STALL_STATUS_INTERVAL_SECONDS` | `--memoryStallStatusIntervalSeconds=60` |
+
+Precedence is **defaults < properties file < environment < command line**;
+startup validation and production warnings evaluate the resulting values.
+For example:
+
+```bash
+AIRGAP_UPSTREAM_GO_MEMORY_LIMIT_PERCENT=60 \
+  ./upstream upstream.properties --memoryLowWatermarkPercent=70
+```
+
+Changing only the properties file has no effect if an environment or CLI
+override still supplies the old value. A positive `goMemoryLimitPercent`
+sets the runtime target at startup and overrides an inherited `GOMEMLIMIT`.
+With `0`, upstream does not set that target; the inherited runtime setting
+may therefore be too high or unlimited.
+
+| Go target / low watermark | Startup behavior |
+|---|---|
+| `60 / 70` | Accepted; default headroom. |
+| `61 / 70` or `69 / 70` | Accepted, but WARN at startup and shutdown: less than 10 percentage points of headroom. |
+| `70 / 70` or `80 / 70` | Rejected before Kafka consumption; enabled target must be strictly below the resume watermark. |
+| `0 / 70` | Accepted, but WARN at startup and shutdown: automatic runtime-limit override is disabled. Check inherited `GOMEMLIMIT`. |
+
+Also required: `0 < low < high <= 100`. Kafka input emits
+an additional startup/shutdown warning when `high - low < 5` percentage
+points. For example, high/low `74/70` warns, while `75/70` and the default
+`80/70` do not. This checks hysteresis separately from Go memory headroom:
+a narrow gap can cause frequent pause/resume cycles and repeated reclamation,
+not necessarily a permanent stall. Keep adequate gaps for both relationships.
+
+Warning output uses
+`[PRODUCTION-CONFIG]` at WARN severity even when the configured log level is
+ERROR or FATAL. Rejected configurations exit during startup, so they cannot
+produce an orderly shutdown warning block. No percentage combination alone
+guarantees progress: size live Kafka fetches and per-partition buffers, and
+leave room for cgroup-charged non-Go memory. Increase the service's memory
+budget or reduce fetch sizes/buffers if live usage cannot reach the low
+watermark; forced collection cannot free live data.
 
 Upstream handles each Kafka record synchronously until its transport send has
 finished. Sarama's historical `Consumer.MaxProcessingTime` default is only

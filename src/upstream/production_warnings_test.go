@@ -64,6 +64,39 @@ func TestProductionWarnings(t *testing.T) {
 			c.source, c.caFile = "random", ""
 		}, map[string]string{"source": "random"}},
 		{"positive statistics floor", func(c *TransferConfiguration) { c.logStatistics = 1 }, nil},
+		{"one point of watermark hysteresis", func(c *TransferConfiguration) {
+			c.memoryHighWatermarkPercent = 71
+		}, map[string]string{"memoryHighWatermarkPercent": "71"}},
+		{"four points of watermark hysteresis", func(c *TransferConfiguration) {
+			c.memoryHighWatermarkPercent = 74
+		}, map[string]string{"memoryHighWatermarkPercent": "74"}},
+		{"five points of watermark hysteresis", func(c *TransferConfiguration) {
+			c.memoryHighWatermarkPercent = 75
+		}, nil},
+		{"combined memory risks", func(c *TransferConfiguration) {
+			c.memoryLowWatermarkPercent, c.memoryHighWatermarkPercent, c.goMemoryLimitPercent = 50, 54, 45
+		}, map[string]string{"memoryHighWatermarkPercent": "54", "goMemoryLimitPercent": "45"}},
+		{"random ignores narrow memory hysteresis", func(c *TransferConfiguration) {
+			c.source, c.memoryHighWatermarkPercent = "random", 71
+		}, map[string]string{"source": "random"}},
+		{"Go target just below resume watermark", func(c *TransferConfiguration) {
+			c.goMemoryLimitPercent = 69
+		}, map[string]string{"goMemoryLimitPercent": "69"}},
+		{"nine points of memory headroom", func(c *TransferConfiguration) {
+			c.goMemoryLimitPercent = 61
+		}, map[string]string{"goMemoryLimitPercent": "61"}},
+		{"ten points of memory headroom", func(c *TransferConfiguration) {
+			c.goMemoryLimitPercent = 60
+		}, nil},
+		{"Go target override disabled", func(c *TransferConfiguration) {
+			c.goMemoryLimitPercent = 0
+		}, map[string]string{"goMemoryLimitPercent": "0"}},
+		{"custom low watermark with little headroom", func(c *TransferConfiguration) {
+			c.memoryLowWatermarkPercent, c.goMemoryLimitPercent = 50, 45
+		}, map[string]string{"goMemoryLimitPercent": "45"}},
+		{"random source does not use memory admission", func(c *TransferConfiguration) {
+			c.source, c.goMemoryLimitPercent = "random", 0
+		}, map[string]string{"source": "random"}},
 		{"combined rollout", func(c *TransferConfiguration) {
 			c.source, c.logLevel, c.logStatistics = "random", "DEBUG", 0
 			c.deliverFilter, c.tcpRetryTimes, c.tcpTLSEnabled = "1,3,5", 3, false
@@ -85,4 +118,16 @@ func TestProductionWarningsAtEndOfCheckConfiguration(t *testing.T) {
 	c := productionWarningFixture()
 	c.logStatistics = 0
 	productiontest.CheckStartup(t, func() { checkConfiguration(c) }, map[string]string{"logStatistics": "0"})
+}
+
+func TestMemoryWarningsUseEffectiveOverrides(t *testing.T) {
+	c := productionWarningFixture()
+	c.goMemoryLimitPercent = 69
+	t.Setenv("AIRGAP_UPSTREAM_GO_MEMORY_LIMIT_PERCENT", "60")
+	c = overrideConfiguration(c)
+	productiontest.Check(t, &c, nil)
+	c = parseCommandLineOverrides([]string{"upstream", "--goMemoryLimitPercent=69"}, c)
+	productiontest.Check(t, &c, map[string]string{"goMemoryLimitPercent": "69"})
+	productiontest.CheckStartup(t, func() { checkConfiguration(c) },
+		map[string]string{"goMemoryLimitPercent": "69"})
 }

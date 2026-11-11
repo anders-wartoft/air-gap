@@ -2,6 +2,7 @@
 # Staged native-Linux UDP benchmark. No SSH or control traffic crosses the diode.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/lib/report.sh"
 cd "$HERE"
@@ -48,8 +49,16 @@ case "$MODE" in
 esac
 
 compose() {
-    local side="$1"; shift
-    docker compose -p "airgap-tc16-$side" -f "$HERE/docker-compose.tc16.yml" "$@"
+    local side="$1" project file; shift
+    file="$RESULTS/$side.project"
+    if [[ -f "$file" ]]; then
+        read -r project < "$file"
+        [[ "$project" == airgap-tc16-*-"$side" ]] || die "invalid saved project name in $file"
+    else
+        project="$(airgap_test_project 16 "-$side")"
+        printf '%s\n' "$project" > "$file"
+    fi
+    COMPOSE_PROJECT_NAME="$project" docker compose -p "$project" -f "$HERE/docker-compose.tc16.yml" "$@"
 }
 kafka() {
     local side="$1"; shift

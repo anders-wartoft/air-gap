@@ -20,7 +20,8 @@ x-app: &app
     context: .
     args:
       BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
-  image: localhost/airgap-testenv-tc16:local
+  image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+  pull_policy: build
   network_mode: host
   working_dir: /airgap
   volumes:
@@ -96,6 +97,12 @@ services:
     command: ["upstream"]
   downstream:
     <<: *app
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     environment:
       AIRGAP_CONFIG: /airgap/config/testcases/downstream-airgap-16-staged.properties
       AIRGAP_DOWNSTREAM_NIC: ${TC16_NIC:-lo}

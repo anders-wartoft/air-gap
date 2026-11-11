@@ -30,10 +30,11 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 # shellcheck source=lib/report.sh
 source "$HERE/lib/report.sh"
 
-PROJECT="${PROJECT_NAME:-airgap-testenv}"
+PROJECT="${PROJECT_NAME:-${COMPOSE_PROJECT_NAME:?Run through run-testcase.sh or export the retained project name}}"
 DEDUP_CTR="${PROJECT}-dedup-1"
 EXPECTED_INTERVAL="${TC13_EXPECTED_INTERVAL:-5}"
 MIN_REPORTS="${TC13_MIN_REPORTS:-2}"

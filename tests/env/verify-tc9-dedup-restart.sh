@@ -23,9 +23,10 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 source "$HERE/lib/report.sh"
 
-PROJECT="airgap-tc9-dedup-restart-$$"
+airgap_init_test 9 "-dedup-restart"
 COMPOSE_FILE="$HERE/docker-compose.tc9-dedup-restart.yml"
 
 # Kafka stays down slightly longer than the issue's reproduction (15 s) and

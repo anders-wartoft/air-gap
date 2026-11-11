@@ -22,11 +22,13 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: airgap-load produce|sink|stall|pressure|seed-retention|verify-retention|verify-status [options]")
+		fatalf("usage: airgap-load produce|backlog|sink|stall|pressure|seed-retention|verify-retention|verify-status [options]")
 	}
 	switch os.Args[1] {
 	case "produce":
 		produce(os.Args[2:])
+	case "backlog":
+		backlog(os.Args[2:])
 	case "sink":
 		sink(os.Args[2:])
 	case "stall":
@@ -42,6 +44,61 @@ func main() {
 	default:
 		fatalf("unknown command %q", os.Args[1])
 	}
+}
+
+func backlog(args []string) {
+	flags := flag.NewFlagSet("backlog", flag.ExitOnError)
+	count := flags.Int("count", 1000020, "records to seed before upstream starts")
+	size := flags.Int("size", 1024, "payload bytes per record")
+	partitions := flags.Int("partitions", 30, "partitions to fill round-robin")
+	_ = flags.Parse(args)
+	if *count <= 0 || *size < 32 || *partitions <= 0 {
+		fatalf("count and partitions must be positive, size must be at least 32")
+	}
+	config := sarama.NewConfig()
+	config.Version = sarama.V3_6_0_0
+	config.Producer.Return.Successes = true
+	config.Producer.RequiredAcks = sarama.WaitForAll
+	config.Producer.Partitioner = sarama.NewManualPartitioner
+	config.Producer.Flush.Frequency = 10 * time.Millisecond
+	config.Producer.Flush.Messages = 1000
+	producer, err := sarama.NewAsyncProducer([]string{"kafka:9092"}, config)
+	if err != nil {
+		fatalf("create backlog producer: %v", err)
+	}
+	go func() {
+		for i := 0; i < *count; i++ {
+			payload := make([]byte, *size)
+			copy(payload, fmt.Sprintf("AIRGAP_%09d_", i))
+			producer.Input() <- &sarama.ProducerMessage{
+				Topic: "transfer", Partition: int32(i % *partitions),
+				Value: sarama.ByteEncoder(payload), Timestamp: time.Now().Add(-10 * time.Minute),
+			}
+		}
+		producer.AsyncClose()
+	}()
+	successes, failures := producer.Successes(), producer.Errors()
+	acked := 0
+	for successes != nil || failures != nil {
+		select {
+		case _, ok := <-successes:
+			if !ok {
+				successes = nil
+			} else {
+				acked++
+			}
+		case failure, ok := <-failures:
+			if !ok {
+				failures = nil
+			} else {
+				fatalf("seed backlog: %v", failure.Err)
+			}
+		}
+	}
+	if acked != *count {
+		fatalf("acknowledged=%d, want %d", acked, *count)
+	}
+	fmt.Printf("backlog-ready records=%d partitions=%d bytes=%d\n", acked, *partitions, acked * *size)
 }
 
 func produce(args []string) {

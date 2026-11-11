@@ -2,6 +2,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 cd "$HERE"
 source "$HERE/lib/report.sh"
 source "$HERE/lib/production-warnings.sh"
@@ -9,7 +10,7 @@ export COMPOSE_PROGRESS=plain BUILDKIT_PROGRESS=plain
 umask 077
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc26.XXXXXX")"
 mkdir -m 0755 "$WORK/lost-events"
-PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
+airgap_init_test 26
 export TC26_LOG_LEVEL=DEBUG
 
 compose() {

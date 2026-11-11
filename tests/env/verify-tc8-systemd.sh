@@ -2,8 +2,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 source "$HERE/lib/report.sh"
-PROJECT="airgap-tc8-systemd-$$"
+airgap_init_test 8 "-systemd"
 
 compose() {
     docker compose -p "$PROJECT" -f "$HERE/docker-compose.tc8-systemd.yml" "$@"

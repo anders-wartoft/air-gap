@@ -1,0 +1,40 @@
+services:
+  kafka:
+    extends:
+      file: docker-compose.tc30.yml
+      service: kafka
+  topic-init:
+    extends:
+      file: docker-compose.tc30.yml
+      service: topic-init
+    command:
+      - bash
+      - -ec
+      - kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic transfer --partitions 30 --config max.message.bytes=7340032
+  sink:
+    extends:
+      file: docker-compose.tc30.yml
+      service: sink
+  upstream:
+    extends:
+      file: docker-compose.tc30.yml
+      service: upstream
+    mem_limit: 1g
+    volumes:
+      - ${TC30_WORK:?TC30_WORK is required}/bin:/airgap/bin:ro,z
+    environment:
+      AIRGAP_CONFIG: /airgap/work/upstream.properties
+  runtime-test:
+    extends:
+      file: docker-compose.tc30.yml
+      service: sink
+    mem_limit: 1g
+    entrypoint: ["/airgap/work/upstream.test"]
+    command: ["-test.run=^TestDockerMemoryThrottleReclaimsOwnHeapForAllClaims$", "-test.v", "-test.timeout=45s"]
+    environment:
+      TC47_CGROUP_TEST: "1"
+  producer:
+    extends:
+      file: docker-compose.tc30.yml
+      service: producer
+    command: ["backlog", "--count=1000020", "--size=1024", "--partitions=30"]

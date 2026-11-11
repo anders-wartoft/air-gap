@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/lib/report.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc39.XXXXXX")"
 mkdir -m 0755 "$WORK/lost-events"
 mkdir -m 0700 "$WORK/server-trust" "$WORK/client-trust"
-PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
+airgap_init_test 39
 export TC39_WORK="$WORK" COMPOSE_PROGRESS=plain
 
 compose() {

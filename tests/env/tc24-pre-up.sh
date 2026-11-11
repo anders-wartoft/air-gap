@@ -15,6 +15,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 cd "$HERE"
 
 mkdir -p ../../tmp

@@ -5,7 +5,8 @@ services:
       context: .
       args:
         BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
-    image: localhost/airgap-testenv-tc39:local
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     volumes:
       - ${TC39_WORK:?Run through run-testcase.sh 39}:/airgap/work:z
     entrypoint: ["/airgap/work/downstream"]
@@ -16,7 +17,12 @@ services:
 
   upstream:
     platform: linux/amd64
-    image: localhost/airgap-testenv-tc39:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+    pull_policy: build
     volumes:
       - ${TC39_WORK}:/airgap/work:z
     entrypoint: ["/airgap/work/upstream"]

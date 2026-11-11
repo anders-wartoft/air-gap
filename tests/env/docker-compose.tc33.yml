@@ -37,15 +37,21 @@ services:
     build:
       context: .
       args:
-        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
-    image: localhost/airgap-testenv-tc33:local
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     entrypoint: ["/airgap/work/airgap-load"]
     command: ["seed-retention", "--dir=/airgap/work/lost-events"]
     volumes:
       - ${TC33_WORK:?TC33_WORK is required}:/airgap/work:z
 
   downstream:
-    image: localhost/airgap-testenv-tc33:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     hostname: downstream
     depends_on:
       topic-init:
@@ -59,7 +65,12 @@ services:
     restart: on-failure:3
 
   upstream:
-    image: localhost/airgap-testenv-tc33:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+    pull_policy: build
     hostname: upstream
     depends_on:
       topic-init:
@@ -78,7 +89,12 @@ services:
     restart: on-failure:3
 
   producer:
-    image: localhost/airgap-testenv-tc33:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     entrypoint: ["/airgap/work/airgap-load"]
     command: ["produce", "--brokers=kafka:9092", "--topic=source", "--count=1", "--size=4096"]
     depends_on:

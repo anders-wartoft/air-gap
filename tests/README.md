@@ -30,6 +30,15 @@ docker-compose down
 - **ubuntu** - Ubuntu 22.04 (DEB packages)
 - **alpine** - Alpine 3.18 (APK packages)
 
+The unnumbered package suite uses project `airgap-package-tests`. Override
+`COMPOSE_PROJECT_NAME` for an independent stack. The base images can be changed
+with `ROCKY_IMAGE`, `UBUNTU_IMAGE` and `ALPINE_IMAGE` (export them or put them in
+this directory's `.env`). For example:
+
+```bash
+ROCKY_IMAGE=docker.io/library/rockylinux:9 docker compose up -d rocky
+```
+
 ## Manual Testing
 
 ```bash

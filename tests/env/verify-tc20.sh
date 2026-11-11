@@ -20,10 +20,11 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 # shellcheck source=lib/report.sh
 source "$HERE/lib/report.sh"
 
-PROJECT="${PROJECT_NAME:-airgap-testenv}"
+PROJECT="${PROJECT_NAME:-${COMPOSE_PROJECT_NAME:?Run through run-testcase.sh or export the retained project name}}"
 UPSTREAM_CTR="${PROJECT}-upstream-a-1"
 
 echo "─── verify-tc20: did upstream really hit TCP-unavailable and recover? ───"

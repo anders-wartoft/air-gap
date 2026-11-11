@@ -4,7 +4,8 @@ services:
       context: .
       args:
         BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
-    image: localhost/airgap-testenv-tc26-upstream:local
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+    pull_policy: build
     volumes:
       - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
       - ../../config/testcases:/airgap/config:ro,z
@@ -18,7 +19,8 @@ services:
       context: .
       args:
         BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
-    image: localhost/airgap-testenv-tc26-downstream:local
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     volumes:
       - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
       - ../../config/testcases:/airgap/config:ro,z

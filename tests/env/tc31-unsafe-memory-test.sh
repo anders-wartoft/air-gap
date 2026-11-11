@@ -6,13 +6,14 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 cd "$HERE"
 # shellcheck source=lib/report.sh
 source "$HERE/lib/report.sh"
 export COMPOSE_PROGRESS=plain BUILDKIT_PROGRESS=plain
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc31.XXXXXX")"
 mkdir -m 0755 "$WORK/lost-events"
-PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
+airgap_init_test 31
 export TC31_WORK="$WORK"
 COMPOSE_FILE="$HERE/docker-compose.tc31.yml"
 CAP_BYTES=$((192 * 1024 * 1024))
@@ -44,21 +45,29 @@ echo "TC-31: building Linux helper and deliberately unbounded upstream stack"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$WORK/airgap-load" ./lib/loadgen
 chmod 0755 "$WORK/airgap-load"
 compose build
-compose up -d kafka topic-init stall upstream
+compose up -d kafka topic-init stall
+
+echo "TC-31: preloading 60 records of 4 MiB before any consumer starts"
+compose run --rm producer | tee "$WORK/producer.log"
+grep -q '^produced=60 sizes=\[4194304\] total=251658240$' "$WORK/producer.log" || {
+    echo "Kafka backlog was not fully acknowledged" >&2
+    exit 1
+}
+compose up -d upstream
 
 UPSTREAM_CID="$(compose ps -q upstream)"
 [[ -n "$UPSTREAM_CID" ]] || { echo "upstream container did not start" >&2; exit 1; }
 
 deadline=$((SECONDS + 60))
 while (( SECONDS < deadline )); do
-    if compose logs --no-color upstream 2>&1 | grep -q "up and running"; then
+    compose logs --no-color --no-log-prefix upstream >"$WORK/upstream-before.log" 2>&1
+    if grep -q "^tc31-start-gate-ready$" "$WORK/upstream-before.log"; then
         break
     fi
     sleep 1
 done
-compose logs --no-color upstream >"$WORK/upstream-before.log" 2>&1
-grep -q "up and running" "$WORK/upstream-before.log" || {
-    echo "upstream did not become ready" >&2
+grep -q "^tc31-start-gate-ready$" "$WORK/upstream-before.log" || {
+    echo "upstream start gate did not become ready" >&2
     exit 1
 }
 
@@ -80,9 +89,10 @@ grep -q "pressure-ready" "$WORK/pressure.log" || {
     exit 1
 }
 
-# Sampling starts before the producer: the kill arrives within a second or two
-# of the first fetch, so a sampler started afterwards would never see a value.
+# Sample before releasing the consumer: a preloaded fetch can kill it before
+# the sampler's first docker exec finishes.
 : >"$WORK/memory.log"
+docker exec "$UPSTREAM_CID" cat /sys/fs/cgroup/memory.current >>"$WORK/memory.log"
 (
     while :; do
         docker exec "$UPSTREAM_CID" cat /sys/fs/cgroup/memory.current 2>/dev/null >>"$WORK/memory.log" || break
@@ -91,8 +101,8 @@ grep -q "pressure-ready" "$WORK/pressure.log" || {
 ) &
 SAMPLER_PID=$!
 
-echo "TC-31: producing 60 records of 4 MiB with a stalled receiver"
-compose run --rm producer | tee "$WORK/producer.log"
+echo "TC-31: releasing upstream against the acknowledged backlog and stalled receiver"
+touch "$WORK/start-upstream"
 
 deadline=$((SECONDS + 180))
 state="running"
@@ -134,12 +144,17 @@ else
     report_check "memory grew towards the cgroup cap" "peak above $((CAP_BYTES / 2)) bytes" \
         "$max_memory bytes" 1 || rc=1
 fi
-if grep -q "entering high memory watermark" "$WORK/upstream.log"; then
+if grep -Eq '\[WARN\] Upstream .* entering high memory watermark\. Pausing Kafka record admission at [0-9]+' "$WORK/upstream.log"; then
+    throttle="watermark observed"
+else
+    throttle="no watermark transition observed"
+fi
+if [[ "$oom_killed" == "true" || "$exit_code" == "137" ]]; then
     report_check "watermark cannot save an oversized buffer" "throttle did not prevent the kill" \
-        "throttled and still killed" 0 || rc=1
+        "$throttle; consumer killed" 0 || rc=1
 else
     report_check "watermark cannot save an oversized buffer" "throttle did not prevent the kill" \
-        "killed before the watermark was reached" 0 || rc=1
+        "$throttle; consumer survived" 1 || rc=1
 fi
 
 if [[ "${TC_PAUSE:-0}" == "1" ]]; then

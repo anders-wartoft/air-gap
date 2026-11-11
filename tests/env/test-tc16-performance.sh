@@ -5,7 +5,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc16-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/env/lib" "$WORK/env/bin" "$WORK/mock" "$WORK/state"
 cp "$HERE/tc16-performance.sh" "$HERE/run-testcase.sh" "$WORK/env/"
-cp "$HERE/lib/report.sh" "$WORK/env/lib/"
+cp "$HERE/lib/report.sh" "$HERE/lib/docker-test.sh" "$HERE/lib/docker-images.sh" "$WORK/env/lib/"
 cp "$HERE/lib/tc16-fake-docker.sh" "$WORK/mock/docker"
 chmod +x "$WORK/mock/docker"
 touch "$WORK/env/bin/LogGenerator-1.1-9.jar"
@@ -148,10 +148,10 @@ for selection in 16 1-; do
     grep -q 'TC-16 PASS: all 10 sequence IDs' "$WORK/result"
     grep -q 'testcase 16 PASS' "$WORK/result"
     grep -q 'Cleaning up TC-16 containers and Kafka volumes' "$WORK/result"
-    before 'airgap-tc16-us .*down -v --remove-orphans' 'up .*lg-producer$'
-    before 'airgap-tc16-ds .*down -v --remove-orphans' 'up .*downstream$'
+    before 'airgap-tc16-[a-z0-9]+-us .*down -v --remove-orphans' 'up .*lg-producer$'
+    before 'airgap-tc16-[a-z0-9]+-ds .*down -v --remove-orphans' 'up .*downstream$'
     for side in us ds; do
-        [[ "$(grep -c "airgap-tc16-$side .*down -v --remove-orphans" "$FAKE_STATE/calls")" == 2 ]]
+        [[ "$(grep -cE "airgap-tc16-[a-z0-9]+-$side .*down -v --remove-orphans" "$FAKE_STATE/calls")" == 2 ]]
     done
     for service in upstream lg-producer downstream dedup lg-sink; do
         [[ ! -f "$FAKE_STATE/$service" ]]

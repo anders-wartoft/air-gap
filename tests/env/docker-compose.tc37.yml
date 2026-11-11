@@ -4,7 +4,8 @@ services:
       context: .
       args:
         BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
-    image: localhost/airgap-testenv-kafka-transfer:local
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+    pull_policy: build
     hostname: tc37-upstream
     volumes:
       - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
@@ -15,7 +16,7 @@ services:
     restart: "no"
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    image: ${ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:8.15.3}
     environment:
       discovery.type: single-node
       xpack.security.enabled: "false"
@@ -38,7 +39,7 @@ services:
     restart: "no"
 
   kibana:
-    image: docker.elastic.co/kibana/kibana:8.15.3
+    image: ${KIBANA_IMAGE:-docker.elastic.co/kibana/kibana:8.15.3}
     depends_on:
       elasticsearch:
         condition: service_healthy

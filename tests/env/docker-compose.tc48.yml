@@ -1,0 +1,57 @@
+services:
+  kafka:
+    extends:
+      file: docker-compose.tc33.yml
+      service: kafka
+  topic-init:
+    extends:
+      file: docker-compose.tc33.yml
+      service: topic-init
+  downstream:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
+    hostname: downstream
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${TC48_WORK:?TC48_WORK is required}/bin:/airgap/bin:ro,z
+      - ../../config/testcases:/airgap/config:ro,z
+    environment:
+      AIRGAP_CONFIG: /airgap/config/downstream-airgap-33-docker.properties
+    command: ["downstream"]
+  upstream:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+    pull_policy: build
+    mem_limit: 192m
+    depends_on:
+      downstream:
+        condition: service_started
+    volumes:
+      - ${TC48_WORK:?TC48_WORK is required}/bin:/airgap/bin:ro,z
+      - ${TC48_WORK:?TC48_WORK is required}:/airgap/work:z
+    environment:
+      AIRGAP_CONFIG: /airgap/work/upstream.properties
+    command: ["upstream"]
+  producer:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
+    entrypoint: ["/airgap/work/airgap-load"]
+    command: ["produce", "--brokers=kafka:9092", "--topic=source", "--count=1", "--size=1024"]
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${TC48_WORK:?TC48_WORK is required}:/airgap/work:ro,z

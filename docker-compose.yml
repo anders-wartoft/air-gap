@@ -8,14 +8,14 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
 
-    image: confluentinc/confluent-local
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:latest}
 
   upstream:
     networks:
       - airgap
     depends_on: 
       - downstream
-    image: rockylinux:9.3
+    image: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9.3}
     volumes:
       - ./target/dist:/dist:ro
       - ./config:/config:ro
@@ -29,7 +29,7 @@ services:
   downstream:
     networks:
       - airgap
-    image: rockylinux:9.3
+    image: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9.3}
     depends_on: 
       - kafka
     volumes:
@@ -45,7 +45,7 @@ services:
   dedup:
     networks:
       - airgap
-    image: rockylinux:9.3
+    image: ${DEDUP_PACKAGE_BASE_IMAGE:-docker.io/library/rockylinux:9.3}
     depends_on: 
       - kafka
     volumes:

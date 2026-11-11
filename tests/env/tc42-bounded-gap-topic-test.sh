@@ -10,12 +10,13 @@
 # 4. Run `create` and require only the active windows' gaps in the bundle.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/lib/report.sh"
 source "$HERE/lib/dedup-jar.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc42.XXXXXX")"
 chmod 0755 "$WORK"
-PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
+airgap_init_test 42
 export TC_WORK="$WORK" COMPOSE_PROGRESS=plain
 WAIT_SECONDS="${TC42_WAIT_SECONDS:-180}"
 WINDOWS=20

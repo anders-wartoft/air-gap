@@ -17,7 +17,12 @@ services:
 
   fixture:
     platform: linux/amd64
-    image: localhost/airgap-testenv-kafka-transfer:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     volumes:
       - ${TC_WORK}:/airgap/work:z
     entrypoint: ["/airgap/work/fixture"]

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/lib/report.sh"
 for tool in git go make docker; do
@@ -12,7 +13,7 @@ for tag in 0.1.10-SNAPSHOT 0.1.17.1-SNAPSHOT; do
 done
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc45.XXXXXX")"
 mkdir -m 0755 "$WORK/lost-events"
-PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
+airgap_init_test 45
 export TC_WORK="$WORK" TC45_UPSTREAM=modern TC45_DOWNSTREAM=modern COMPOSE_PROGRESS=plain
 compose() {
     docker compose -p "$PROJECT" -f "$HERE/docker-compose.kafka-transfer.yml" \

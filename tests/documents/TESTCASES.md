@@ -5111,7 +5111,7 @@ kafkaChannelBufferSize=1
 memoryHighWatermarkPercent=60
 memoryLowWatermarkPercent=50
 memoryCheckIntervalMs=50
-goMemoryLimitPercent=70
+goMemoryLimitPercent=40
 memoryHighWatermarkLog=WARN:Upstream {upstreamId} entering high memory watermark. Pausing Kafka record admission at {memoryCurrentBytes} of {memoryUsedLimitBytes} bytes ({memoryUsedPercent} percent, from {memorySource}).
 memoryLowWatermarkLog=INFO:Upstream {upstreamId} leaving high memory watermark. Resuming Kafka record admission at {memoryCurrentBytes} of {memoryUsedLimitBytes} bytes ({memoryUsedPercent} percent, from {memorySource}).
 ```
@@ -5179,9 +5179,9 @@ Verify that the bounds exercised by TC-30 are what keeps upstream alive, by
 running the same stack with deliberately permissive consumer settings and
 requiring the process to actually be killed for exceeding its cgroup.
 
-This test passes when upstream crashes. If it starts failing, upstream is no
-longer sensitive to the consumer memory envelope and TC-30 has stopped proving
-anything.
+This test passes only when upstream is OOM-killed by its unsafe consumer memory
+envelope. Survival requires investigation: producer timing, kernel reclamation
+and changes to consumer buffering can all affect a negative control.
 
 * Covers: REQ-8a
 * Implemented in: 0.1.14-SNAPSHOT
@@ -5200,7 +5200,7 @@ Upstream uses [upstream-airgap-31-docker.properties](../../config/testcases/upst
 
 ```properties
 sendingThreads=[{"t0": 0}, {"t1": 0}, {"t2": 0}]
-kafkaFetchDefaultBytes=104857600
+kafkaFetchDefaultBytes=100663296
 kafkaMaxMessageBytes=104857600
 kafkaChannelBufferSize=64
 memoryHighWatermarkPercent=100
@@ -5208,7 +5208,7 @@ memoryLowWatermarkPercent=99
 goMemoryLimitPercent=0
 ```
 
-Every bound TC-30 sets is removed. A single fetch may pull 100 MiB per
+Every bound TC-30 sets is removed. A single fetch may pull 96 MiB per
 partition where TC-30 allows 1 MiB, a record may be 100 MiB where TC-30 allows
 6 MiB, 64 of them may queue in the consumer channel where TC-30 allows 1, and
 admission is only paused at 100 percent of the limit, which the kernel never
@@ -5221,28 +5221,40 @@ policy, so the killed process stays dead and can be inspected.
 
 The broker is configured for 100 MiB messages and fetch responses so that the
 broker, rather than upstream, is not the component bounding memory. Note that
-100 MiB is also Sarama's own hard response ceiling; configuring more than that
-does not fetch more.
+100 MiB is also Sarama's own hard response ceiling. The consumer requests
+96 MiB to leave room for record-batch and response framing; requesting the
+full ceiling can cause a decoding error instead of exercising memory pressure.
 
 The test applies 32 MiB of extra cgroup pressure, half of what TC-30 survives.
 That is the point of the control: the unsafe configuration dies under
 conditions the bounded configuration handles with room to spare.
 
+All sixty records are acknowledged before any consumer starts. Producing them
+while upstream is already reading can yield small fetches and let the unsafe
+configuration survive, depending on producer and consumer timing. A bounded
+start gate holds upstream until the pressure helper and memory sampler are ready.
+
 ### Automated procedure
 
-1. Build the Linux helper and start Kafka, the stalled receiver, and upstream.
-2. Require upstream's Sarama consumer to become ready.
+1. Build the Linux helper and start Kafka and the stalled receiver.
+2. Preload and require acknowledgements for sixty 4 MiB records, then start the
+   upstream container with its application held behind the start gate.
 3. Allocate 32 MiB of anonymous memory inside the upstream container and wait
    for the helper to report `pressure-ready`.
-4. Start sampling `memory.current` every 100 ms. Sampling must start before the
-   producer, because the kill arrives within a second or two of the first fetch.
-5. Produce sixty 4 MiB Kafka records.
+4. Take a baseline sample and start sampling `memory.current` every 100 ms.
+   Sampling must start before releasing upstream because a preloaded fetch
+   can kill it before the first periodic sample.
+5. Release upstream to consume the acknowledged backlog.
 6. Wait until the container leaves the running state, or for at most 180
    seconds.
 7. Inspect the upstream container and require:
    * `OOMKilled=true` or exit code 137;
    * a non-running container state; and
    * a sampled memory peak above half the cgroup ceiling.
+
+Watermark diagnostics match actual WARN transitions, not the logged configuration
+template. Regardless of whether a transition occurred, survival is a failure.
+Daemon-free verdict checks: `python3 -m unittest discover -s tests/env -p test_tc31_control.py`.
 
 ### Expected result
 
@@ -6417,3 +6429,125 @@ TLS/ACL enforcement, actual 12-hour retention expiry, production-scale
 throughput or a 30-day soak. State already deleted before upgrade is not
 reconstructed. TC-9 separately checks the packaged Java 17 container's
 Kafka-outage and restart stability.
+
+## TC-47 — Upstream self-recovery from memory watermark pauses
+
+* Covers: REQ-60, REQ-8a
+* Implemented in: 0.1.18-SNAPSHOT
+* Runner: `./run-testcase.sh 47`
+
+From the repository root:
+
+```bash
+bash tests/env/run-testcases.sh 47
+```
+
+The normal Go suite includes the memory recovery unit regressions:
+
+```bash
+go test ./src/upstream ./src/kafka
+```
+
+### Setup and procedure
+
+Requires Go and Docker Compose. The standalone runner builds the current
+upstream and test helper for the Docker engine's native architecture; no
+prebuilt application binary or LogGenerator is used. It creates a unique
+isolated Compose project with no published ports.
+
+1. Run the upstream cgroup regression test in a real 1 GiB container.
+   Disable automatic GC and its soft memory trigger **only in this fixture**
+   to deterministically represent idle unreclaimed heap. Allocate and touch
+   pages in that same process until cgroup usage exceeds 83%. Retain small
+   live buffers for 60 concurrent waiters and drop the other references.
+   Call the production memory controller using the default watermarks.
+   Require every waiter to resume within ten seconds and measured total
+   usage to reach the low watermark. No helper process exits or releases
+   memory, and the fixture does not run GC for the controller.
+2. Start a real Kafka broker and create `transfer` with 30 partitions. Seed
+   1,000,020 acknowledged records of 1,024 bytes round-robin **before**
+   starting upstream. Timestamps are ten minutes old so the delayed group
+   can drain without waiting for wall-clock ageing.
+3. Start the real upstream in a separate 1 GiB cgroup, with two sending
+   groups (`sec0` and `sec-120`) and default memory/fetch settings. A TCP
+   drain records the byte count; statistics and resume messages are enabled.
+4. Require both groups to contain 30 partition rows with lag zero, and the
+   sink to receive at least `2 * 1000020 * 1024` payload bytes. Require the
+   same upstream process to remain running with zero restarts, no OOM kill
+   and no `abandoned subscription` messages.
+
+The drain deadline is one hour to accommodate slow developer machines;
+this is not a throughput threshold. The deterministic first phase **requires**
+a pause and recovery. The backlog phase may remain below the high watermark
+with the corrected defaults; it verifies complete delivery, not a mandatory
+second pause.
+
+### Before/after evidence and limits
+
+Before the fix, the unit tests failed on equal Go/resume targets and missing
+reclamation. The real cgroup test left all 60 waiters paused and usage around
+937 MB until its deadline. After the fix, reclamation returned the idle heap
+to the OS while retaining the live buffers, reducing measured usage below
+the resume threshold.
+
+Failure returns nonzero and preserves the work directory printed in the
+verdict, including logs, seed acknowledgement and both groups' lag reports.
+Success removes only this project's containers, volumes and temporary
+directory. `-pause` is unsupported.
+
+This case does not certify UDP delivery, authentication, every large-record
+memory envelope or production-scale soak behavior. It cannot require progress
+when the live working set itself exceeds the resume budget.
+
+The Go production-warning tests additionally verify startup/shutdown warnings
+for enabled targets with fewer than ten percentage points below the resume
+watermark (including 69/70 and 45/50), disabled override (0/70), the 60/70
+non-warning boundary, and effective environment/CLI overrides. Separate
+subprocess tests require 70/70, 80/70 and 100/70 to fail promptly during
+startup with an actionable diagnostic, before contacting Kafka.
+
+The warning tests also cover high/low watermark gaps of one and four
+percentage points (warn), five points (no narrow-hysteresis warning), combined
+Go-headroom/hysteresis risks, and the non-Kafka-source exemption.
+
+## TC-48 — Periodic memory-stall STATUS and recovery
+
+* Covers: REQ-60, REQ-8c
+* Implemented in: 0.1.18-SNAPSHOT
+* Runner: `./run-testcase.sh 48`
+
+From the repository root:
+
+```bash
+bash tests/env/run-testcases.sh 48
+```
+
+Requires Go and Docker Compose. Builds current upstream, downstream and helper
+for the Docker engine's native architecture. Uses an isolated Kafka broker,
+plaintext TCP transport and a 192 MiB upstream cgroup; no published ports.
+
+1. Start upstream with statistics disabled and a two-second stall-alert
+   interval. Hold 120 MiB in a separate process **inside the same cgroup**
+   for sixteen seconds, keeping total usage above the resume threshold
+   despite upstream's reclamation. Wait for the production pause transition.
+2. Produce an event during the pause. Require at least two local stall WARNs.
+   After the helper releases pressure, require the resume transition,
+   cessation of periodic alerts, consumer lag zero, and no restart or OOM.
+3. Repeat with `memoryStallStatusIntervalSeconds=0`. Require a real pause
+   and recovery, but no periodic local or downstream stall alerts.
+4. Read the internal and normal event topics to their known end offsets.
+   Require repeated stall STATUS records with usage/limit/resume/source
+   details in the internal topic, none from the disabled run, and none in
+   the normal event topic.
+
+This is an observability test, not the self-recovery proof: TC-47 separately
+requires recovery without an external process releasing memory. The Go unit
+suite additionally verifies the 60-second default, property/environment/CLI
+precedence, invalid intervals, exact first/repeat boundaries, recovery timer
+reset, single emission across 60 concurrent callers, STATUS framing and
+error propagation, and repeated local logging plus cancellation with a
+blocked transport. Downstream STATUS is best effort, not guaranteed delivery.
+
+Failure preserves the printed work directory and diagnostics; success removes
+only the isolated project's containers, volumes and temporary directory.
+`-pause` is unsupported.

@@ -243,8 +243,13 @@ type memoryController struct {
 	checkInterval time.Duration
 	onTransition  memoryTransition
 
-	mu        sync.Mutex
-	throttled bool
+	mu          sync.Mutex
+	throttled   bool
+	reclaiming  bool
+	lastReclaim time.Time
+	pausedSince time.Time
+	lastStatus  time.Time
+	sample      memorySample
 }
 
 func newMemoryController(
@@ -262,30 +267,57 @@ func newMemoryController(
 	}
 }
 
+func (c *memoryController) observeLocked(sample memorySample, now time.Time) bool {
+	wasThrottled := c.throttled
+	c.sample = sample
+	if c.throttled {
+		if belowPercent(sample.current, sample.limit, c.lowPercent) {
+			c.throttled = false
+			c.pausedSince, c.lastStatus = time.Time{}, time.Time{}
+		}
+	} else if atOrAbovePercent(sample.current, sample.limit, c.highPercent) {
+		c.throttled = true
+		c.pausedSince, c.lastStatus = now, time.Time{}
+	}
+	return wasThrottled != c.throttled
+}
+
 func (c *memoryController) Wait(ctx context.Context) error {
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		sample, err := c.sampler.Sample()
 		if err != nil {
 			return fmt.Errorf("sample memory pressure: %w", err)
 		}
 
 		c.mu.Lock()
-		wasThrottled := c.throttled
-		if c.throttled {
-			if belowPercent(sample.current, sample.limit, c.lowPercent) {
-				c.throttled = false
-			}
-		} else if atOrAbovePercent(sample.current, sample.limit, c.highPercent) {
-			c.throttled = true
-		}
+		changed := c.observeLocked(sample, time.Now())
 		isThrottled := c.throttled
+		// All partition claims share this controller. Reclaim at most once
+		// per second, never concurrently, while keeping cgroup admission closed.
+		reclaim := isThrottled && !c.reclaiming && time.Since(c.lastReclaim) >= time.Second
+		if reclaim {
+			c.reclaiming = true
+		}
 		c.mu.Unlock()
 
-		if wasThrottled != isThrottled && c.onTransition != nil {
+		if changed && c.onTransition != nil {
 			c.onTransition(isThrottled, sample)
 		}
 		if !isThrottled {
 			return nil
+		}
+		if reclaim {
+			// Paused readers may allocate too little to trigger GC. GC alone
+			// does not promptly return idle heap pages counted by memory.current.
+			debug.FreeOSMemory()
+			c.mu.Lock()
+			c.reclaiming = false
+			c.lastReclaim = time.Now()
+			c.mu.Unlock()
+			continue
 		}
 
 		timer := time.NewTimer(c.checkInterval)
@@ -296,6 +328,17 @@ func (c *memoryController) Wait(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
+}
+
+func validateGoMemoryHeadroom(percent, lowPercent int) error {
+	if percent < 0 || percent > 100 {
+		return fmt.Errorf("invalid goMemoryLimitPercent: %d; legal values are 0-100", percent)
+	}
+	if percent != 0 && percent >= lowPercent {
+		return fmt.Errorf("goMemoryLimitPercent (%d) must be below memoryLowWatermarkPercent (%d) to leave headroom for non-Go memory; 0 leaves the runtime limit unchanged",
+			percent, lowPercent)
+	}
+	return nil
 }
 
 func atOrAbovePercent(current, limit, percent int64) bool {

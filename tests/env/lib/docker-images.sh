@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Shared image defaults. Exported environment variables override these values.
+export AIRGAP_BASE_IMAGE="${AIRGAP_BASE_IMAGE:-docker.io/library/rockylinux:9}"
+export UPSTREAM_BASE_IMAGE="${UPSTREAM_BASE_IMAGE:-$AIRGAP_BASE_IMAGE}"
+export DOWNSTREAM_BASE_IMAGE="${DOWNSTREAM_BASE_IMAGE:-$AIRGAP_BASE_IMAGE}"
+export SYSTEMD_BASE_IMAGE="${SYSTEMD_BASE_IMAGE:-$AIRGAP_BASE_IMAGE}"
+export KAFKA_IMAGE="${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:7.6.1}"
+export DEDUP_IMAGE="${DEDUP_IMAGE:-docker.io/library/eclipse-temurin:17-jre-noble}"
+export LG_IMAGE="${LG_IMAGE:-$DEDUP_IMAGE}"
+export TC7_GO_IMAGE="${TC7_GO_IMAGE:-docker.io/library/golang:1.24-alpine}"
+export TC8_SETTLE_IMAGE="${TC8_SETTLE_IMAGE:-docker.io/library/busybox:latest}"
+export BUSYBOX_IMAGE="${BUSYBOX_IMAGE:-$TC8_SETTLE_IMAGE}"
+export MAVEN_IMAGE="${MAVEN_IMAGE:-docker.io/library/maven:3.9-eclipse-temurin-17}"
+export INTEGRITY_BASE_IMAGE="${INTEGRITY_BASE_IMAGE:-docker.io/library/python:3.12-slim}"
+export ELASTIC_STACK_VERSION="${ELASTIC_STACK_VERSION:-8.15.3}"
+export ELASTICSEARCH_IMAGE="${ELASTICSEARCH_IMAGE:-docker.elastic.co/elasticsearch/elasticsearch:$ELASTIC_STACK_VERSION}"
+export KIBANA_IMAGE="${KIBANA_IMAGE:-docker.elastic.co/kibana/kibana:$ELASTIC_STACK_VERSION}"

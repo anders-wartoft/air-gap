@@ -34,6 +34,17 @@ The upstream package includes a fuzz target:
 go test ./src/upstream/... -fuzz=FuzzKafkaHandler -fuzztime=30s
 ```
 
+## Numbered regression suite
+
+Run the full numbered regression suite from the repository root:
+
+```bash
+bash tests/env/run-testcases.sh 1-
+```
+
+See [TESTCASES.md](tests/documents/TESTCASES.md) for individual case commands,
+setup, procedures and acceptance criteria.
+
 ## Java tests (deduplication engine)
 
 ```bash

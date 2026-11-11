@@ -2,6 +2,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 cd "${HERE}"
 # shellcheck source=lib/report.sh
@@ -10,7 +11,7 @@ export COMPOSE_PROGRESS=plain BUILDKIT_PROGRESS=plain
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc37.XXXXXX")"
 WORK="$(cd "${WORK}" && pwd -P)"
 mkdir -m 0755 "$WORK/lost-events"
-PROJECT="$(basename "${WORK}" | tr '[:upper:].' '[:lower:]-')"
+airgap_init_test 37
 export TC_WORK="${WORK}"
 COMPOSE_BASE="${HERE}/docker-compose.kafka-transfer.yml"
 COMPOSE_OVERRIDE="${HERE}/docker-compose.tc37.yml"
@@ -88,7 +89,7 @@ wait_for_url() {
 run_report() {
   local index="$1" output="$2"
   shift 2
-  if docker run --rm \
+  if airgap_docker_run --rm \
     --network "${PROJECT}_default" \
     -v "${HERE}:/work:ro" \
     -v "${WORK}:/tmp/testwork:ro" \
@@ -115,7 +116,7 @@ show_report() {
 }
 
 echo "TC-37: generating CA-issued signing certificates and building the real upstream"
-docker build --quiet \
+docker build --quiet --build-arg "BASE_IMAGE=$INTEGRITY_BASE_IMAGE" \
   -f "${HERE}/Dockerfile.integrity-report" \
   -t "${VERIFIER_IMAGE}" \
   "${HERE}" >/dev/null

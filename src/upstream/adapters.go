@@ -21,6 +21,7 @@ import (
 
 type KafkaAdapter struct {
 	settings kafka.ConsumerSettings
+	memory   *memoryController
 }
 
 func kafkaConsumerSettings(config TransferConfiguration) (kafka.ConsumerSettings, error) {
@@ -47,6 +48,12 @@ func kafkaConsumerSettings(config TransferConfiguration) (kafka.ConsumerSettings
 }
 
 func NewKafkaAdapter(config TransferConfiguration) (*KafkaAdapter, error) {
+	if err := validateMemoryStallInterval(config.memoryStallStatusIntervalSeconds); err != nil {
+		return nil, err
+	}
+	if err := validateGoMemoryHeadroom(config.goMemoryLimitPercent, config.memoryLowWatermarkPercent); err != nil {
+		return nil, err
+	}
 	settings, err := kafkaConsumerSettings(config)
 	if err != nil {
 		return nil, err
@@ -100,7 +107,7 @@ func NewKafkaAdapter(config TransferConfiguration) (*KafkaAdapter, error) {
 		},
 	)
 	settings.BeforeMessage = controller.Wait
-	return &KafkaAdapter{settings: settings}, nil
+	return &KafkaAdapter{settings: settings, memory: controller}, nil
 }
 
 func (k *KafkaAdapter) Read(ctx context.Context, name string, offset int,

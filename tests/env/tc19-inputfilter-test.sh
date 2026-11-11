@@ -38,11 +38,12 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 cd "$HERE"
 # shellcheck source=lib/report.sh
 source "$HERE/lib/report.sh"
 
-PROJECT="${PROJECT_NAME:-airgap-testenv}"
+airgap_init_test 19
 UP_BROKER="${PROJECT}-kafka-upstream-1"
 DOWN_BROKER="${PROJECT}-kafka-downstream-1"
 UPSTREAM_CTR="${PROJECT}-upstream-a-1"

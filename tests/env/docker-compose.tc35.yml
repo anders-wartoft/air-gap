@@ -12,7 +12,12 @@ services:
       AIRGAP_CONFIG: /airgap/config/upstream-airgap-35-docker.properties
 
   upstream-b:
-    image: localhost/airgap-testenv-kafka-transfer:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+    pull_policy: build
     hostname: upstream-b
     profiles: ["rebalance"]
     depends_on:
@@ -30,7 +35,12 @@ services:
   # Negative control. Runs a binary built with the non-default
   # airgap_logrotate_leak tag, which keeps the replaced descriptor open.
   downstream-leak:
-    image: localhost/airgap-testenv-kafka-transfer:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     hostname: downstream-leak
     profiles: ["leak-control"]
     depends_on:

@@ -248,6 +248,7 @@ func templateValues(c TransferConfiguration) map[string]string {
 		"memoryHighWatermarkPercent":          strconv.Itoa(c.memoryHighWatermarkPercent),
 		"memoryLowWatermarkPercent":           strconv.Itoa(c.memoryLowWatermarkPercent),
 		"memoryCheckIntervalMs":               strconv.Itoa(c.memoryCheckIntervalMs),
+		"memoryStallStatusIntervalSeconds":    strconv.Itoa(c.memoryStallStatusIntervalSeconds),
 		"goMemoryLimitPercent":                strconv.Itoa(c.goMemoryLimitPercent),
 		"memoryHighWatermarkLog":              c.memoryHighWatermarkLog,
 		"memoryLowWatermarkLog":               c.memoryLowWatermarkLog,

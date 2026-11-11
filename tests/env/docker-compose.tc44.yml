@@ -20,7 +20,12 @@ services:
 
   upstream-kafka:
     platform: linux/amd64
-    image: localhost/airgap-testenv-kafka-transfer:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+    pull_policy: build
     hostname: upstream-kafka
     volumes:
       - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z

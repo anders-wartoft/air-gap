@@ -38,7 +38,8 @@ services:
       context: .
       args:
         BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
-    image: localhost/airgap-testenv-kafka-transfer:local
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     hostname: downstream
     depends_on:
       topic-init:
@@ -52,7 +53,12 @@ services:
     restart: on-failure:3
 
   upstream:
-    image: localhost/airgap-testenv-kafka-transfer:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+    pull_policy: build
     hostname: upstream
     depends_on:
       topic-init:
@@ -68,7 +74,12 @@ services:
     restart: on-failure:3
 
   producer:
-    image: localhost/airgap-testenv-kafka-transfer:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     entrypoint: ["/airgap/work/airgap-load"]
     command: ["produce", "--brokers=kafka:9092", "--topic=source", "--count=8", "--size=1024"]
     depends_on:

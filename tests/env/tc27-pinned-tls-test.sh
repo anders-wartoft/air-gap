@@ -2,6 +2,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 cd "$HERE"
 source "$HERE/lib/report.sh"
 export COMPOSE_PROGRESS=plain BUILDKIT_PROGRESS=plain
@@ -9,7 +10,7 @@ umask 077
 
 export TC27_WORK_DIR
 TC27_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc27.XXXXXX")"
-PROJECT="$(basename "$TC27_WORK_DIR" | tr '[:upper:].' '[:lower:]-')"
+airgap_init_test 27
 export TC27_CLIENT_KEY=1 TC27_SERVER_KEY=1
 PAUSE="${TC_PAUSE:-0}"
 

@@ -1,3 +1,5 @@
+name: ${COMPOSE_PROJECT_NAME:-airgap-chaos}
+
 services:
   kafka:
     restart: unless-stopped
@@ -11,7 +13,7 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
 
-    image: confluentinc/confluent-local
+    image: ${KAFKA_IMAGE:-docker.io/confluentinc/confluent-local:latest}
 
   upstream:
     restart: unless-stopped
@@ -19,7 +21,7 @@ services:
       - airgap
     depends_on:
       - downstream
-    image: rockylinux:9.3
+    image: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9.3}
     volumes:
       - ../../dist:/dist:ro
       - ../../:/dist:ro
@@ -34,7 +36,7 @@ services:
       - airgap
     depends_on:
       - downstream
-    image: rockylinux:9.3
+    image: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9.3}
     volumes:
       - ../../dist:/dist:ro
       - ../../:/dist:ro
@@ -54,7 +56,7 @@ services:
       - airgap
     depends_on:
       - downstream
-    image: rockylinux:9.3
+    image: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9.3}
     volumes:
       - ../../dist:/dist:ro
       - ../../:/dist:ro
@@ -75,7 +77,7 @@ services:
     restart: unless-stopped
     networks:
       - airgap
-    image: rockylinux:9.3
+    image: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9.3}
     depends_on:
       - kafka
     volumes:
@@ -90,7 +92,7 @@ services:
     restart: unless-stopped
     networks:
       - airgap
-    image: eclipse-temurin:17-jre
+    image: ${DEDUP_IMAGE:-docker.io/library/eclipse-temurin:17-jre}
     depends_on:
       - kafka
     volumes:
@@ -106,7 +108,7 @@ services:
     restart: unless-stopped
     networks:
       - airgap
-    image: rockylinux:9.3
+    image: ${CHAOS_BASE_IMAGE:-docker.io/library/rockylinux:9.3}
     depends_on:
       - kafka
     ports:

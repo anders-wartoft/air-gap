@@ -56,7 +56,7 @@ def check(condition, description):
 def main():
     work = Path(tempfile.mkdtemp(prefix="airgap-tc38-")).resolve()
     env = dict(os.environ, TC38_WORK=str(work), COMPOSE_PROGRESS="plain")
-    project = work.name.lower()
+    project = os.environ.get("COMPOSE_PROJECT_NAME", work.name.lower())
     command = [
         "docker", "compose", "-p", project,
         "-f", str(HERE / "docker-compose.tc38.yml"),

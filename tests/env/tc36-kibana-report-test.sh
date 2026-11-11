@@ -9,9 +9,11 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 ROOT="$(cd "${HERE}/../.." && pwd)"
 TMPDIR="$(mktemp -d)"
-VERIFIER_IMAGE="airgap-integrity-report-tc36-$$"
+airgap_init_test 36
+VERIFIER_IMAGE="${PROJECT}-integrity-report"
 # shellcheck source=lib/report.sh
 source "${HERE}/lib/report.sh"
 PORT="$(python3 - <<'PY'
@@ -33,12 +35,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker build --quiet \
+docker build --quiet --build-arg "BASE_IMAGE=$INTEGRITY_BASE_IMAGE" \
   -f "${HERE}/Dockerfile.integrity-report" \
   -t "${VERIFIER_IMAGE}" \
   "${HERE}" >/dev/null
 
-docker run --rm \
+airgap_docker_run --rm \
   -e AIRGAP_INTEGRITY_VECTOR=/repo/src/logging/testdata/log-integrity-v1-test-vector.json \
   -v "${HERE}:/work" \
   -v "${ROOT}:/repo:ro" \
@@ -221,7 +223,7 @@ if [[ "${READY}" != "1" ]]; then
 fi
 
 # Positive case: all 11 events are valid and should pass.
-docker run --rm --network host --add-host host.docker.internal:host-gateway \
+airgap_docker_run --rm --network host --add-host host.docker.internal:host-gateway \
   -v "${HERE}:/work" \
   -v "${TMPDIR}:/tmp/testwork" \
   -w /work \
@@ -244,7 +246,7 @@ grep -q "Full report written" "${TMPDIR}/positive.out"
 # A green report over only the first page would falsely claim that the entire
 # case was verified. The verifier must fail closed when --size truncates the
 # matching result set.
-if docker run --rm --network host --add-host host.docker.internal:host-gateway \
+if airgap_docker_run --rm --network host --add-host host.docker.internal:host-gateway \
   -v "${HERE}:/work" \
   -v "${TMPDIR}:/tmp/testwork" \
   -w /work \
@@ -269,7 +271,7 @@ grep -q "matched 11 event(s), but returned 5 because --size=5" \
 # events, but one body was edited after indexing. Without this control a
 # verifier that never recomputes a digest would also report the positive case
 # as passing.
-if docker run --rm --network host --add-host host.docker.internal:host-gateway \
+if airgap_docker_run --rm --network host --add-host host.docker.internal:host-gateway \
   -v "${HERE}:/work" \
   -v "${TMPDIR}:/tmp/testwork" \
   -w /work \
@@ -391,7 +393,7 @@ with open(root / "failures.json", "w", encoding="utf-8") as handle:
     )
 PY
 
-docker run --rm -v "${HERE}:/work" -v "${TMPDIR}:/tmp/testwork" -w /work "${VERIFIER_IMAGE}" \
+airgap_docker_run --rm -v "${HERE}:/work" -v "${TMPDIR}:/tmp/testwork" -w /work "${VERIFIER_IMAGE}" \
   python3 /work/verify_integrity_report.py \
     --events-file /tmp/testwork/independent.json \
     --max-details 10 \
@@ -401,7 +403,7 @@ show_report "Interleaved chains (positive)" "${TMPDIR}/independent.out"
 
 # Negative control for the interleaved-chain case. Grouping by run/segment must
 # not become a way for an edited record to pass unnoticed.
-if docker run --rm -v "${HERE}:/work" -v "${TMPDIR}:/tmp/testwork" -w /work "${VERIFIER_IMAGE}" \
+if airgap_docker_run --rm -v "${HERE}:/work" -v "${TMPDIR}:/tmp/testwork" -w /work "${VERIFIER_IMAGE}" \
   python3 /work/verify_integrity_report.py \
     --events-file /tmp/testwork/independent-tampered.json \
     --max-details 10 \
@@ -419,7 +421,7 @@ grep -q "a1 rewritten with a matching hash" "${TMPDIR}/independent-tampered.out"
 [[ "$(tail -n 1 "${TMPDIR}/independent-tampered.out")" == "Overall result: ❌" ]]
 [[ "$(tail -n 1 "${TMPDIR}/independent-tampered-report.txt")" == "Overall result: ❌" ]]
 
-if docker run --rm -v "${HERE}:/work" -v "${TMPDIR}:/tmp/testwork" -w /work "${VERIFIER_IMAGE}" \
+if airgap_docker_run --rm -v "${HERE}:/work" -v "${TMPDIR}:/tmp/testwork" -w /work "${VERIFIER_IMAGE}" \
   python3 /work/verify_integrity_report.py \
     --events-file /tmp/testwork/failures.json \
     --max-details 0 \

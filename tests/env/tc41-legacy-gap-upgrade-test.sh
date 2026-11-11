@@ -14,12 +14,13 @@
 #    errors.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/lib/docker-test.sh"
 ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/lib/report.sh"
 source "$HERE/lib/dedup-jar.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc41.XXXXXX")"
 chmod 0755 "$WORK"
-PROJECT="$(basename "$WORK" | tr '[:upper:].' '[:lower:]-')"
+airgap_init_test 41
 export TC_WORK="$WORK" COMPOSE_PROGRESS=plain
 LEGACY_TAG="${TC41_LEGACY_TAG:-0.1.10-SNAPSHOT}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/airgap-tests"
@@ -80,8 +81,8 @@ legacy_jar() {
         (cd "$src/java-streams" && mvn -q -B package -DskipTests) >&2
     else
         mkdir -p "$CACHE_DIR/m2"
-        docker run --rm -v "$src:/src:z" -v "$CACHE_DIR/m2:/root/.m2:z" -w /src/java-streams \
-            docker.io/library/maven:3.9-eclipse-temurin-17 mvn -q -B package -DskipTests >&2
+        airgap_docker_run --rm -v "$src:/src:z" -v "$CACHE_DIR/m2:/root/.m2:z" -w /src/java-streams \
+            "$MAVEN_IMAGE" mvn -q -B package -DskipTests >&2
     fi
     local built
     built="$(ls "$src"/java-streams/target/air-gap-deduplication-fat-*.jar | head -1)"

@@ -75,10 +75,11 @@ type TransferConfiguration struct {
 	kafkaMaxProcessingTimeMs            int                      // Sarama Consumer.MaxProcessingTime: maximum expected interval between draining records from a partition channel (default 30 seconds)
 	kafkaRetryInterval                  int                      // milliseconds to wait after a transient Kafka consumer startup failure (default 5000)
 	memoryLimitBytes                    int64                    // explicit memory budget in bytes; 0 (default) auto-detects from the cgroup. May only lower a detected cgroup limit, never raise it
-	memoryHighWatermarkPercent          int                      // pause Kafka record admission when used memory reaches this percentage of the limit (default 75)
-	memoryLowWatermarkPercent           int                      // resume Kafka record admission when used memory falls back to this percentage of the limit (default 65); must be lower than the high watermark
-	memoryCheckIntervalMs               int                      // milliseconds between memory samples while deciding whether to pause or resume admission (default 250)
-	goMemoryLimitPercent                int                      // percentage of the memory limit handed to the Go runtime as its soft heap target (GOMEMLIMIT); 0 disables it (default 80)
+	memoryHighWatermarkPercent          int                      // pause Kafka record admission when used memory reaches this percentage of the limit (default 80)
+	memoryLowWatermarkPercent           int                      // resume Kafka record admission when used memory falls back to this percentage of the limit (default 70); must be lower than the high watermark
+	memoryCheckIntervalMs               int                      // milliseconds between memory samples while deciding whether to pause or resume admission (default 100)
+	memoryStallStatusIntervalSeconds    int                      // repeat local warning and downstream STATUS while admission stays paused (default 60 seconds); 0 disables alerts
+	goMemoryLimitPercent                int                      // Go runtime soft memory target as a percentage of the limit (default 60); must be below the low watermark; 0 leaves the runtime limit unchanged
 	memoryHighWatermarkLog              string                   // LEVEL:message written when Kafka record admission is paused, or NONE to stay silent. See messages.go for the template rules
 	memoryLowWatermarkLog               string                   // LEVEL:message written when Kafka record admission resumes, or NONE (default) to stay silent
 	maxEventBytes                       int                      // largest Kafka record upstream will forward; larger records are replaced by an Airgap Lost Event guard. 0 (default) disables the ceiling
@@ -125,7 +126,8 @@ func DefaultConfiguration() TransferConfiguration {
 	config.memoryHighWatermarkPercent = 80
 	config.memoryLowWatermarkPercent = 70
 	config.memoryCheckIntervalMs = 100
-	config.goMemoryLimitPercent = 70
+	config.memoryStallStatusIntervalSeconds = 60
+	config.goMemoryLimitPercent = 60
 	config.memoryHighWatermarkLog = defaultMemoryHighWatermarkLog
 	config.memoryLowWatermarkLog = defaultMemoryLowWatermarkLog
 	config.maxEventBytes = 0
@@ -368,7 +370,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 			}
 		case "kafkaFetchDefaultBytes", "kafkaMaxMessageBytes", "kafkaChannelBufferSize", "kafkaMaxProcessingTimeMs", "kafkaRetryInterval",
 			"memoryHighWatermarkPercent", "memoryLowWatermarkPercent",
-			"memoryCheckIntervalMs", "goMemoryLimitPercent", "maxEventBytes":
+			"memoryCheckIntervalMs", "memoryStallStatusIntervalSeconds", "goMemoryLimitPercent", "maxEventBytes":
 			tmp, err := strconv.Atoi(value)
 			if err != nil || tmp < 0 {
 				return result, fmt.Errorf("Error in config %s. Illegal value: %s. Legal values are non-negative integers", key, value)
@@ -390,6 +392,8 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 				result.memoryLowWatermarkPercent = tmp
 			case "memoryCheckIntervalMs":
 				result.memoryCheckIntervalMs = tmp
+			case "memoryStallStatusIntervalSeconds":
+				result.memoryStallStatusIntervalSeconds = tmp
 			case "goMemoryLimitPercent":
 				result.goMemoryLimitPercent = tmp
 			case "maxEventBytes":
@@ -733,6 +737,7 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	applyIntEnvironment(prefix, "MEMORY_HIGH_WATERMARK_PERCENT", "memoryHighWatermarkPercent", &config.memoryHighWatermarkPercent)
 	applyIntEnvironment(prefix, "MEMORY_LOW_WATERMARK_PERCENT", "memoryLowWatermarkPercent", &config.memoryLowWatermarkPercent)
 	applyIntEnvironment(prefix, "MEMORY_CHECK_INTERVAL_MS", "memoryCheckIntervalMs", &config.memoryCheckIntervalMs)
+	applyIntEnvironment(prefix, "MEMORY_STALL_STATUS_INTERVAL_SECONDS", "memoryStallStatusIntervalSeconds", &config.memoryStallStatusIntervalSeconds)
 	applyIntEnvironment(prefix, "GO_MEMORY_LIMIT_PERCENT", "goMemoryLimitPercent", &config.goMemoryLimitPercent)
 	applyIntEnvironment(prefix, "MAX_EVENT_BYTES", "maxEventBytes", &config.maxEventBytes)
 	if v := os.Getenv(prefix + "LOST_EVENT_GUARD"); v != "" {
@@ -1008,7 +1013,7 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			config.compressWhenLengthExceeds = v
 		case "kafkaFetchDefaultBytes", "kafkaMaxMessageBytes", "kafkaChannelBufferSize", "kafkaMaxProcessingTimeMs", "kafkaRetryInterval",
 			"memoryHighWatermarkPercent", "memoryLowWatermarkPercent",
-			"memoryCheckIntervalMs", "goMemoryLimitPercent", "maxEventBytes":
+			"memoryCheckIntervalMs", "memoryStallStatusIntervalSeconds", "goMemoryLimitPercent", "maxEventBytes":
 			v, err := strconv.Atoi(value)
 			if err != nil || v < 0 {
 				Logger.Fatalf(configInvalid(key, value), "Error parsing --%s: %s. Legal values are non-negative integers", key, value)
@@ -1030,6 +1035,8 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				config.memoryLowWatermarkPercent = v
 			case "memoryCheckIntervalMs":
 				config.memoryCheckIntervalMs = v
+			case "memoryStallStatusIntervalSeconds":
+				config.memoryStallStatusIntervalSeconds = v
 			case "goMemoryLimitPercent":
 				config.goMemoryLimitPercent = v
 			case "maxEventBytes":
@@ -1314,9 +1321,13 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		Logger.Fatalf(configInvalid("memoryCheckIntervalMs", result.memoryCheckIntervalMs),
 			"Invalid memoryCheckIntervalMs: %d. Legal values are positive integers", result.memoryCheckIntervalMs)
 	}
-	if result.goMemoryLimitPercent < 0 || result.goMemoryLimitPercent > 100 {
+	if err := validateGoMemoryHeadroom(result.goMemoryLimitPercent, result.memoryLowWatermarkPercent); err != nil {
 		Logger.Fatalf(configInvalid("goMemoryLimitPercent", result.goMemoryLimitPercent),
-			"Invalid goMemoryLimitPercent: %d. Legal values are 0-100", result.goMemoryLimitPercent)
+			"Invalid memory configuration: %v", err)
+	}
+	if err := validateMemoryStallInterval(result.memoryStallStatusIntervalSeconds); err != nil {
+		Logger.Fatalf(configInvalid("memoryStallStatusIntervalSeconds", result.memoryStallStatusIntervalSeconds),
+			"Invalid memory stall interval: %v", err)
 	}
 	validateMessageSpec("memoryHighWatermarkLog", result.memoryHighWatermarkLog, logging.WARN)
 	validateMessageSpec("memoryLowWatermarkLog", result.memoryLowWatermarkLog, logging.INFO)
@@ -1497,6 +1508,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Infof(configApplied("memoryHighWatermarkPercent", config.memoryHighWatermarkPercent), "  memoryHighWatermarkPercent: %d", config.memoryHighWatermarkPercent)
 	Logger.Infof(configApplied("memoryLowWatermarkPercent", config.memoryLowWatermarkPercent), "  memoryLowWatermarkPercent: %d", config.memoryLowWatermarkPercent)
 	Logger.Infof(configApplied("memoryCheckIntervalMs", config.memoryCheckIntervalMs), "  memoryCheckIntervalMs: %d", config.memoryCheckIntervalMs)
+	Logger.Infof(configApplied("memoryStallStatusIntervalSeconds", config.memoryStallStatusIntervalSeconds), "  memoryStallStatusIntervalSeconds: %d", config.memoryStallStatusIntervalSeconds)
 	Logger.Infof(configApplied("goMemoryLimitPercent", config.goMemoryLimitPercent), "  goMemoryLimitPercent: %d", config.goMemoryLimitPercent)
 	Logger.Infof(configApplied("maxEventBytes", config.maxEventBytes), "  maxEventBytes: %d", config.maxEventBytes)
 	Logger.Infof(configApplied("lostEventGuard", config.lostEventGuard), "  lostEventGuard: %t", config.lostEventGuard)

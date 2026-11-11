@@ -37,7 +37,8 @@ services:
       context: .
       args:
         BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
-    image: localhost/airgap-testenv-tc32:local
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     entrypoint: ["/airgap/work/airgap-load"]
     command: ["sink", "--listen=:1234", "--output=/airgap/work/sink.bytes", "--capture=/airgap/work/sink.capture"]
     volumes:
@@ -48,7 +49,8 @@ services:
       context: .
       args:
         BASE_IMAGE: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
-    image: localhost/airgap-testenv-tc32:local
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+    pull_policy: build
     hostname: upstream
     mem_limit: 512m
     depends_on:
@@ -66,7 +68,12 @@ services:
     restart: on-failure:3
 
   producer:
-    image: localhost/airgap-testenv-tc32:local
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${DOWNSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9}
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-downstream:local
+    pull_policy: build
     entrypoint: ["/airgap/work/airgap-load"]
     command: ["produce", "--brokers=kafka:9092", "--topic=transfer", "--count=6", "--sizes=1024,4194304"]
     depends_on:
