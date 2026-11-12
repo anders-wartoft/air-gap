@@ -1,5 +1,30 @@
 # Release Notes
 
+## 0.1.20-SNAPSHOT
+
+### Deterministic TC-16 dedup artifact
+
+- TC-16, TC-41 and TC-42 require exactly one Linux dedup JAR per requested
+  architecture rather than selecting by tag-derived version. `make build-java`
+  cleans old builds first; other platform variants and TC-41's separate legacy
+  cache remain supported. TC-16 checks missing or ambiguous artifacts before
+  Kafka setup. Explicit per-test `CURRENT_DEDUP_JAR` overrides remain available.
+
+### TC-46 on hardened staging hosts
+
+- Child dedup JVMs now extract RocksDB JNI into private directories under
+  `java-streams/target/dedup-it-logs/` instead of system `/tmp`. This avoids
+  native-library loading failures when `/tmp` is mounted `noexec`; the build
+  filesystem and SELinux policy must still allow loading native libraries.
+
+### Live batch-test overview
+
+- `run-testcases.sh --log-dir DIR` now writes `DIR/overview.log` as tests run.
+  Follow it with `tail -f` for testcase starts, PASS/FAIL/SKIP results,
+  runtimes, skip reasons, failed-case log names and final batch totals.
+  Each new batch overwrites the overview alongside the per-case logs.
+
+
 ## 0.1.19-SNAPSHOT
 
 ### Testcase-scoped Docker projects and image overrides

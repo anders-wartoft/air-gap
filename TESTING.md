@@ -86,6 +86,10 @@ legacy fixture, but dedup retains its default 1 MiB producer limit.
 Reports are under `java-streams/target/failsafe-reports/`; child JVM logs are
 retained under `java-streams/target/dedup-it-logs/`. The integration tests do not
 run in plain `mvn test`; the normal unit suite does not require Docker.
+Child JVMs extract RocksDB's native library into private temporary directories
+under `target/dedup-it-logs/`, not the system `/tmp`, so a `noexec` system temp
+mount is supported. The checkout/build filesystem must allow native library
+loading; SELinux policy must also permit it.
 
 After packaging, also run the existing Kafka-outage/restart checks against the
 exact Java 17 runtime JAR (rather than an older JAR left in the build directory):
@@ -95,9 +99,12 @@ TC9_RESTART_JAR_NAME=air-gap-deduplication-fat-0.1.18-SNAPSHOT-linux-amd64.jar \
   bash tests/env/verify-tc9-dedup-restart.sh
 ```
 
-TC-41 and TC-42 select the Linux AMD64 JAR matching the current Maven project
-version and print the selected path. Rebuild when that exact artifact is
-missing; stale JARs in `target` are not used as a fallback. Explicit
+TC-16, TC-41 and TC-42 require exactly one Linux JAR for the requested
+architecture (AMD64 by default) and print the selected path. Selection does
+not use tag-derived version numbers or modification times. Run
+`make build-java` (which cleans first) when artifacts are missing or ambiguous.
+Platform variants can coexist; TC-41's legacy JAR is cached outside `target`
+and copied into its per-run directory, so clean builds do not remove it. Explicit
 `TC41_CURRENT_DEDUP_JAR` / `TC42_CURRENT_DEDUP_JAR` overrides remain available.
 Their artifact-selection regressions run with
 `bash tests/env/test-dedup-jar.sh` (no Docker required).

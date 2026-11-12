@@ -82,8 +82,12 @@ class DedupStateIT {
 
     private Process start(String state, String persistMs, String commitMs) throws Exception {
         Path log = directory.resolve(state + ".log");
+        // RocksDB extracts JNI here; hardened hosts may mount /tmp with noexec.
+        Path nativeTmp = Files.createDirectories(
+                Path.of("target", "dedup-it-logs", id, state + "-tmp").toAbsolutePath());
         ProcessBuilder builder = new ProcessBuilder(
                 Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Djava.io.tmpdir=" + nativeTmp,
                 "-Dlog4j.configurationFile=" + getClass().getResource("/log4j2-dedup-it.xml"),
                 "-cp", System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
                 PartitionDedupApp.class.getName());

@@ -123,14 +123,8 @@ services:
       GAP_EMIT_INTERVAL_SEC: "60"
       PERSIST_INTERVAL_MS: "10000"
     volumes:
-      - ../../java-streams/target:/airgap/dedup-jar:ro,z
-    entrypoint:
-      - /bin/sh
-      - -ec
-      - |
-        set -- /airgap/dedup-jar/air-gap-deduplication-fat-*-linux-${TC16_ARCH:-amd64}.jar
-        [ "$$#" -eq 1 ] && [ -f "$$1" ] || { echo "Expected one matching dedup JAR; run make build-java" >&2; exit 2; }
-        exec java -jar "$$1"
+      - ${TC16_CURRENT_DEDUP_JAR:-../../java-streams/target/tc16-unselected.jar}:/airgap/dedup.jar:ro,z
+    entrypoint: ["java", "-jar", "/airgap/dedup.jar"]
   lg-producer:
     <<: *lg
     environment:

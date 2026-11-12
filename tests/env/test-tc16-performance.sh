@@ -6,11 +6,14 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/env/lib" "$WORK/env/bin" "$WORK/mock" "$WORK/state"
 cp "$HERE/tc16-performance.sh" "$HERE/run-testcase.sh" "$WORK/env/"
 cp "$HERE/lib/report.sh" "$HERE/lib/docker-test.sh" "$HERE/lib/docker-images.sh" "$WORK/env/lib/"
+cp "$HERE/lib/dedup-jar.sh" "$WORK/env/lib/"
 cp "$HERE/lib/tc16-fake-docker.sh" "$WORK/mock/docker"
 chmod +x "$WORK/mock/docker"
 touch "$WORK/env/bin/LogGenerator-1.1-9.jar"
 export PATH="$WORK/mock:$PATH" FAKE_STATE="$WORK/state"
 export TC16_COUNT=10 TC16_PARTITIONS=1 TC16_SETTLE=1 TC16_TIMEOUT=3 TC16_POLL=1
+printf 'dedup fixture' > "$WORK/dedup.jar"
+export TC16_CURRENT_DEDUP_JAR="$WORK/dedup.jar"
 
 run_case() {
     local expected="$1"; shift
@@ -58,6 +61,15 @@ before 'stop .*downstream$' 'up .*dedup$'
 before 'stop .*upstream$' 'up .*dedup$'
 before 'stop .*dedup$' 'up .*lg-sink$'
 echo "PASS: single-machine phase ordering and full verification"
+
+rc=0
+TC16_CURRENT_DEDUP_JAR="$WORK/missing.jar" bash "$WORK/env/tc16-performance.sh" all > "$WORK/result" 2>&1 || rc=$?
+[[ "$rc" == 1 ]]
+grep -q 'cannot select current dedup JAR' "$WORK/result"
+if grep -q 'Starting ds Kafka' "$WORK/result"; then
+    echo "Missing dedup JAR was not rejected before setup" >&2; exit 1
+fi
+echo "PASS: missing dedup artifact fails before workload setup"
 
 # Each mock run starts with new state; real runs require explicit reset.
 rm "$FAKE_STATE/upstream" "$FAKE_STATE/lg-producer"

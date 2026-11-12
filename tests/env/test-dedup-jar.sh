@@ -4,42 +4,45 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/lib/dedup-jar.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-dedup-jar-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/bin" "$WORK/repo/java-streams/target"
-cat > "$WORK/bin/mvn" <<'EOF'
-#!/usr/bin/env bash
-if [[ "${FAKE_MAVEN_FAILURE:-0}" == 1 ]]; then exit 1; fi
-printf '%s' "${FAKE_MAVEN_VERSION:-0.1.18-SNAPSHOT}"
-EOF
-chmod +x "$WORK/bin/mvn"
-export PATH="$WORK/bin:$PATH"
-OLD="$WORK/repo/java-streams/target/air-gap-deduplication-fat-0.1.14-SNAPSHOT-linux-amd64.jar"
-CURRENT="$WORK/repo/java-streams/target/air-gap-deduplication-fat-0.1.18-SNAPSHOT-linux-amd64.jar"
-FUTURE="$WORK/repo/java-streams/target/air-gap-deduplication-fat-9.0.0-SNAPSHOT-linux-amd64.jar"
-printf 'old' > "$OLD"
+mkdir -p "$WORK/repo/java-streams/target" "$WORK/cache"
+TARGET="$WORK/repo/java-streams/target"
+CURRENT="$TARGET/air-gap-deduplication-fat-0.1.19-SNAPSHOT-linux-amd64.jar"
+ARM="$TARGET/air-gap-deduplication-fat-0.1.19-SNAPSHOT-linux-arm64.jar"
+OLD="$TARGET/air-gap-deduplication-fat-0.1.18-SNAPSHOT-linux-amd64.jar"
+LEGACY="$WORK/cache/air-gap-deduplication-fat-0.1.10-SNAPSHOT.jar"
 printf 'current' > "$CURRENT"
-printf 'future' > "$FUTURE"
+printf 'arm current' > "$ARM"
+printf 'legacy' > "$LEGACY"
+printf 'alias' > "$TARGET/air-gap-deduplication-fat.jar"
+printf 'universal' > "$TARGET/air-gap-deduplication-fat-0.1.19-SNAPSHOT.jar"
+printf 'musl' > "$TARGET/air-gap-deduplication-fat-0.1.19-SNAPSHOT-linux-amd64-musl.jar"
 [[ "$(current_dedup_jar "$WORK/repo" "" TC41)" == "$CURRENT" ]]
-echo "PASS: selects current project version, not oldest or highest leftover"
-[[ "$(current_dedup_jar "$WORK/repo" "$OLD" TC42)" == "$OLD" ]]
-echo "PASS: explicit override is preserved"
-rm "$CURRENT"
+[[ "$(current_dedup_jar "$WORK/repo" "" TC16 arm64)" == "$ARM" ]]
+echo "PASS: one build per platform; other platforms, aliases and legacy cache coexist"
+printf 'old' > "$OLD"
 rc=0
-current_dedup_jar "$WORK/repo" "" TC41 > "$WORK/out" 2> "$WORK/error" || rc=$?
+current_dedup_jar "$WORK/repo" "" TC42 > "$WORK/out" 2> "$WORK/error" || rc=$?
 [[ "$rc" == 2 && ! -s "$WORK/out" ]]
-grep -q 'current dedup JAR missing' "$WORK/error"
-echo "PASS: missing current artifact never falls back to another version"
+grep -q 'multiple dedup JARs' "$WORK/error"
+grep -Fq "$CURRENT" "$WORK/error"
+grep -Fq "$OLD" "$WORK/error"
+echo "PASS: ambiguous builds fail instead of guessing by version"
+[[ "$(current_dedup_jar "$WORK/repo" "$CURRENT" TC42)" == "$CURRENT" ]]
+[[ "$(current_dedup_jar "$WORK/repo" "$LEGACY" TC41)" == "$LEGACY" ]]
+echo "PASS: explicit overrides remain supported"
+rm "$CURRENT" "$OLD"
 rc=0
-FAKE_MAVEN_FAILURE=1 current_dedup_jar "$WORK/repo" "" TC42 > "$WORK/out" 2> "$WORK/error" || rc=$?
+current_dedup_jar "$WORK/repo" "" TC16 > "$WORK/out" 2> "$WORK/error" || rc=$?
 [[ "$rc" == 2 && ! -s "$WORK/out" ]]
-grep -q 'unable to resolve' "$WORK/error"
-echo "PASS: Maven failure is explicit"
-rc=0
-FAKE_MAVEN_VERSION='invalid version' current_dedup_jar "$WORK/repo" "" TC42 > "$WORK/out" 2> "$WORK/error" || rc=$?
-[[ "$rc" == 2 && ! -s "$WORK/out" ]]
-grep -q 'invalid Maven project version' "$WORK/error"
-echo "PASS: invalid version output cannot select a JAR"
+grep -q 'dedup JAR missing' "$WORK/error"
+echo "PASS: missing platform artifact fails with clean build instructions"
 rc=0
 current_dedup_jar "$WORK/repo" "$WORK/missing.jar" TC42 > "$WORK/out" 2> "$WORK/error" || rc=$?
 [[ "$rc" == 2 && ! -s "$WORK/out" ]]
 grep -q 'TC42_CURRENT_DEDUP_JAR' "$WORK/error"
 echo "PASS: missing override fails with actionable diagnostics"
+touch "$CURRENT"
+rc=0
+current_dedup_jar "$WORK/repo" "" TC16 > "$WORK/out" 2> "$WORK/error" || rc=$?
+[[ "$rc" == 2 && ! -s "$WORK/out" ]]
+echo "PASS: empty artifact is rejected"

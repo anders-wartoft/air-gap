@@ -6,7 +6,7 @@
 #
 #   --json PATH    write per-case codes/status/duration/reason as JSON
 #   --junit PATH   write a JUnit XML report (can be combined with --json)
-#   --log-dir DIR  retain per-case logs in DIR
+#   --log-dir DIR  retain per-case logs and live overview.log in DIR
 #   Report paths are relative to the caller's working directory.
 #   Reports require Python 3 (standard library only).
 #   Exit: 0 = no failed cases (skips allowed), 1 = testcase failure,
@@ -51,7 +51,9 @@
 #   ./run-testcases.sh 1,4-7,9 2>&1 | tee test-run.log
 #
 # --log-dir retains tc-1.log, tc-4.log, etc. relative to the caller's
-# working directory. Existing per-case logs are overwritten. Redirection
+# working directory. overview.log records starts, results and batch totals
+# as they happen; follow it with tail -f DIR/overview.log.
+# Existing per-case logs and overview.log are overwritten. Redirection
 # saves combined output, including the final summary; tee also displays it.
 # In Bash, set -o pipefail preserves the runner's failure status with tee.
 #
@@ -245,13 +247,28 @@ trap cleanup EXIT
 RESULT_ROWS="$LOGDIR/results.tsv"
 : > "$RESULT_ROWS"
 CASE_LOGDIR="$LOGDIR"
+OVERVIEW_LOG=""
 if [[ -n "$RETAIN_LOGDIR" ]]; then
     if ! mkdir -p "$RETAIN_LOGDIR"; then
         echo "run-testcases: cannot create log directory: $RETAIN_LOGDIR" >&2
         exit 2
     fi
     CASE_LOGDIR="$RETAIN_LOGDIR"
+    OVERVIEW_LOG="$CASE_LOGDIR/overview.log"
+    if ! printf '%s\n' "--- batch started: ${IDS[*]} ---" > "$OVERVIEW_LOG"; then
+        echo "run-testcases: cannot initialize overview log: $OVERVIEW_LOG" >&2
+        exit 2
+    fi
+    echo "runner: live overview: $OVERVIEW_LOG"
 fi
+
+overview() {
+    [[ -n "$OVERVIEW_LOG" ]] || return 0
+    if ! printf '%s\n' "$@" >> "$OVERVIEW_LOG"; then
+        echo "run-testcases: cannot write overview log: $OVERVIEW_LOG" >&2
+        exit 2
+    fi
+}
 
 # Did the caller forward -pause? If so we leave the stack up after the final
 # testcase (same semantics run-testcase.sh gives for a single run).
@@ -353,8 +370,10 @@ for id in "${IDS[@]}"; do
         declare_status "$id" SKIP
         declare_duration "$id" 0
         printf '%s\t%s\t%s\t%s\n' "$id" -1 0 "$reason" >> "$RESULT_ROWS"
+        overview "🤔 testcase $id SKIP" "  reason: $reason"
         continue
     fi
+    overview "─── testcase $id RUNNING ───"
     LOG="$CASE_LOGDIR/tc-${id}.log"
     airgap_init_test "$id"
     tc_start_epoch="$(date +%s)"
@@ -380,10 +399,13 @@ for id in "${IDS[@]}"; do
         echo "[chain] TC-$id OK ($(format_duration "$tc_elapsed"))"
         PASS+=("$id")
         declare_status "$id" PASS
+        overview "✅ testcase $id PASS ($(format_duration "$tc_elapsed"))"
     else
         echo "[chain] TC-$id FAILED (exit $rc) ($(format_duration "$tc_elapsed"))" >&2
         FAIL+=("$id")
         declare_status "$id" FAIL
+        overview "❌ testcase $id FAIL ($(format_duration "$tc_elapsed"))" \
+            "  exit code: $rc; log: tc-${id}.log"
     fi
     # Belt-and-braces teardown: run-testcase.sh already tears down on exit
     # unless -pause was requested, but if the user forwarded -pause we skip
@@ -457,6 +479,8 @@ if [[ -n "$JSON_REPORT" || -n "$JUNIT_REPORT" ]]; then
         exit 2
     fi
 fi
+overview "--- batch complete: ${#PASS[@]} passed, ${#FAIL[@]} failed, ${#SKIP[@]} skipped ---" \
+    "  total runtime: $(format_duration "$CHAIN_ELAPSED") (${CHAIN_ELAPSED}s)"
 if (( ${#FAIL[@]} )); then
     exit 1
 fi

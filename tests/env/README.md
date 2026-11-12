@@ -175,6 +175,17 @@ failure artifacts. Use a fresh output directory per CI job. Reports are
 written at the end of a completed batch, including batches with failed cases;
 an interrupted run or setup error is not guaranteed to produce reports.
 
+With `--log-dir`, `overview.log` in that directory is updated immediately with
+testcase `RUNNING`, `✅ PASS`, `❌ FAIL` and `🤔 SKIP` entries, runtimes, skip reasons,
+failed-case log names and final batch totals. It is plain text and overwritten
+when a new batch starts, just like the per-case logs. Follow a running batch:
+
+```bash
+tail -f artifacts/logs/overview.log
+```
+
+An interrupted run may end with a `RUNNING` entry and no batch-complete line.
+
 ### Exit codes and report schema
 
 | Batch exit code | Meaning |

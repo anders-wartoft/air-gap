@@ -5,6 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/lib/docker-test.sh"
 ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/lib/report.sh"
+source "$HERE/lib/dedup-jar.sh"
 cd "$HERE"
 export COMPOSE_PROGRESS=plain
 
@@ -198,6 +199,12 @@ require_lg() {
     (( BASH_REMATCH[1] > 1 || (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] > 1) ||
         (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] == 1 && BASH_REMATCH[3] >= 9) )) ||
         die "LogGenerator 1.1-9+ required for --from-beginning true; selected $version"
+}
+require_dedup() {
+    local jar
+    jar="$(current_dedup_jar "$HERE/../.." "${TC16_CURRENT_DEDUP_JAR:-}" TC16 "${TC16_ARCH:-amd64}")" ||
+        die "cannot select current dedup JAR; run make build-java or set TC16_CURRENT_DEDUP_JAR"
+    export TC16_CURRENT_DEDUP_JAR="$(cd "$(dirname "$jar")" && pwd)/$(basename "$jar")"
 }
 wait_brokers() {
     local side="$1" deadline=$((SECONDS + 180))
@@ -401,7 +408,7 @@ receive_events() {
     echo "TC-16-DS: raw backlog stored; receiver stopped; starting dedup"
     echo "TC-16: Deduplicating data: reading $TC16_COUNT raw events and writing deduplicated output..."
     # Fresh container also guarantees a fresh local Streams state directory.
-    compose ds up -d --force-recreate --no-deps dedup
+    compose ds up -d --force-recreate --no-deps dedup || die "could not start dedup"
     wait_phase dedup dedup tc16-dedup
     compose ds stop -t 30 dedup
     echo "TC-16-DS: dedup stopped; starting isolated verification"
@@ -423,6 +430,7 @@ case "$MODE" in
         ;;
     ds)
         require_lg
+        require_dedup
         : > "$RESULTS/timing.txt"
         : > "$RESULTS/progress.csv"
         prepare ds
@@ -430,6 +438,7 @@ case "$MODE" in
         ;;
     all)
         require_lg
+        require_dedup
         if [[ "${TC16_BATCH_MODE:-0}" == 1 ]]; then
             echo "TC-16: batch mode resets only TC-16 containers and Kafka volumes before the run"
             compose us down -v --remove-orphans
