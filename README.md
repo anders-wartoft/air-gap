@@ -903,7 +903,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | inputFilterDefaultAction | AIRGAP_UPSTREAM_INPUT_FILTER_DEFAULT_ACTION | allow | Default action when no filter rules match: `allow` or `deny`. Use `deny` for allowlist approach, `allow` for blocklist approach |
 | inputFilterTimeout | AIRGAP_UPSTREAM_INPUT_FILTER_TIMEOUT | 100 | Regex match timeout in milliseconds for input filter rules. Protects against ReDoS attacks. Increase for complex patterns or large payloads |
 | tcpRetryInterval | AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL | 1000 | (TCP only) Milliseconds between send retries and minimum interval between connection attempts per adapter |
-| tcpRetryTimes | AIRGAP_UPSTREAM_TCP_RETRY_TIMES | 0 | (TCP only) Maximum number of send retries. `0` means retry indefinitely (no message loss). Set to a positive integer to give up after that many attempts |
+| tcpRetryTimes | AIRGAP_UPSTREAM_TCP_RETRY_TIMES | 0 | (TCP only) Maximum number of send attempts per retry cycle. `0` means retry detected write failures indefinitely; it does not acknowledge downstream delivery. A positive integer ends the cycle after that many attempts |
 | tcpRetryErrorLevel | AIRGAP_UPSTREAM_TCP_RETRY_ERROR_LEVEL | WARN | (TCP only) Log level used for each retry attempt message. Valid values: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | tcpTLSEnabled | AIRGAP_UPSTREAM_TCP_TLS_ENABLED | false | (TCP only) Enable TLS 1.2+ on the TCP connection. Requires `tcpTLSCAFile`. Set to `true` to encrypt the TCP transport |
 | tcpTLSCertFile | AIRGAP_UPSTREAM_TCP_TLS_CERT_FILE | | (TCP+TLS) Client certificate PEM file. Required for mTLS when downstream has `tcpTLSClientAuth=require` |

@@ -2,6 +2,16 @@
 
 ## 0.1.20-SNAPSHOT
 
+### TCP retry visibility and recovery coverage
+
+- Upstream reports a TCP transport error on the first failed send, including
+  when `tcpRetryTimes=0` retries indefinitely, and restores the status after a
+  successful write.
+- TC-44 now checks that finite TCP retry exhaustion with a Kafka source
+  replays two source records after the receiver restarts. A successful TCP
+  write is not a downstream Kafka acknowledgment; missing records still
+  require gap detection and the create/resend workflow.
+
 ### Deterministic TC-16 dedup artifact
 
 - TC-16, TC-41 and TC-42 require exactly one Linux dedup JAR per requested
@@ -844,7 +854,7 @@ All four limits are configurable via `.properties` file and environment variable
   - `tcpRetryInterval` (`AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL`, default `1000` ms) — pause between retry attempts
   - `tcpRetryTimes` (`AIRGAP_UPSTREAM_TCP_RETRY_TIMES`, default `0`) — maximum retries; `0` means infinite (never give up)
   - `tcpRetryErrorLevel` (`AIRGAP_UPSTREAM_TCP_RETRY_ERROR_LEVEL`, default `WARN`) — log level for per-attempt retry messages (`DEBUG`/`INFO`/`WARN`/`ERROR`)
-  - With the default infinite-retry setting, upstream blocks until the downstream comes back and no messages are ever lost, fixing a bug where restarting the downstream caused the upstream to stop sending permanently
+  - With the default infinite-retry setting, upstream retries detected send failures until the downstream comes back, fixing a bug where restarting the downstream caused the upstream to stop sending permanently. A successful TCP write does not itself guarantee downstream delivery.
   - UDP retry behaviour is unchanged (30 × 100 ms, then Kafka reprocessing)
 
 ### Deduplication (Java Streams)

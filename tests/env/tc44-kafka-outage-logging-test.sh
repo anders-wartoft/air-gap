@@ -3,6 +3,7 @@
 # (source=random) and downstream are running. All processes must survive and
 # resume, upstream must report its Kafka status as running again, and the
 # outage errors must be summarized instead of logged once per message.
+# A separate receiver outage verifies finite TCP retries with a Kafka source.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/lib/docker-test.sh"
@@ -126,6 +127,8 @@ groupID=tc44
 encryption=false
 payloadSize=1400
 logStatistics=5
+tcpRetryTimes=3
+tcpRetryInterval=1000
 EOF2
 compose build downstream
 compose up -d kafka
@@ -137,6 +140,50 @@ if ! produce_until_delivered tc44-before; then
     report_check "Before outage" "event from source reaches transfer" "not delivered" 1
 fi
 report_check "Before outage" "event from source reaches transfer" "observed" 0
+
+# Unlike the random source in TC-24, Kafka can replay an unmarked offset after
+# finite retries end. Produce both records while the receiver is stopped.
+finite_upstream_id="$(compose ps -q upstream-kafka)"
+finite_upstream_start="$(docker inspect -f '{{.State.StartedAt}}' "$finite_upstream_id")"
+source_offset=$(compose exec -T kafka kafka-run-class kafka.tools.GetOffsetShell \
+    --bootstrap-server kafka:9092 --topic source 2>/dev/null | awk -F: '$2 == 0 {print $3}')
+if [[ ! "$source_offset" =~ ^[0-9]+$ ]]; then
+    report_check "Finite TCP retry" "source partition offset" "${source_offset:-unavailable}" 1
+fi
+compose stop downstream
+printf 'tc44-finite-retry-first\ntc44-finite-retry-second\n' |
+    compose exec -T kafka kafka-console-producer --bootstrap-server kafka:9092 --topic source
+deadline=$((SECONDS + 120))
+while (( SECONDS < deadline )); do
+    compose logs --no-color upstream-kafka > "$WORK/finite-retry.log"
+    if grep -qF "Failed to send message id=source_0_${source_offset} after 3 retries" "$WORK/finite-retry.log"; then
+        break
+    fi
+    sleep 1
+done
+if ! grep -qF "Failed to send message id=source_0_${source_offset} after 3 retries" "$WORK/finite-retry.log"; then
+    report_check "Finite TCP retry" "first source record exhausts 3 attempts" "not observed" 1
+fi
+report_check "Finite TCP retry" "first source record exhausts 3 attempts" "observed" 0
+compose up -d --no-deps --no-build --no-recreate downstream
+deadline=$((SECONDS + 180))
+while (( SECONDS < deadline )); do
+    compose exec -T kafka timeout 15 kafka-console-consumer --bootstrap-server kafka:9092 \
+        --topic transfer --from-beginning --timeout-ms 8000 > "$WORK/finite-received.log" 2>/dev/null || true
+    if grep -qxF 'tc44-finite-retry-first' "$WORK/finite-received.log" &&
+        grep -qxF 'tc44-finite-retry-second' "$WORK/finite-received.log"; then
+        break
+    fi
+done
+if ! grep -qxF 'tc44-finite-retry-first' "$WORK/finite-received.log" ||
+    ! grep -qxF 'tc44-finite-retry-second' "$WORK/finite-received.log"; then
+    report_check "Finite TCP retry recovery" "both source records reach Kafka after receiver restart" "missing record" 1
+fi
+if [[ "$(docker inspect -f '{{.State.Running}}' "$finite_upstream_id")" != true ]] ||
+    [[ "$(docker inspect -f '{{.State.StartedAt}}' "$finite_upstream_id")" != "$finite_upstream_start" ]]; then
+    report_check "Finite TCP retry process" "same running upstream process" "exit or restart detected" 1
+fi
+report_check "Finite TCP retry recovery" "both source records reach Kafka after receiver restart" "observed" 0
 
 ids=""
 for service in $SERVICES; do

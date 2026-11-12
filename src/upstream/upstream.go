@@ -474,6 +474,24 @@ func encodeForTransport(id string, payload []byte, isCompressed bool) ([][]byte,
 	return protocol.FormatMessage(messageType, id, payload, config.payloadSize), nil
 }
 
+func setTransportError(err error) {
+	transportStatusMu.Lock()
+	defer transportStatusMu.Unlock()
+	newStatus := err.Error()
+	if transportStatus != newStatus {
+		previousTransportStatus = transportStatus
+		transportStatus = newStatus
+		Logger.Errorf(logging.Event(logging.EventTransportConnect,
+			logging.Failure(),
+			logging.Str("airgap.transport.kind", config.transport),
+			logging.Str("airgap.health.status", newStatus),
+			logging.Str("airgap.health.status.previous", previousTransportStatus),
+			logging.Str("airgap.health.transition", "healthy.to.failed"),
+			logging.Error("_OTHER"),
+		), "Transport status changed to error: %s (was: %s)", newStatus, previousTransportStatus)
+	}
+}
+
 func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient UDPClient, id string, _ []byte, t time.Time, received []byte) bool {
 	atomic.AddInt64(&receivedEvents, 1)
 	atomic.AddInt64(&totalReceived, 1)
@@ -678,6 +696,9 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 
 		// Send failed - prepare for retry with backoff
 		hadFailure = true
+		if config.transport == "tcp" {
+			setTransportError(transportErr)
+		}
 		retryLimitStr := fmt.Sprintf("%d", maxRetries)
 		if maxRetries == 0 {
 			retryLimitStr = "∞"
@@ -721,23 +742,7 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 	}
 
 	// All retries failed - update status and don't consume the message
-	transportStatusMu.Lock()
-	newStatus := transportErr.Error()
-	if transportStatus != newStatus {
-		previousTransportStatus = transportStatus
-		transportStatus = newStatus
-		Logger.Errorf(logging.Event(logging.EventTransportConnect,
-			logging.Failure(),
-			logging.Str("airgap.transport.kind", config.transport),
-			logging.Str("airgap.health.status", newStatus),
-			logging.Str("airgap.health.status.previous", previousTransportStatus),
-			logging.Str("airgap.health.transition", "healthy.to.failed"),
-			logging.Error("_OTHER"),
-		), "Transport status changed to error: %s (was: %s)", newStatus, previousTransportStatus)
-	} else if transportStatus != "running" {
-		transportStatus = newStatus
-	}
-	transportStatusMu.Unlock()
+	setTransportError(transportErr)
 
 	// Track dropped message
 	atomic.AddInt64(&messagesDropped, 1)
