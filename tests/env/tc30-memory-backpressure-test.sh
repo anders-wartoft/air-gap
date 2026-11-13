@@ -82,7 +82,7 @@ sample_memory &
 SAMPLER_PID=$!
 
 docker exec "$UPSTREAM_CID" /airgap/work/airgap-load pressure \
-    --bytes=$((64 * 1024 * 1024)) --duration=8s >"$WORK/pressure.log" 2>&1 &
+    --bytes=$((120 * 1024 * 1024)) --duration=8s >"$WORK/pressure.log" 2>&1 &
 PRESSURE_PID=$!
 
 deadline=$((SECONDS + 15))

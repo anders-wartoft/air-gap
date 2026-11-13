@@ -5131,7 +5131,9 @@ and TCP-send path.
 1. Build a Linux helper and start Kafka, the TCP drain, and upstream.
 2. Require upstream's Sarama consumer to become ready.
 3. Inside the upstream container's cgroup, start a separate helper process
-   that allocates and touches 64 MiB for eight seconds.
+   that allocates and touches 120 MiB for eight seconds. The allocation alone
+   exceeds the 115.2 MiB high watermark, so triggering backpressure does not
+   depend on TCP send speed. It is kept live until the pressure interval ends.
 4. Sample `memory.current` throughout the run.
 5. Produce twelve 4 MiB Kafka records while that pressure is active.
 6. Require upstream to log a high-watermark throttle transition, at the
@@ -5225,7 +5227,7 @@ broker, rather than upstream, is not the component bounding memory. Note that
 96 MiB to leave room for record-batch and response framing; requesting the
 full ceiling can cause a decoding error instead of exercising memory pressure.
 
-The test applies 32 MiB of extra cgroup pressure, half of what TC-30 survives.
+The test applies 32 MiB of extra cgroup pressure, less than TC-30 survives.
 That is the point of the control: the unsafe configuration dies under
 conditions the bounded configuration handles with room to spare.
 
@@ -6608,3 +6610,29 @@ JAR under `java-streams/target`. It uses one source partition and checks a
 detectable interior gap, not missing tail records or production throughput.
 Failure artifacts are retained in the printed `tests/env/tmp/tc50.XXXXXX`
 directory; `-pause` is unsupported.
+
+## TC-51 — TCP and TLS transport throughput
+
+* Runner: `./run-testcase.sh 51` or `./run-testcases.sh --log-dir tmp/logs 51`
+
+Runs the production upstream and downstream TCP adapters over real loopback
+sockets in a Linux container, separately for plain TCP, CA-verified TLS 1.2
+and CA-verified TLS 1.3. Each connection carries 20,000 records with 256-byte
+payloads through production framing and parsing. Every received ID and
+payload must match, in order, and delivered throughput must reach at least 5,000
+events/second for each transport. Results include elapsed time and measured
+EPS. The threshold catches the former blocking 1 ms health probe per frame;
+it is not a production capacity target.
+
+TCP peer closure is detected by a background connection reader rather than
+per-frame read deadlines. The Go regression suite checks idle closure and
+reconnection for TCP and both TLS versions, stale connection failures and
+monitor shutdown. TC-22 and TC-44 exercise receiver restart recovery; none of
+these tests makes a successful TCP write a downstream acknowledgment.
+
+Requires Go and Docker. TLS uses an ephemeral test certificate and verifies
+the server certificate. Kafka, deduplication, disk I/O, physical-network
+latency and rate limiting are intentionally excluded; TC-16 remains the
+separate end-to-end UDP performance procedure. Run on a machine with spare
+CPU capacity, without race instrumentation, to avoid load-induced failures.
+`-pause` is unsupported.

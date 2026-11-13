@@ -71,10 +71,10 @@ grep -q "^tc31-start-gate-ready$" "$WORK/upstream-before.log" || {
     exit 1
 }
 
-# Half the pressure TC-30 survives. The point of the control is that the
+# Less pressure than TC-30 survives. The point of the control is that the
 # unsafe configuration dies under conditions the bounded configuration handles
 # with room to spare.
-echo "TC-31: applying 32 MiB of cgroup pressure, half of what TC-30 survives"
+echo "TC-31: applying 32 MiB of cgroup pressure, less than TC-30 survives"
 docker exec "$UPSTREAM_CID" /airgap/work/airgap-load pressure \
     --bytes=$((32 * 1024 * 1024)) --duration=180s >"$WORK/pressure.log" 2>&1 &
 PRESSURE_PID=$!

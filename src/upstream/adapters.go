@@ -161,6 +161,7 @@ type TCPAdapter struct {
 	dialMu        sync.Mutex
 	lastDial      time.Time
 	retryInterval time.Duration
+	monitorWG     sync.WaitGroup
 	// TLS cert hot-reload: original params stored so ReloadTLSConfig can rebuild on SIGHUP
 	tlsCAFile          string
 	tlsCertFile        string
@@ -414,6 +415,8 @@ func newTCPAdapter(address string, tlsConfig *tls.Config, manager *pinnedtls.Man
 			return nil, err
 		}
 		adapter.conn = conn
+		adapter.monitorWG.Add(1)
+		go adapter.monitorConnection(conn)
 		Logger.Infof(logging.Event(logging.EventTCPConnection,
 			logging.Str("server.address", address),
 			logging.Bool("airgap.tls.enabled", tlsConfig != nil),
@@ -607,23 +610,10 @@ func (t *TCPAdapter) dialConfig(config *tls.Config) (net.Conn, error) {
 func (t *TCPAdapter) ensureConnected() bool {
 	t.mu.Lock()
 
-	// Test existing connection with a short deadline.
+	// Peer shutdown is monitored independently of the send hot path.
 	if t.conn != nil {
-		t.conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-		b := make([]byte, 1)
-		_, err := t.conn.Read(b)
-		t.conn.SetReadDeadline(time.Time{})
-		if err != nil {
-			if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
-				t.forget(t.conn)
-				t.conn.Close()
-				t.conn = nil
-			}
-		}
-		if t.conn != nil {
-			t.mu.Unlock()
-			return true
-		}
+		t.mu.Unlock()
+		return true
 	}
 
 	// Release the mutex before the potentially-slow dial so other goroutines
@@ -665,6 +655,8 @@ func (t *TCPAdapter) ensureConnected() bool {
 	recovered := t.err != nil
 	t.conn = conn
 	t.err = nil
+	t.monitorWG.Add(1)
+	go t.monitorConnection(conn)
 	t.mu.Unlock()
 	attrs := logging.Event(logging.EventTCPConnection,
 		logging.Str("server.address", t.addr),
@@ -677,16 +669,43 @@ func (t *TCPAdapter) ensureConnected() bool {
 	return true
 }
 
-// reconnect attempts to re-establish a TCP connection
-func (t *TCPAdapter) reconnect() error {
+// monitorConnection detects idle peer shutdown and TLS alerts without imposing
+// a read timeout on each outgoing frame. Rotation exchanges use separate sockets.
+func (t *TCPAdapter) monitorConnection(conn net.Conn) {
+	defer t.monitorWG.Done()
+	var buffer [1]byte
+	for {
+		if _, err := conn.Read(buffer[:]); err != nil {
+			t.mu.Lock()
+			if t.conn != conn {
+				t.mu.Unlock()
+				return
+			}
+			t.conn = nil
+			t.err = err
+			t.forget(conn)
+			t.mu.Unlock()
+			conn.Close()
+			Logger.Warnf(logging.Event(logging.EventTCPConnection,
+				logging.Failure(),
+				logging.Str("server.address", t.addr),
+				logging.ErrorType(err),
+			), "TCP connection to %s closed: %v", t.addr, err)
+			return
+		}
+	}
+}
+
+// reconnect attempts to re-establish the connection that failed a write.
+func (t *TCPAdapter) reconnect(failedConn net.Conn) error {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
 		return fmt.Errorf("TCP adapter closed")
 	}
 
-	// Close existing connection if any
-	if t.conn != nil {
+	// A monitor or another sender may already have replaced the failed socket.
+	if t.conn == failedConn {
 		t.forget(t.conn)
 		if tlsConn, ok := t.conn.(*tls.Conn); ok && t.pinned {
 			tlsConn.NetConn().Close()
@@ -715,12 +734,12 @@ func (t *TCPAdapter) SendMessage(msg []byte) error {
 	t.mu.Unlock()
 
 	if conn == nil {
-		return fmt.Errorf("TCP connection changed during reload; retry message")
+		return fmt.Errorf("TCP connection changed during send; retry message")
 	}
 	_, err := conn.Write(msg)
 	if err != nil {
 		// Connection error - try to reconnect and resend
-		if reconnectErr := t.reconnect(); reconnectErr != nil {
+		if reconnectErr := t.reconnect(conn); reconnectErr != nil {
 			return fmt.Errorf("failed to send message over TCP: %w", err)
 		}
 
@@ -729,7 +748,7 @@ func (t *TCPAdapter) SendMessage(msg []byte) error {
 		conn := t.conn
 		t.mu.Unlock()
 		if conn == nil {
-			return fmt.Errorf("TCP connection changed during reload; retry message")
+			return fmt.Errorf("TCP connection changed during send; retry message")
 		}
 		_, retryErr := conn.Write(msg)
 		if retryErr != nil {
@@ -756,13 +775,17 @@ func (t *TCPAdapter) Close() error {
 		t.pinManager.StopAging()
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.closed = true
-	if t.conn != nil {
-		t.forget(t.conn)
-		err := t.conn.Close()
-		t.conn = nil
-		return err
+	conn := t.conn
+	t.conn = nil
+	if conn != nil {
+		t.forget(conn)
 	}
-	return nil
+	t.mu.Unlock()
+	var err error
+	if conn != nil {
+		err = conn.Close()
+	}
+	t.monitorWG.Wait()
+	return err
 }

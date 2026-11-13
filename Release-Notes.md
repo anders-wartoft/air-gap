@@ -2,6 +2,27 @@
 
 ## 0.1.20-SNAPSHOT
 
+### TCP and TLS throughput
+
+- Removed a blocking 1 ms connection-health read before every TCP frame.
+  Healthy one-way connections never reply, so this imposed a timeout per
+  frame on both plain TCP and TLS. A background reader per connection now
+  detects idle peer closure and TLS alerts without waiting for another
+  message to be sent. Write failures still trigger the existing reconnect/resend
+  path and configured retry cooldown. Stale disconnects or write failures
+  cannot invalidate a replacement connection, and shutdown waits for the
+  connection monitors to exit.
+- TC-51 checks delivered throughput, order and payloads over real loopback
+  TCP, TLS 1.2 and TLS 1.3 connections. This isolates the transport hot path;
+  it does not replace TC-16's Kafka/deduplication performance measurements.
+  Go regression tests also cover idle peer closure and reconnection for all
+  three transports. Successful writes remain local socket acceptance, not
+  downstream delivery acknowledgments; gap recovery is still required.
+- TC-30's artificial memory pressure now exceeds its configured high
+  watermark independently of TCP throughput. The helper retains its
+  allocation for the full pressure interval; production memory limits and
+  watermarks are unchanged.
+
 ### Delayed Kafka consumption
 
 - A delayed record's wait now ends when its consumer-group session is

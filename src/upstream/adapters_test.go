@@ -1,11 +1,94 @@
 package upstream
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"math"
+	"net"
 	"strconv"
 	"testing"
 	"time"
 )
+
+type writeOnlyTestConn struct {
+	net.Conn
+	written  bytes.Buffer
+	reads    int
+	writeErr error
+}
+
+func (c *writeOnlyTestConn) Read([]byte) (int, error) {
+	c.reads++
+	return 0, errors.New("unexpected read on one-way data connection")
+}
+
+func (c *writeOnlyTestConn) Write(data []byte) (int, error) {
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+	return c.written.Write(data)
+}
+
+func (c *writeOnlyTestConn) SetReadDeadline(time.Time) error { return nil }
+func (c *writeOnlyTestConn) Close() error                    { return nil }
+
+func TestTCPSendDoesNotProbeHealthyConnection(t *testing.T) {
+	conn := &writeOnlyTestConn{}
+	adapter := &TCPAdapter{conn: conn, addr: "127.0.0.1:0"}
+	defer adapter.Close()
+	messages := [][]byte{[]byte("first"), []byte("second")}
+	err := adapter.SendMessages(messages)
+	if conn.reads != 0 {
+		t.Fatalf("healthy send performed %d reads", conn.reads)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := conn.written.String(); got != "firstsecond" {
+		t.Fatalf("written data = %q", got)
+	}
+}
+
+func TestTCPWriteFailureReconnectsAndResends(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	received := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			received <- err
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		data := make([]byte, len("resend"))
+		_, err = io.ReadFull(conn, data)
+		if err == nil && string(data) != "resend" {
+			err = errors.New("unexpected resent payload")
+		}
+		received <- err
+	}()
+	adapter := &TCPAdapter{
+		conn: &writeOnlyTestConn{writeErr: net.ErrClosed},
+		addr: listener.Addr().String(),
+	}
+	defer adapter.Close()
+	if err := adapter.SendMessage([]byte("resend")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-received:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("message was not resent after the write failure")
+	}
+}
 
 func TestKafkaConsumerSettingsAcceptInt32Limits(t *testing.T) {
 	config := DefaultConfiguration()

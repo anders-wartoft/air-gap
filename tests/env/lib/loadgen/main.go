@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -268,6 +269,7 @@ func pressure(args []string) {
 	}
 	fmt.Printf("pressure-ready bytes=%d\n", len(allocation))
 	time.Sleep(*duration)
+	runtime.KeepAlive(allocation)
 	fmt.Printf("pressure-released bytes=%d\n", len(allocation))
 }
 
