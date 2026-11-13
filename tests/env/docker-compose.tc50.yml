@@ -1,0 +1,26 @@
+services:
+  kafka-upstream:
+    networks:
+      airgap:
+        aliases:
+          - kafka
+
+  downstream:
+    environment:
+      AIRGAP_LOG_REPEAT_INTERVAL: "0"
+
+  create:
+    volumes:
+      - ${TC_WORK:?TC_WORK is required}:/airgap/work:z
+
+  resend:
+    volumes:
+      - ${TC_WORK:?TC_WORK is required}:/airgap/work:z
+
+  tc50-producer:
+    image: localhost/${COMPOSE_PROJECT_NAME:-airgap-testenv}-upstream:local
+    networks:
+      - airgap
+    volumes:
+      - ${TC_WORK:?TC_WORK is required}:/airgap/work:ro,z
+    entrypoint: ["/airgap/work/airgap-load"]

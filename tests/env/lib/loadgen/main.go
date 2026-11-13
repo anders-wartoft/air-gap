@@ -51,6 +51,9 @@ func backlog(args []string) {
 	count := flags.Int("count", 1000020, "records to seed before upstream starts")
 	size := flags.Int("size", 1024, "payload bytes per record")
 	partitions := flags.Int("partitions", 30, "partitions to fill round-robin")
+	topic := flags.String("topic", "transfer", "Kafka topic")
+	timestampOffset := flags.Duration("timestamp-offset", -10*time.Minute, "offset from the current time for record timestamps")
+	printable := flags.Bool("printable", false, "fill payload with printable characters")
 	_ = flags.Parse(args)
 	if *count <= 0 || *size < 32 || *partitions <= 0 {
 		fatalf("count and partitions must be positive, size must be at least 32")
@@ -69,10 +72,15 @@ func backlog(args []string) {
 	go func() {
 		for i := 0; i < *count; i++ {
 			payload := make([]byte, *size)
+			if *printable {
+				for j := range payload {
+					payload[j] = 'x'
+				}
+			}
 			copy(payload, fmt.Sprintf("AIRGAP_%09d_", i))
 			producer.Input() <- &sarama.ProducerMessage{
-				Topic: "transfer", Partition: int32(i % *partitions),
-				Value: sarama.ByteEncoder(payload), Timestamp: time.Now().Add(-10 * time.Minute),
+				Topic: *topic, Partition: int32(i % *partitions),
+				Value: sarama.ByteEncoder(payload), Timestamp: time.Now().Add(*timestampOffset),
 			}
 		}
 		producer.AsyncClose()
@@ -98,7 +106,7 @@ func backlog(args []string) {
 	if acked != *count {
 		fatalf("acknowledged=%d, want %d", acked, *count)
 	}
-	fmt.Printf("backlog-ready records=%d partitions=%d bytes=%d\n", acked, *partitions, acked * *size)
+	fmt.Printf("backlog-ready records=%d partitions=%d bytes=%d\n", acked, *partitions, acked**size)
 }
 
 func produce(args []string) {

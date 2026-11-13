@@ -42,6 +42,7 @@ var (
 
 // Logging
 var Logger = logging.Logger
+var saramaLoggerOnce sync.Once
 
 type TLSConfiguration struct {
 	CertFile        string
@@ -50,10 +51,11 @@ type TLSConfiguration struct {
 	KeyPasswordFile string
 }
 
-// ConfigureSaramaLogger sets up the Sarama library logger with a [SARAMA] prefix
-// This should be called once at the start of any function that uses Sarama
+// ConfigureSaramaLogger sets up the Sarama library logger with a [SARAMA] prefix.
 func ConfigureSaramaLogger() {
-	sarama.Logger = log.New(&saramaLogWriter{}, "[SARAMA] ", log.LstdFlags)
+	saramaLoggerOnce.Do(func() {
+		sarama.Logger = log.New(&saramaLogWriter{}, "[SARAMA] ", log.LstdFlags)
+	})
 }
 
 // saramaLogWriter preserves the historical direct writer in text mode. In OTel
@@ -651,6 +653,7 @@ func ReadFromKafkaWithContextSettings(ctx context.Context, name string, offsetSe
 		callback:      callbackFunction,
 		beforeMessage: settings.BeforeMessage,
 		onHealthy:     func() { reportError("running") },
+		onFailure:     reportError,
 	}
 
 	// Retry transient failures (for example local Kafka still starting at
@@ -693,6 +696,43 @@ func ReadFromKafkaWithContextSettings(ctx context.Context, name string, offsetSe
 			logging.ErrorType(err),
 			logging.Bool("airgap.retry.permanent", true),
 		), "Error creating consumer group client (not retryable): %v", err)
+	}
+	consumer.group = client
+	consumer.maxProcessingTime = config.Consumer.MaxProcessingTime
+	if offsetSeconds < 0 {
+		fetcher, fetchErr := startWithRetry(ctx, retryInterval, func() (sarama.Consumer, error) {
+			return sarama.NewConsumer(brokerList, config)
+		}, func(attempt int64, err error) {
+			Logger.WarnT(logging.Event(logging.EventKafkaConnect,
+				logging.Failure(),
+				logging.Str("server.address", brokers),
+				logging.Str("airgap.kafka.consumer.name", name),
+				logging.ErrMessage(err),
+			), "Delayed Kafka fetcher unavailable: {error.message}. Retrying...",
+				logging.Int("airgap.retry.count", attempt))
+			reportError(fmt.Sprintf("Delayed Kafka fetcher unavailable: %v", err))
+		})
+		if fetchErr != nil {
+			if closeErr := client.Close(); closeErr != nil {
+				Logger.Errorf(logging.Event(logging.EventAppShutdown).Merge(logging.Err(closeErr)),
+					"Error closing consumer group: %v", closeErr)
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			Logger.Panicf(logging.Event(logging.EventKafkaConnect,
+				logging.Failure(),
+				logging.Str("airgap.kafka.consumer.name", name),
+				logging.ErrorType(fetchErr),
+			), "Error creating delayed Kafka fetcher (not retryable): %v", fetchErr)
+		}
+		consumer.delayFetcher = fetcher
+		defer func() {
+			if closeErr := fetcher.Close(); closeErr != nil {
+				Logger.Errorf(logging.Event(logging.EventAppShutdown).Merge(logging.Err(closeErr)),
+					"Error closing delayed Kafka fetcher: %v", closeErr)
+			}
+		}()
 	}
 	reportError("running")
 
@@ -829,13 +869,17 @@ func toggleConsumptionFlow(_ sarama.ConsumerGroup, isPaused *bool, _ *Consumer) 
 
 // Consumer represents a Sarama consumer group consumer
 type Consumer struct {
-	name          string
-	ready         chan bool
-	from          time.Time
-	delay         time.Duration
-	callback      func(string, []byte, time.Time, []byte) bool
-	beforeMessage func(context.Context) error
-	onHealthy     func()
+	name              string
+	ready             chan bool
+	from              time.Time
+	delay             time.Duration
+	callback          func(string, []byte, time.Time, []byte) bool
+	beforeMessage     func(context.Context) error
+	onHealthy         func()
+	onFailure         func(string)
+	group             sarama.ConsumerGroup
+	delayFetcher      sarama.Consumer
+	maxProcessingTime time.Duration
 }
 
 // Setup is run at the beginning of a new session, before ConsumeClaim
@@ -854,9 +898,35 @@ func (consumer *Consumer) Cleanup(sarama.ConsumerGroupSession) error {
 	return nil
 }
 
+func (consumer *Consumer) delayedFetchError(err error) error {
+	Logger.Errorf(logging.Event(logging.EventKafkaConsume,
+		logging.Failure(),
+		logging.Str("airgap.kafka.consumer.name", consumer.name),
+	).Merge(logging.Err(err)), "Delayed Kafka fetch failed: %v", err)
+	if consumer.onFailure != nil {
+		consumer.onFailure(fmt.Sprintf("Delayed Kafka fetch failed: %v", err))
+	}
+	return err
+}
+
 func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	delimiter := "_"
 	keepRunning := true
+	messages := claim.Messages()
+	var delayedPartition sarama.PartitionConsumer
+	var stopDrain, drained chan struct{}
+	defer func() {
+		if delayedPartition != nil {
+			if err := delayedPartition.Close(); err != nil {
+				Logger.Errorf(logging.Event(logging.EventKafkaConsume).Merge(logging.Err(err)),
+					"Error closing delayed partition consumer: %v", err)
+			}
+		}
+		if stopDrain != nil {
+			close(stopDrain)
+			<-drained
+		}
+	}()
 	for keepRunning {
 		if consumer.beforeMessage != nil {
 			if err := consumer.beforeMessage(session.Context()); err != nil {
@@ -867,8 +937,13 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 			}
 		}
 		select {
-		case message, ok := <-claim.Messages():
+		case message, ok := <-messages:
 			if !ok {
+				if stopDrain != nil && session.Context().Err() == nil {
+					return consumer.delayedFetchError(fmt.Errorf(
+						"delayed Kafka partition consumer closed unexpectedly: %s/%d",
+						claim.Topic(), claim.Partition()))
+				}
 				Logger.Info(logging.Event(logging.EventKafkaConsume,
 					logging.Str("airgap.kafka.consumer.name", consumer.name),
 					logging.Str("messaging.destination.name", claim.Topic()),
@@ -892,7 +967,47 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 				)
 				Logger.Debug(delayAttrs, "Consumer.delay: "+consumer.delay.String())
 				Logger.Debug(delayAttrs, "Delaying message delivery on thread: "+consumer.name+" for "+sleepTime.String())
-				time.Sleep(sleepTime)
+				if consumer.delayFetcher != nil && sleepTime >= consumer.maxProcessingTime/2 {
+					if stopDrain == nil {
+						// Pause prevents new fetches, not records already in flight.
+						// Drain those records and reread them from Kafka after the wait.
+						consumer.group.Pause(map[string][]int32{claim.Topic(): {claim.Partition()}})
+						stopDrain, drained = make(chan struct{}), make(chan struct{})
+						go func() {
+							defer close(drained)
+							for {
+								select {
+								case _, ok := <-claim.Messages():
+									if !ok {
+										return
+									}
+								case <-stopDrain:
+									return
+								}
+							}
+						}()
+					}
+					if delayedPartition != nil {
+						if err := delayedPartition.Close(); err != nil {
+							return consumer.delayedFetchError(fmt.Errorf("close delayed Kafka partition: %w", err))
+						}
+						delayedPartition = nil
+					}
+					sleepTime = time.Until(message.Timestamp.Add(-consumer.delay))
+				}
+				for sleepTime > 0 {
+					timer := time.NewTimer(sleepTime)
+					select {
+					case <-timer.C:
+					case <-session.Context().Done():
+						timer.Stop()
+						return nil
+					}
+					if session.Context().Err() != nil {
+						return nil
+					}
+					sleepTime = time.Until(message.Timestamp.Add(-consumer.delay))
+				}
 			}
 			// Debug output the first 80 characters of the message. If the message is truncated, show ...
 			maxLen := 80
@@ -922,6 +1037,19 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 			// If callback returns false, the message will be reprocessed on next poll
 			if keepRunning {
 				session.MarkMessage(message, "")
+				if stopDrain != nil && delayedPartition == nil {
+					if session.Context().Err() != nil {
+						return nil
+					}
+					var err error
+					delayedPartition, err = consumer.delayFetcher.ConsumePartition(
+						claim.Topic(), claim.Partition(), message.Offset+1)
+					if err != nil {
+						return consumer.delayedFetchError(fmt.Errorf(
+							"resume delayed Kafka partition at offset %d: %w", message.Offset+1, err))
+					}
+					messages = delayedPartition.Messages()
+				}
 			} else {
 				Logger.Debugf(logging.Event(logging.EventKafkaCommit,
 					logging.Failure(),

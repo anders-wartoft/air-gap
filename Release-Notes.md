@@ -2,6 +2,24 @@
 
 ## 0.1.20-SNAPSHOT
 
+### Delayed Kafka consumption
+
+- A delayed record's wait now ends when its consumer-group session is
+  canceled, without delivering or marking that record. This allows shutdown
+  and rebalances to proceed instead of waiting for the configured delay.
+- Long waits pause the group partition and reread prefetched records from
+  Kafka after delivery becomes eligible, avoiding delay-induced subscription
+  churn without buffering the delayed backlog. Delayed groups use an
+  additional Kafka client and may reread records. Kafka retention must cover
+  the delay and recovery window.
+- TC-49 covers three-minute and 24-hour delays, ordering, offsets,
+  cancellation, rebalancing and a 30,000-record burst. It also runs three
+  sending threads through upstream, UDP and downstream Kafka, retaining
+  service logs in a unique directory under `--log-dir` (or `tests/env/tmp`).
+  It is not a production-scale throughput benchmark or 24-hour soak.
+- Sarama logging is initialized once to avoid races between Kafka clients
+  starting or stopping concurrently.
+
 ### TCP retry visibility and recovery coverage
 
 - Upstream reports a TCP transport error on the first failed send, including
@@ -11,6 +29,8 @@
   replays two source records after the receiver restarts. A successful TCP
   write is not a downstream Kafka acknowledgment; missing records still
   require gap detection and the create/resend workflow.
+- TC-50 verifies that records lost during an actual downstream Kafka outage
+  are detected and recovered through deduplication, create and resend.
 
 ### Deterministic TC-16 dedup artifact
 

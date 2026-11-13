@@ -1,0 +1,23 @@
+services:
+  topic-init:
+    command:
+      - bash
+      - -ec
+      - >-
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic source --partitions 3 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic transfer --partitions 3 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic airgap-internal --partitions 1
+
+  upstream:
+    volumes:
+      - ${TC49_LOG_DIR:?TC49_LOG_DIR is required}:/airgap/logs:z
+    environment:
+      AIRGAP_CONFIG: /airgap/config/upstream-airgap-49-docker.properties
+      AIRGAP_LOG_REPEAT_INTERVAL: "0"
+
+  downstream:
+    volumes:
+      - ${TC49_LOG_DIR:?TC49_LOG_DIR is required}:/airgap/logs:z
+    environment:
+      AIRGAP_CONFIG: /airgap/config/downstream-airgap-49-docker.properties
+      AIRGAP_LOG_REPEAT_INTERVAL: "0"

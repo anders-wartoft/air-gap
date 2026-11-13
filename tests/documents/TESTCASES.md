@@ -6551,3 +6551,60 @@ blocked transport. Downstream STATUS is best effort, not guaranteed delivery.
 Failure preserves the printed work directory and diagnostics; success removes
 only the isolated project's containers, volumes and temporary directory.
 `-pause` is unsupported.
+
+## TC-49 — Delayed Kafka subscription stability
+
+* Runner: `./run-testcase.sh 49`
+
+An end-to-end phase runs upstream and downstream services over UDP with
+three Kafka consumer groups configured for immediate, three-minute and
+24-hour delivery. It sends 36 records to each of three source partitions
+with timestamps chosen to trigger roughly one-minute waits. It verifies
+the downstream Kafka records and committed offsets, checks for abandoned
+subscriptions, and checks both services remain running and shut down cleanly.
+
+The runner prints the paths of its upstream and downstream logs at startup.
+With `./run-testcases.sh --log-dir tmp/logs 49`, the logs are retained in a
+new `tmp/logs/tc49.XXXXXX/` directory on success or failure; without
+`--log-dir`, they are under `tests/env/tmp/tc49.XXXXXX/`. The directory also
+contains service console logs and, on failure, Kafka startup and broker logs.
+The upstream log can be followed while the test runs.
+
+The separate Kafka regression phase sends 12 records to each
+of three partitions with a 200 ms processing timeout and a one-record channel.
+In separate phases, the first record in each partition becomes eligible
+after ten seconds for the three-minute or the 24-hour group. Subsequent
+records include older, out-of-order timestamps. The test requires no
+subscription abandonment and checks delivery timing, per-partition ordering,
+independent partition progress, repeated waits, duplicates, committed offsets,
+cancellation while records are ineligible, and a real consumer-group
+rebalance. It also checks the production reader and a 30,000-record,
+30-partition burst.
+
+The short processing timeout made the original issue reproducible quickly.
+This is not a 24-hour soak or a production throughput benchmark. Requires Go
+and Docker Compose. The isolated project uses the Docker engine's native
+architecture; `-pause` is unsupported.
+
+## TC-50 — Create/resend after downstream Kafka outage
+
+* Runner: `./run-testcase.sh 50`
+
+An isolated upstream-to-downstream UDP pipeline uses separate two-broker
+Kafka clusters and the deduplicator. After four baseline records, the test
+stops both downstream Kafka brokers while leaving upstream Kafka running.
+It sends five more records and verifies that downstream reports all five
+Kafka write failures. After restarting downstream Kafka, four later records
+make the missing offsets detectable.
+
+The test checks that `create` exports exactly the five outage offsets and
+that `resend` restores all 13 original records to the clean topic exactly
+once with their original payloads. A second `create` export must contain no
+remaining gaps. Both upstream Kafka brokers and all three applications must
+remain running without restarting.
+
+The test needs Go, Python 3, Docker Compose and a built deduplication fat
+JAR under `java-streams/target`. It uses one source partition and checks a
+detectable interior gap, not missing tail records or production throughput.
+Failure artifacts are retained in the printed `tests/env/tmp/tc50.XXXXXX`
+directory; `-pause` is unsupported.

@@ -295,9 +295,24 @@ backpressure, or UDP writes keep the callback busy longer than that, Sarama may
 log `abandoned subscription ... because consuming was taking too long`. This
 is local consumer backpressure, not proof that the Kafka connection was lost.
 `kafkaMaxProcessingTimeMs` configures that deadline and defaults to 30000 ms.
-Set it above the longest expected processing time for one record. A larger
-value prevents false subscription churn but does not increase throughput;
-persistent overload remains visible as consumer lag.
+For ordinary processing, set it above the longest expected processing time
+for one record. A larger value does not increase throughput; persistent
+overload remains visible as consumer lag.
+
+Delayed sending threads wait until each record's Kafka timestamp plus the
+configured delay. For a long wait, upstream pauses that group partition,
+drains already-fetched records without marking them, and rereads them from
+Kafka after the waiting record is delivered. Each delayed sending thread
+uses an additional Kafka client, and rereads add broker traffic. This avoids
+holding a day's backlog in memory or blocking other partitions during the
+delay; it does not prevent churn caused by other processing backpressure.
+
+Keep Kafka retention longer than the sending delay plus expected outage and
+lag, and monitor consumer lag and subscription churn. Do not set the
+processing timeout to the full delay (for example 24 hours): a blocked
+partition can delay other partitions on the same broker. TC-49 exercises
+short waits, rebalancing and a 30-partition burst; it is not a production
+throughput benchmark or a 24-hour soak test.
 
 `kafkaMaxMessageBytes` must be at least as large as the largest permitted
 Kafka record and no larger than the memory envelope can safely transform.
@@ -307,9 +322,9 @@ must include approximately:
 
 ```text
 fixed working set
-+ sending threads × kafkaChannelBufferSize × kafkaMaxMessageBytes
-+ one record's compression/encryption/fragmentation copies per active thread
-+ Kafka, TLS, socket, stack, and garbage-collector headroom
++ sending threads × assigned partitions × partition buffers and fetch batches
++ waiting records and compression/encryption/fragmentation copies per active partition
++ additional delayed-fetch clients, Kafka, TLS, sockets, stacks, and GC headroom
 ```
 
 Keep the systemd `MemoryHigh`/`MemoryMax` limits as the final operating-system

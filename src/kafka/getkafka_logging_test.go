@@ -2,14 +2,36 @@ package kafka
 
 import (
 	"bytes"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/IBM/sarama"
 	"sitia.nu/airgap/src/logging"
 )
+
+func TestConfigureSaramaLoggerConcurrent(t *testing.T) {
+	ConfigureSaramaLogger()
+	output := logging.StdLogger.Writer()
+	logging.StdLogger.SetOutput(io.Discard)
+	defer logging.StdLogger.SetOutput(output)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				ConfigureSaramaLogger()
+				sarama.Logger.Print("test")
+			}
+		}()
+	}
+	wg.Wait()
+}
 
 func TestKeyPasswordFileReadErrorIsStatic(t *testing.T) {
 	err := keyPasswordFileReadError(os.ErrNotExist)

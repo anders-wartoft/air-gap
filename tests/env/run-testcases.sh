@@ -55,6 +55,8 @@
 # as they happen; follow it with tail -f DIR/overview.log.
 # Existing per-case logs and overview.log are overwritten. Redirection
 # saves combined output, including the final summary; tee also displays it.
+# TC-49 also retains upstream/downstream logs in a new DIR/tc49.XXXXXX/
+# directory, whose path is printed when the testcase starts.
 # In Bash, set -o pipefail preserves the runner's failure status with tee.
 #
 # After every testcase this script runs the compose teardown for all known
@@ -254,6 +256,7 @@ if [[ -n "$RETAIN_LOGDIR" ]]; then
         exit 2
     fi
     CASE_LOGDIR="$RETAIN_LOGDIR"
+    export AIRGAP_TEST_LOG_DIR="$RETAIN_LOGDIR"
     OVERVIEW_LOG="$CASE_LOGDIR/overview.log"
     if ! printf '%s\n' "--- batch started: ${IDS[*]} ---" > "$OVERVIEW_LOG"; then
         echo "run-testcases: cannot initialize overview log: $OVERVIEW_LOG" >&2
