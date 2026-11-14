@@ -19,6 +19,7 @@ for protocol in "${protocols[@]}"; do
     case "$protocol" in udp|tcp|tls) ;; *) echo "TC-52: unknown protocol $protocol" >&2; exit 2 ;; esac
 done
 command -v openssl >/dev/null || { echo "TC-52 requires openssl" >&2; exit 2; }
+command -v python3 >/dev/null || { echo "TC-52 requires python3 for the results table" >&2; exit 2; }
 airgap_init_test 52
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/airgap-tc52.XXXXXX")"
 chmod 0755 "$WORK"
@@ -44,6 +45,41 @@ collect_logs() {
         compose logs --no-color --no-log-prefix "$service" >"$TC52_RESULTS/$service.log" 2>&1
     done
 }
+print_results() {
+    python3 - "$RESULTS" "${protocols[@]}" <<'PY'
+import json
+import math
+from pathlib import Path
+import sys
+
+print("| Transport | Current delivered EPS |")
+print("|---|---:|")
+failed = False
+notes = []
+for protocol in sys.argv[2:]:
+    path = Path(sys.argv[1]) / protocol / "summary.json"
+    try:
+        with path.open() as source:
+            summary = json.load(source)
+        eps = summary["delivered_eps"]
+        if type(eps) not in (int, float) or not math.isfinite(eps) or eps < 0:
+            raise ValueError("delivered_eps must be a finite nonnegative number")
+        if summary.get("errors"):
+            failed = True
+            notes.append(
+                f"{protocol.upper()}: FAILED after {summary['measurement_seconds']:.2f} "
+                f"measured seconds: {summary['errors']}"
+            )
+        print(f"| {protocol.upper()} | {eps:,.0f} |")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"| {protocol.upper()} | N/A |")
+        print(f"TC-52 cannot read results from {path}: {error}", file=sys.stderr)
+        failed = True
+for note in notes:
+    print(note)
+sys.exit(1 if failed else 0)
+PY
+}
 cleanup() {
     local rc=$?
     trap - EXIT
@@ -56,6 +92,7 @@ cleanup() {
         "$WORK/server.key" "$WORK/server.crt" "$WORK/upstream.properties" "$WORK/downstream.properties"
     rmdir "$WORK/bin" "$WORK" || rc=1
     echo "TC-52 results retained at $RESULTS"
+    print_results || rc=1
     report_summary "TC-52 end-to-end Kafka transport stress" "$rc" || true
     exit "$rc"
 }

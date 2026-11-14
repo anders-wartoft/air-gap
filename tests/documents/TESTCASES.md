@@ -6640,7 +6640,7 @@ CPU capacity, without race instrumentation, to avoid load-induced failures.
 ## TC-52 — Sustained Kafka → upstream → downstream → Kafka throughput
 
 * Runner: `./run-testcases.sh --log-dir tmp/logs 52`
-* Requires Go, Docker and OpenSSL.
+* Requires Go, Docker, OpenSSL and Python 3.
 
 An isolated source Kafka broker and a separate target Kafka broker each use
 ten partitions. One upstream process runs one configured sending thread.
@@ -6671,6 +6671,11 @@ delivered rates and Kafka lag, source/target counts, mean generation-to-Kafka
 latency, Docker CPU/memory/I/O samples and all service logs in the printed
 `tc52.XXXXXX/` result directory. These are local-container measurements with
 single-broker replication, not production capacity certification.
+After the retained-results path and before the final verdict, the runner
+prints a Markdown table of delivered EPS for the selected transports, rounded
+to whole events/second with thousands separators. Values come from this run's
+`summary.json` files. Failed measurements include their actual duration and
+error; missing or invalid summaries display `N/A` and fail the case.
 
 Settings:
 

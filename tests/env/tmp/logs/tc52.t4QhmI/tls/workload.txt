@@ -1,0 +1,1 @@
+protocol=tls partitions=10 sendingThreads=1 payload=400-1600 duration=300s warmup=20s window=10000 batchSize=512
