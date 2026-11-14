@@ -23,7 +23,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: airgap-load produce|backlog|sink|stall|pressure|seed-retention|verify-retention|verify-status [options]")
+		fatalf("usage: airgap-load produce|backlog|sink|stall|pressure|stress|seed-retention|verify-retention|verify-status [options]")
 	}
 	switch os.Args[1] {
 	case "produce":
@@ -36,6 +36,8 @@ func main() {
 		stall(os.Args[2:])
 	case "pressure":
 		pressure(os.Args[2:])
+	case "stress":
+		stress(os.Args[2:])
 	case "seed-retention":
 		seedRetention(os.Args[2:])
 	case "verify-retention":

@@ -913,6 +913,9 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 	delimiter := "_"
 	keepRunning := true
 	messages := claim.Messages()
+	// Check admission while idle without sleeping through newly available records.
+	idleCheck := time.NewTicker(10 * time.Millisecond)
+	defer idleCheck.Stop()
 	var delayedPartition sarama.PartitionConsumer
 	var stopDrain, drained chan struct{}
 	defer func() {
@@ -1009,24 +1012,25 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 					sleepTime = time.Until(message.Timestamp.Add(-consumer.delay))
 				}
 			}
-			// Debug output the first 80 characters of the message. If the message is truncated, show ...
-			maxLen := 80
-			var payload string
-			if len(message.Value) < maxLen {
-				payload = string(message.Value)
-			} else {
-				payload = string(message.Value[0:maxLen]) + "..."
+			if Logger.CanLog(logging.DEBUG) {
+				maxLen := 80
+				var payload string
+				if len(message.Value) < maxLen {
+					payload = string(message.Value)
+				} else {
+					payload = string(message.Value[0:maxLen]) + "..."
+				}
+				Logger.Debugf(logging.Event(logging.EventKafkaConsume,
+					logging.Str("airgap.kafka.consumer.name", consumer.name),
+					logging.Str("messaging.destination.name", message.Topic),
+					logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
+					logging.Int("messaging.kafka.offset", message.Offset),
+					logging.Str("messaging.kafka.message.key", string(message.Key)),
+					logging.Int("airgap.message.size", int64(len(message.Value))),
+				), "Message on thread %s: topic=%s partition=%d offset=%d timestamp=%s key=%s value=%s",
+					consumer.name, message.Topic, message.Partition, message.Offset, message.Timestamp.String(),
+					string(message.Key), payload)
 			}
-			Logger.Debugf(logging.Event(logging.EventKafkaConsume,
-				logging.Str("airgap.kafka.consumer.name", consumer.name),
-				logging.Str("messaging.destination.name", message.Topic),
-				logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
-				logging.Int("messaging.kafka.offset", message.Offset),
-				logging.Str("messaging.kafka.message.key", string(message.Key)),
-				logging.Int("airgap.message.size", int64(len(message.Value))),
-			), "Message on thread %s: topic=%s partition=%d offset=%d timestamp=%s key=%s value=%s",
-				consumer.name, message.Topic, message.Partition, message.Offset, message.Timestamp.String(),
-				string(message.Key), payload)
 
 			id := message.Topic + delimiter +
 				fmt.Sprint(message.Partition) + delimiter +
@@ -1062,9 +1066,7 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 			}
 		case <-session.Context().Done():
 			return nil
-		default:
-			// Sleep briefly to avoid busy loop
-			time.Sleep(10 * time.Millisecond)
+		case <-idleCheck.C:
 		}
 	}
 	// shutting down

@@ -1,12 +1,63 @@
 package test
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"reflect"
 	"testing"
 
 	"sitia.nu/airgap/src/protocol"
 )
+
+func TestFragmentBoundaryRoundTrip(t *testing.T) {
+	const mtu = 1400
+	const id = "stress_0_12"
+	const capacity = mtu - 13 - len(id)
+	cache := protocol.CreateMessageCache()
+	for _, size := range []int{0, capacity - 1, capacity, capacity + 1, 2 * capacity} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			payload := bytes.Repeat([]byte("x"), size)
+			packets := protocol.FormatMessage(protocol.TYPE_CLEARTEXT, id, payload, mtu)
+			expected := 1
+			if size > 0 {
+				expected = (size + capacity - 1) / capacity
+			}
+			if count := protocol.NrMessages(mtu, id, payload); int(count) != expected {
+				t.Fatalf("advertised %d fragments; expected %d", count, expected)
+			}
+			for index, packet := range packets {
+				if len(packet) > mtu || int(binary.BigEndian.Uint16(packet[3:5])) != len(packets) {
+					t.Fatalf("fragment %d: size=%d, advertised=%d, emitted=%d",
+						index, len(packet), binary.BigEndian.Uint16(packet[3:5]), len(packets))
+				}
+				kind, gotID, got, err := protocol.ParseMessage(packet, cache)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if index == len(packets)-1 {
+					if kind != protocol.TYPE_CLEARTEXT || gotID != id || !bytes.Equal(got, payload) {
+						t.Fatal("last emitted fragment did not deliver the complete original record")
+					}
+				} else if kind != protocol.TYPE_MULTIPART {
+					t.Fatal("record completed before its last fragment")
+				}
+			}
+			if cache.GetCacheSize() != 0 {
+				t.Fatal("completed record retained in fragment cache")
+			}
+		})
+	}
+}
+
+func TestFormatPreservesWireChecksum(t *testing.T) {
+	for _, fixture := range []struct{ payload, checksum string }{{"", "427e"}, {"abc", "7f72"}} {
+		packet := protocol.FormatMessage(protocol.TYPE_CLEARTEXT, "id", []byte(fixture.payload), 100)[0]
+		if got := string(packet[9:13]); got != fixture.checksum {
+			t.Fatalf("wire checksum for %q changed: %q", fixture.payload, got)
+		}
+	}
+}
 
 func TestFormatMessage(t *testing.T) {
 	tests := []struct {

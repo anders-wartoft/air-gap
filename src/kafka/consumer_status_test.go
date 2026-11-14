@@ -15,6 +15,34 @@ type statusTestClaim struct {
 	messages chan *sarama.ConsumerMessage
 }
 
+func TestConsumeClaimDoesNotSleepWhenSmallBufferRunsDry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	messages := make(chan *sarama.ConsumerMessage)
+	session := canceledDelaySession{ctx: ctx, marked: make(chan struct{}, 1024)}
+	delivered := 0
+	consumer := Consumer{callback: func(string, []byte, time.Time, []byte) bool {
+		delivered++
+		return true
+	}}
+	go func() {
+		defer close(messages)
+		for offset := int64(0); offset < 1024; offset++ {
+			select {
+			case messages <- &sarama.ConsumerMessage{Topic: "topic", Offset: offset}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	if err := consumer.ConsumeClaim(session, delayedTestClaim{messages: messages}); err != nil {
+		t.Fatal(err)
+	}
+	if delivered != 1024 {
+		t.Fatalf("small-buffer handoffs slept instead of waiting on the channel: delivered=%d", delivered)
+	}
+}
+
 func (c statusTestClaim) Messages() <-chan *sarama.ConsumerMessage { return c.messages }
 
 type statusTestSession struct{ sarama.ConsumerGroupSession }

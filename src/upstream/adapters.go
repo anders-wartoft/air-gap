@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -162,6 +163,11 @@ type TCPAdapter struct {
 	lastDial      time.Time
 	retryInterval time.Duration
 	monitorWG     sync.WaitGroup
+	sendMu        sync.Mutex
+	sendCond      *sync.Cond
+	pendingSends  []*tcpSendRequest
+	sending       bool
+	sendBuffer    []byte
 	// TLS cert hot-reload: original params stored so ReloadTLSConfig can rebuild on SIGHUP
 	tlsCAFile          string
 	tlsCertFile        string
@@ -723,7 +729,7 @@ func (t *TCPAdapter) reconnect(failedConn net.Conn) error {
 }
 
 // SendMessage sends a single message over TCP, reconnecting if necessary
-func (t *TCPAdapter) SendMessage(msg []byte) error {
+func (t *TCPAdapter) sendMessage(msg []byte) error {
 	// Ensure we have a connection, attempting to connect if needed
 	if !t.ensureConnected() {
 		return fmt.Errorf("TCP connection unavailable to %s", t.addr)
@@ -736,7 +742,10 @@ func (t *TCPAdapter) SendMessage(msg []byte) error {
 	if conn == nil {
 		return fmt.Errorf("TCP connection changed during send; retry message")
 	}
-	_, err := conn.Write(msg)
+	n, err := conn.Write(msg)
+	if err == nil && n != len(msg) {
+		err = io.ErrShortWrite
+	}
 	if err != nil {
 		// Connection error - try to reconnect and resend
 		if reconnectErr := t.reconnect(conn); reconnectErr != nil {
@@ -750,7 +759,10 @@ func (t *TCPAdapter) SendMessage(msg []byte) error {
 		if conn == nil {
 			return fmt.Errorf("TCP connection changed during send; retry message")
 		}
-		_, retryErr := conn.Write(msg)
+		n, retryErr := conn.Write(msg)
+		if retryErr == nil && n != len(msg) {
+			retryErr = io.ErrShortWrite
+		}
 		if retryErr != nil {
 			return fmt.Errorf("failed to send message over TCP after reconnect: %w", retryErr)
 		}
@@ -759,14 +771,137 @@ func (t *TCPAdapter) SendMessage(msg []byte) error {
 	return nil
 }
 
-// SendMessages sends multiple messages over TCP
+type tcpSendRequest struct {
+	frames [][]byte
+	err    error
+	done   bool
+	leader bool
+}
+
+const tcpSendBatchBytes = 64 * 1024
+const tcpPendingSends = 64
+
+func (t *TCPAdapter) SendMessage(msg []byte) error {
+	return t.SendMessages([][]byte{msg})
+}
+
+// Concurrent partition claims coalesce synchronous writes; completion still
+// means socket acceptance, never merely enqueueing a message.
 func (t *TCPAdapter) SendMessages(msgs [][]byte) error {
-	for _, msg := range msgs {
-		if err := t.SendMessage(msg); err != nil {
-			return err
+	if len(msgs) == 0 {
+		return nil
+	}
+	request := &tcpSendRequest{frames: msgs}
+	t.sendMu.Lock()
+	if t.sendCond == nil {
+		t.sendCond = sync.NewCond(&t.sendMu)
+	}
+	for len(t.pendingSends) >= tcpPendingSends {
+		t.sendCond.Wait()
+	}
+	t.pendingSends = append(t.pendingSends, request)
+	if !t.sending {
+		t.sending = true
+		request.leader = true
+	}
+	for !request.done {
+		if !request.leader {
+			t.sendCond.Wait()
+			continue
+		}
+		request.leader = false
+		count, size := 0, 0
+		for _, pending := range t.pendingSends {
+			length := 0
+			for _, frame := range pending.frames {
+				length += len(frame)
+			}
+			if count > 0 && size+length > tcpSendBatchBytes {
+				break
+			}
+			count++
+			size += length
+		}
+		batch := append([]*tcpSendRequest(nil), t.pendingSends[:count]...)
+		copy(t.pendingSends, t.pendingSends[count:])
+		for i := len(t.pendingSends) - count; i < len(t.pendingSends); i++ {
+			t.pendingSends[i] = nil
+		}
+		t.pendingSends = t.pendingSends[:len(t.pendingSends)-count]
+		t.sendCond.Broadcast()
+		t.sendMu.Unlock()
+		t.writeSendBatch(batch)
+		t.sendMu.Lock()
+		for _, completed := range batch {
+			completed.done = true
+		}
+		if len(t.pendingSends) > 0 {
+			t.pendingSends[0].leader = true
+		} else {
+			t.sending = false
+		}
+		t.sendCond.Broadcast()
+	}
+	err := request.err
+	t.sendMu.Unlock()
+	return err
+}
+
+func (t *TCPAdapter) writeSendBatch(batch []*tcpSendRequest) {
+	if len(batch) == 1 {
+		for _, frame := range batch[0].frames {
+			if err := t.sendMessage(frame); err != nil {
+				batch[0].err = err
+				break
+			}
+		}
+		return
+	}
+	if cap(t.sendBuffer) == 0 {
+		t.sendBuffer = make([]byte, 0, tcpSendBatchBytes)
+	}
+	t.sendBuffer = t.sendBuffer[:0]
+	for _, request := range batch {
+		for _, frame := range request.frames {
+			t.sendBuffer = append(t.sendBuffer, frame...)
 		}
 	}
-	return nil
+	if !t.ensureConnected() {
+		for _, request := range batch {
+			request.err = fmt.Errorf("TCP connection unavailable to %s", t.addr)
+		}
+		return
+	}
+	t.mu.Lock()
+	conn := t.conn
+	t.mu.Unlock()
+	if conn == nil {
+		for _, request := range batch {
+			request.err = fmt.Errorf("TCP connection changed during send; retry message")
+		}
+		return
+	}
+	n, err := conn.Write(t.sendBuffer)
+	if err == nil && n == len(t.sendBuffer) {
+		return
+	}
+	if err == nil {
+		err = io.ErrShortWrite
+	}
+	reconnectErr := t.reconnect(conn)
+	position := 0
+	for _, request := range batch {
+		for _, frame := range request.frames {
+			position += len(frame)
+			if n < position && request.err == nil {
+				if reconnectErr != nil {
+					request.err = fmt.Errorf("failed to send message over TCP: %w", err)
+				} else {
+					request.err = t.sendMessage(frame)
+				}
+			}
+		}
+	}
 }
 
 // Close closes the TCP connection

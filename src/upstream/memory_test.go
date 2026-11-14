@@ -235,6 +235,47 @@ func TestMemoryControllerCancellationStopsThrottleWait(t *testing.T) {
 	}
 }
 
+func TestMemoryControllerSharesHealthySamplesAndRechecksPressure(t *testing.T) {
+	sampler := &sequenceMemorySampler{samples: []memorySample{
+		{current: 10, limit: 100},
+		{current: 90, limit: 100},
+		{current: 60, limit: 100},
+	}}
+	var transitions []bool
+	controller := newMemoryController(sampler, 80, 70, time.Millisecond, func(paused bool, _ memorySample) {
+		transitions = append(transitions, paused)
+	})
+	if err := controller.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	controller.mu.Lock()
+	controller.healthyUntil = time.Now().Add(time.Hour)
+	controller.mu.Unlock()
+	var claims sync.WaitGroup
+	for range 60 {
+		claims.Add(1)
+		go func() {
+			defer claims.Done()
+			if err := controller.Wait(context.Background()); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	claims.Wait()
+	if sampler.index != 1 {
+		t.Fatalf("healthy claims performed %d samples; expected one shared sample", sampler.index)
+	}
+	controller.mu.Lock()
+	controller.healthyUntil = time.Time{}
+	controller.mu.Unlock()
+	if err := controller.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(transitions) != 2 || !transitions[0] || transitions[1] {
+		t.Fatalf("expired sample failed to pause and resume: %v", transitions)
+	}
+}
+
 func TestApplyGoMemoryLimitUsesEffectiveLimit(t *testing.T) {
 	previous := debug.SetMemoryLimit(-1)
 	t.Cleanup(func() { debug.SetMemoryLimit(previous) })

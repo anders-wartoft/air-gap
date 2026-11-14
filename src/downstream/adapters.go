@@ -91,7 +91,8 @@ type TCPAdapter struct {
 	closeMutex     sync.Mutex
 	connections    map[net.Conn]struct{}
 	activeConns    atomic.Int64
-	maxConnections int            // configured via maxTCPConnections; caps goroutine exhaustion
+	maxConnections int // configured via maxTCPConnections; caps goroutine exhaustion
+	readBufferSize int
 	tlsConfig      *tls.Config    // nil for plain TCP
 	clientCNRegex  *regexp.Regexp // nil if no CN validation required
 	// TLS cert hot-reload: file paths stored so ReloadTLSCert can re-read them on SIGHUP
@@ -273,13 +274,20 @@ func NewTCPAdapter(config TransferConfiguration) *TCPAdapter {
 
 // Setup initializes the TCP adapter (no-op for TCP as it doesn't need tuning like UDP)
 func (t *TCPAdapter) Setup(
-	_ uint16,
+	mtu uint16,
 	_ int,
 	_ int,
-	_ uint16,
+	readBufferMultiplier uint16,
 	_ bool, // enableRxqOvfl unused for TCP
 ) {
-	// TCP doesn't require setup tuning like UDP does
+	size := uint32(mtu) * uint32(readBufferMultiplier)
+	if size > 65536 {
+		size = 65536
+	}
+	t.readBufferSize = int(size)
+	if t.readBufferSize < 4096 {
+		t.readBufferSize = 4096
+	}
 }
 
 // Listen starts listening for incoming TCP connections on the specified address and port
@@ -598,7 +606,11 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 		}
 	}
 
-	reader := bufio.NewReader(conn)
+	readBufferSize := t.readBufferSize
+	if readBufferSize < 4096 {
+		readBufferSize = 4096
+	}
+	reader := bufio.NewReaderSize(conn, readBufferSize)
 	var rotation pinnedtls.RotationSession
 	Logger.Infof(logging.Event(logging.EventTCPConnection,
 		logging.Str("client.address", remoteAddr),
@@ -698,8 +710,7 @@ func (t *TCPAdapter) handleConnection(conn net.Conn, callback func([]byte), stop
 // - M bytes: Payload
 func (t *TCPAdapter) readMessage(reader *bufio.Reader) ([]byte, error) {
 	// Read the fixed header (1 + 2 + 2 + 2 = 7 bytes)
-	headerBytes := make([]byte, 7)
-	_, err := io.ReadFull(reader, headerBytes)
+	headerBytes, err := reader.Peek(7)
 	if err != nil {
 		return nil, err
 	}
@@ -717,22 +728,14 @@ func (t *TCPAdapter) readMessage(reader *bufio.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("invalid ID length: %d", idLen)
 	}
 
-	// Read the ID bytes and checksum (idLen + 4 bytes)
-	idAndChecksum := make([]byte, idLen+4)
-	_, err = io.ReadFull(reader, idAndChecksum)
+	headerLen := 13 + idLen
+	header, err := reader.Peek(headerLen)
 	if err != nil {
 		return nil, err
 	}
 
-	// Read the payload length (2 bytes, big-endian)
-	payloadLenBytes := make([]byte, 2)
-	_, err = io.ReadFull(reader, payloadLenBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	payloadLen := int(payloadLenBytes[0])<<8 | int(payloadLenBytes[1])
-	if strings.HasPrefix(string(idAndChecksum[:idLen]), "PIN_TLS") && payloadLen > pinnedtls.MaxRotationPayload {
+	payloadLen := int(header[11+idLen])<<8 | int(header[12+idLen])
+	if strings.HasPrefix(string(header[7:7+idLen]), "PIN_TLS") && payloadLen > pinnedtls.MaxRotationPayload {
 		return nil, fmt.Errorf("pinned rotation payload exceeds %d bytes", pinnedtls.MaxRotationPayload)
 	}
 
@@ -740,19 +743,11 @@ func (t *TCPAdapter) readMessage(reader *bufio.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("invalid payload length: %d", payloadLen)
 	}
 
-	// Read the payload
-	payload := make([]byte, payloadLen)
-	_, err = io.ReadFull(reader, payload)
+	fullMsg := make([]byte, headerLen+payloadLen)
+	_, err = io.ReadFull(reader, fullMsg)
 	if err != nil {
 		return nil, err
 	}
-
-	// Reconstruct the full message
-	fullMsg := make([]byte, 0, 7+idLen+4+2+payloadLen)
-	fullMsg = append(fullMsg, headerBytes...)
-	fullMsg = append(fullMsg, idAndChecksum...)
-	fullMsg = append(fullMsg, payloadLenBytes...)
-	fullMsg = append(fullMsg, payload...)
 
 	return fullMsg, nil
 }

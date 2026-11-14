@@ -1,5 +1,36 @@
 # Release Notes
 
+## Unreleased
+
+### End-to-end Kafka TCP/TLS throughput
+
+- Healthy upstream memory samples are shared across partition claims for at
+  most 1 ms, instead of reading cgroup files before every record. Watermarks,
+  paused polling and reclamation remain in force.
+- Kafka consumers wait on their message channel rather than sleeping for
+  10 ms when a small buffer runs dry. Disabled DEBUG logging no longer formats
+  every consumed record.
+- Downstream dispatches full Kafka batches immediately and keeps at most one
+  pending batch plus one being dispatched. Payload ownership requires only
+  one copy. Shutdown stops the receiver before flushing the dispatcher.
+- Concurrent TCP/TLS sends coalesce bounded batches while remaining
+  synchronous: callers succeed only after socket writes, not enqueueing.
+  Partially written batches retry only incomplete frames. The background
+  connection monitor and existing reconnect policy remain unchanged.
+- TCP/TLS decoding uses one owned frame allocation. `readBufferMultiplier`
+  now also sizes the TCP reader, bounded between 4 KiB and 64 KiB per connection.
+  Frame allocation and checksum formatting are reduced without changing the
+  wire checksum.
+- Fixed a fragmentation boundary defect: exact multiples of the payload
+  capacity advertised an additional fragment that was never sent, preventing
+  downstream reassembly even over TCP/TLS.
+- TC-52 measures actual downstream Kafka delivery for five minutes each over
+  UDP, TCP and TLS, with one sending thread, ten partitions and 400–1,600-byte
+  payloads. Frozen binaries allow matched baseline/candidate comparisons.
+  Missing, duplicate or corrupt records fail the case; transport-only TC-51
+  is retained. An 8–10× performance target must be established by measurement,
+  not inferred from socket benchmarks.
+
 ## 0.1.20-SNAPSHOT
 
 ### TCP and TLS throughput

@@ -1,0 +1,78 @@
+services:
+  source-kafka:
+    image: ${KAFKA_IMAGE}
+    hostname: source-kafka
+    mem_limit: 768m
+    environment:
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx256m"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://source-kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@source-kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 1000
+      KAFKA_LOG_SEGMENT_DELETE_DELAY_MS: 1000
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+  target-kafka:
+    image: ${KAFKA_IMAGE}
+    hostname: target-kafka
+    mem_limit: 768m
+    environment:
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx256m"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://target-kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@target-kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 1000
+      KAFKA_LOG_SEGMENT_DELETE_DELAY_MS: 1000
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+  downstream:
+    image: ${AIRGAP_BASE_IMAGE}
+    mem_limit: 512m
+    entrypoint: ["/airgap/bin/downstream", "/airgap/work/downstream.properties"]
+    volumes:
+      - ${TC52_WORK}/bin:/airgap/bin:ro
+      - ${TC52_WORK}:/airgap/work:ro
+      - ${TC52_RESULTS}:/airgap/results
+  upstream:
+    image: ${AIRGAP_BASE_IMAGE}
+    mem_limit: 512m
+    entrypoint: ["/airgap/bin/upstream", "/airgap/work/upstream.properties"]
+    volumes:
+      - ${TC52_WORK}/bin:/airgap/bin:ro
+      - ${TC52_WORK}:/airgap/work:ro
+      - ${TC52_RESULTS}:/airgap/results
+  driver:
+    image: ${AIRGAP_BASE_IMAGE}
+    mem_limit: 512m
+    entrypoint: ["/airgap/work/airgap-load"]
+    command:
+      - stress
+      - --duration=${TC52_DURATION}s
+      - --warmup=${TC52_WARMUP}s
+      - --window=${TC52_WINDOW}
+      - --summary=/airgap/results/summary.json
+    volumes:
+      - ${TC52_WORK}:/airgap/work:ro
+      - ${TC52_RESULTS}:/airgap/results

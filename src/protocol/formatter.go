@@ -26,7 +26,10 @@ func NrMessages(mtu uint16, id string, message []byte) uint16 {
 	// payload ([] byte)
 	var payloadLength = mtu - 13 - uint16(len(id))
 	// len in Go returns the number of bytes, not the number of characters or runes.
-	var nrMsgs = 1 + int32(len(message))/int32(payloadLength)
+	var nrMsgs int32 = 1
+	if len(message) > 0 {
+		nrMsgs += int32(len(message)-1) / int32(payloadLength)
+	}
 	if nrMsgs != int32(uint16(nrMsgs)) {
 		// This message will not be delivered.
 		Logger.Error(logging.Event(logging.EventProtocolEncode,
@@ -41,14 +44,8 @@ func NrMessages(mtu uint16, id string, message []byte) uint16 {
 * Make a MD5 hash of the message and return the last 4 characters
  */
 func CalculateChecksum(message []byte) string {
-	hasher := md5.New()
-	hasher.Write(message)
-	hash := hex.EncodeToString(hasher.Sum(nil))
-
-	if len(hash) > 4 {
-		return hash[len(hash)-4:]
-	}
-	return hash
+	hash := md5.Sum(message)
+	return hex.EncodeToString(hash[len(hash)-2:])
 }
 
 /**
@@ -73,7 +70,7 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 	// Special case: empty payload must still produce exactly one packet so that the
 	// downstream sequence is contiguous (e.g. for filtered events that must fill gaps).
 	if payloadLength == 0 {
-		part := []byte{}
+		part := make([]byte, 0, 13+len(id))
 		b := make([]byte, 2)
 		part = append(part, messageType)
 		binary.BigEndian.PutUint16(b, 1)
@@ -103,7 +100,11 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 	var messageNumber uint16 = 1
 	var position int32 = 0
 	for position < payloadLength {
-		part := []byte{}
+		partCapacity := 13 + len(id) + int(payloadLength-position)
+		if partCapacity > int(mtu) {
+			partCapacity = int(mtu)
+		}
+		part := make([]byte, 0, partCapacity)
 		// Create a byte slice with enough space to hold a uint8
 		b := make([]byte, 1)
 		// Write messageType to b

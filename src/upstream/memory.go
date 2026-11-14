@@ -243,13 +243,14 @@ type memoryController struct {
 	checkInterval time.Duration
 	onTransition  memoryTransition
 
-	mu          sync.Mutex
-	throttled   bool
-	reclaiming  bool
-	lastReclaim time.Time
-	pausedSince time.Time
-	lastStatus  time.Time
-	sample      memorySample
+	mu           sync.Mutex
+	throttled    bool
+	reclaiming   bool
+	lastReclaim  time.Time
+	pausedSince  time.Time
+	lastStatus   time.Time
+	sample       memorySample
+	healthyUntil time.Time
 }
 
 func newMemoryController(
@@ -287,14 +288,28 @@ func (c *memoryController) Wait(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		c.mu.Lock()
+		// Share healthy samples for at most 1 ms across partition claims.
+		// Throttled claims still resample, including immediately after reclaim.
+		if !c.throttled && time.Now().Before(c.healthyUntil) {
+			c.mu.Unlock()
+			return nil
+		}
 		sample, err := c.sampler.Sample()
 		if err != nil {
+			c.mu.Unlock()
 			return fmt.Errorf("sample memory pressure: %w", err)
 		}
 
-		c.mu.Lock()
 		changed := c.observeLocked(sample, time.Now())
 		isThrottled := c.throttled
+		if !isThrottled {
+			interval := c.checkInterval
+			if interval > time.Millisecond {
+				interval = time.Millisecond
+			}
+			c.healthyUntil = time.Now().Add(interval)
+		}
 		// All partition claims share this controller. Reclaim at most once
 		// per second, never concurrently, while keeping cgroup admission closed.
 		reclaim := isThrottled && !c.reclaiming && time.Since(c.lastReclaim) >= time.Second

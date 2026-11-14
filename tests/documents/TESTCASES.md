@@ -6636,3 +6636,79 @@ latency and rate limiting are intentionally excluded; TC-16 remains the
 separate end-to-end UDP performance procedure. Run on a machine with spare
 CPU capacity, without race instrumentation, to avoid load-induced failures.
 `-pause` is unsupported.
+
+## TC-52 — Sustained Kafka → upstream → downstream → Kafka throughput
+
+* Runner: `./run-testcases.sh --log-dir tmp/logs 52`
+* Requires Go, Docker and OpenSSL.
+
+An isolated source Kafka broker and a separate target Kafka broker each use
+ten partitions. One upstream process runs one configured sending thread.
+Sarama processes its ten partition claims concurrently; this is one consumer
+group, not ten groups retransmitting the same records.
+The workload cycles through every payload size from 400 to 1,600 bytes,
+including fragmentation boundaries. UDP, plain TCP and CA-verified TLS 1.3
+each run for **five measured minutes**, after a 20-second warmup.
+
+Delivered EPS is counted by a `read_committed` consumer of the target Kafka
+topic, not by upstream socket writes or downstream's enqueue statistics.
+Every payload, partition, sequence and timestamp is validated, and final
+acknowledged source and delivered target counts must agree. Missing,
+duplicate or corrupted records fail the case; losses are not concealed.
+There is no fixed EPS pass threshold: compare measured results on the same
+hardware and with identical settings.
+
+The load generator keeps at most 10,000 active records outstanding to bound
+its queue and application backlog. After five seconds overdue, a record's
+load credit is released while its identity remains tracked as missing, so a
+lossy baseline stays under load. Late deliveries remain validated and counted.
+100,000 overdue records abort an excessively lossy workload. Kafka topic
+retention is bounded to 100 MiB per partition with 16 MiB segments; retained
+test data must not be used as a complete post-run record inventory.
+
+Each run retains binary build metadata, exact properties, per-second
+delivered rates and Kafka lag, source/target counts, mean generation-to-Kafka
+latency, Docker CPU/memory/I/O samples and all service logs in the printed
+`tc52.XXXXXX/` result directory. These are local-container measurements with
+single-broker replication, not production capacity certification.
+
+Settings:
+
+```bash
+# Defaults: all three protocols, 300 measured seconds, 20 seconds warmup.
+./run-testcase.sh 52
+
+# Short fixture validation only; not a five-minute performance result.
+TC52_DURATION=8 TC52_WARMUP=3 ./run-testcase.sh 52
+
+# Run exactly the same harness against frozen baseline or candidate binaries.
+TC52_BIN_DIR=/absolute/linux-binary-directory TC52_PROTOCOLS="tcp tls" ./run-testcase.sh 52
+```
+
+`TC52_BATCH_SIZE` defaults to the maximum currently accepted value, 512.
+`TC52_WINDOW` defaults to 10,000; increase it if the measured active
+window limits the pipeline rather than the applications. Keep both settings
+identical between comparisons. `TC52_LOAD_BIN` can supply a frozen Linux load
+helper; its build metadata is retained alongside the application metadata.
+The unmodified 0.1.20 downstream dispatcher sent at most one batch per 10 ms
+tick, nominally capping a batch of 512 at 51,200 Kafka records/s and a batch of
+32 at 3,200/s. The new dispatcher instead wakes immediately for full batches
+and bounds pending storage; the 10 ms tick flushes partial batches.
+
+For a historical health-probe comparison, freeze the unmodified
+`0.1.19-SNAPSHOT` (`3cfd517b066d8214b65a5d489a3cf2db7ea5007c`) applications
+before applying the tester's `MSG_PEEK | MSG_DONTWAIT` patch to its upstream
+adapter in an isolated checkout. Run both upstream binaries with the same
+frozen historical downstream and load helper, using identical settings.
+This before/after pair isolates the supplied patch; comparing either with
+0.1.20 also includes other intervening production changes. The tag matches
+the old blocking probe but does not establish the tester's exact build.
+Historical runs retain their fragmentation-boundary defect: report missing
+records and the failing verdict alongside delivered EPS rather than fixing
+the historical source or relaxing delivery checks.
+The old blocking probe can also make healthy records take longer than the
+five-second credit expiry. Credit replacement then grows the backlog until
+the overdue-record safety limit aborts the run. In that case, report the
+actual measured duration, not a five-minute result, and do not classify all
+remaining outstanding records as confirmed transmission losses.
+`-pause` is unsupported.

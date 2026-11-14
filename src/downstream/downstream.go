@@ -545,10 +545,10 @@ func Main(build string) {
 			), "Received SIGTERM, shutting down")
 			sendMessage(protocol.TYPE_STATUS, "", config.topic,
 				fmt.Appendf(nil, "Downstream %s terminating by signal...", config.id))
-			kafka.FlushCache()
 			close(stopChan)
 			<-done
 			receiver.Close()
+			kafka.FlushCache()
 			kafka.StopBackgroundThread()
 			if config.target == "kafka" {
 				kafka.CloseProducer()
@@ -600,9 +600,9 @@ func Main(build string) {
 			), "RunDownstream finished, exiting")
 			sendMessage(protocol.TYPE_STATUS, "", config.topic,
 				fmt.Appendf(nil, "Downstream %s shutting down", config.id))
-			kafka.FlushCache()
 			close(stopChan)
 			receiver.Close()
+			kafka.FlushCache()
 			kafka.StopBackgroundThread()
 			if config.target == "kafka" {
 				kafka.CloseProducer()
