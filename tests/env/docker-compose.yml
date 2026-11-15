@@ -373,7 +373,7 @@ services:
     depends_on:
       topic-init-upstream:
         condition: service_completed_successfully
-      # downstream is required: false so the up-only role (which never
+      # downstream defaults to required: false so the up-only role (which never
       # starts `downstream`) still works. When both are launched together
       # (the common `all` role), we wait for the downstream container to
       # be running before we try to UDP-dial the "downstream" hostname —
@@ -381,8 +381,8 @@ services:
       #   [FATAL] lookup downstream on 127.0.0.11:53: no such host
       # cascade followed by `restart: on-failure` loops.
       downstream:
-        condition: service_started
-        required: false
+        condition: ${UPSTREAM_A_DOWNSTREAM_CONDITION:-service_started}
+        required: ${UPSTREAM_A_DOWNSTREAM_REQUIRED:-false}
     volumes:
       - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
       - ../../config:/airgap/config:ro,z
@@ -474,6 +474,14 @@ services:
       # retries/buffers rather than losing events. See entrypoint.sh.
       STARTUP_DELAY: ${DOWNSTREAM_STARTUP_DELAY:-0}
     command: ["downstream"]
+    # TC-6 observes the local socket before allowing upstream's initial key send.
+    # No packet, connection or ICMP response crosses the simulated diode.
+    healthcheck:
+      disable: ${DOWNSTREAM_UDP_HEALTHCHECK_DISABLED:-true}
+      test: ["CMD-SHELL", "ss -H -uln 'sport = :1234' | grep -q ."]
+      interval: 1s
+      timeout: 3s
+      retries: 60
 
   # ==========================================================================
   # Deduplicator (JVM).  Independent image via DEDUP_IMAGE.

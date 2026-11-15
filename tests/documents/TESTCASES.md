@@ -844,7 +844,7 @@ applies (upstream cluster → `testenv-ca.crt`, downstream cluster →
 `kafka-ca.crt`). LG producer writes plaintext to `kafka-upstream[transfer]`,
 upstream-airgap-6 reads over TLS and sends **encrypted UDP** to
 downstream-airgap-6 (symmetric key exchanged via the downstream's public
-key, rotated every `generateNewSymmetricKeyEvery=50 s`), downstream
+key), downstream
 decrypts, writes to `kafka-downstream[transfer]` over TLS, LG sink reads
 plaintext for the counter verdict.
 
@@ -862,8 +862,24 @@ Manifest knobs in `tests/env/testcases/06.env`:
   (now topic=transfer and sitia.nu brokers — a stale 192.168.* broker and
   topic=upstream had leaked into the committed file in the past).
 * `LG_SINK_CONFIG=/airgap/config/testcases/downstream-lg-6-docker.properties`.
-* `EXPECTED_DUPLICATES=0`, `TC_DRAIN_SECONDS=20` (extra slack for the
-  key-exchange handshake plus one rotation window).
+* `DOWNSTREAM_UDP_HEALTHCHECK_DISABLED=false`,
+  `UPSTREAM_A_DOWNSTREAM_CONDITION=service_healthy`,
+  `UPSTREAM_A_DOWNSTREAM_REQUIRED=true` — Compose checks the
+  bound UDP socket on port 1234 inside downstream's container before
+  starting upstream, so the initial encryption-key exchange cannot race
+  downstream's listener startup. The check sends no packets and uses no
+  connection, acknowledgement or ICMP from downstream to upstream. It is
+  test-harness orchestration only; production's one-way diode behavior is
+  unchanged. Other testcases retain their existing startup ordering.
+  If the socket never becomes ready, Compose fails startup after 60 failed
+  checks (one-second interval, three-second timeout per check), and the
+  runner prints the captured startup error.
+  For split-host `up-only` runs the dependency remains optional; start
+  downstream separately first, as in the interactive procedure below.
+* `LG_STARTUP_DELAY=15` retains the Kafka consumer-group grace period;
+  this delay does not control the initial key exchange.
+* `EXPECTED_DUPLICATES=0`, `TC_DRAIN_SECONDS=20` (extra slack for final
+  events to drain). This case verifies encrypted delivery, not key rotation.
 
 Expected chain verdict:
 

@@ -235,6 +235,8 @@ fi
 # Role filter -> explicit service list.
 case "$ROLE" in
     up-only)
+        # Split-host runs cannot observe the downstream socket through Compose.
+        export UPSTREAM_A_DOWNSTREAM_REQUIRED=false
         SERVICES=(kafka-upstream kafka-upstream-2 topic-init-upstream upstream-a)
         for p in "${PROFILES[@]}"; do
             case "$p" in

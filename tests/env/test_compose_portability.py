@@ -202,6 +202,44 @@ class ComposePortabilityTests(unittest.TestCase):
                     self.assertNotIn("container_name", service)
 
 
+@unittest.skipUnless(shutil.which("docker"), "Docker Compose CLI is required")
+class TC6StartupTests(unittest.TestCase):
+    def test_tc6_waits_for_local_udp_listener_without_changing_other_cases(self):
+        environment = {
+            key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ
+        }
+        command = [
+            "docker", "compose", "--env-file", os.devnull, "--profile", "*",
+            "-f", str(HERE / "docker-compose.yml"), "config", "--format", "json",
+        ]
+        baseline = subprocess.run(
+            command, cwd=HERE, env=environment, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        main = json.loads(baseline.stdout)["services"]
+        self.assertTrue(main["downstream"]["healthcheck"]["disable"])
+        self.assertEqual(
+            main["upstream-a"]["depends_on"]["downstream"]["condition"],
+            "service_started",
+        )
+        self.assertFalse(main["upstream-a"]["depends_on"]["downstream"]["required"])
+        completed = subprocess.run(
+            ["bash", "-c", 'set -a; source testcases/06.env; exec "$@"', "tc6", *command],
+            cwd=HERE, env=environment, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        services = json.loads(completed.stdout)["services"]
+        dependency = services["upstream-a"]["depends_on"]["downstream"]
+        self.assertEqual(dependency["condition"], "service_healthy")
+        self.assertTrue(dependency["required"], "an unhealthy downstream must block startup")
+        healthcheck = services["downstream"]["healthcheck"]
+        self.assertFalse(healthcheck.get("disable", False))
+        self.assertEqual(
+            healthcheck["test"],
+            ["CMD-SHELL", "ss -H -uln 'sport = :1234' | grep -q ."],
+        )
+
+
 class BrokerPermissionTests(unittest.TestCase):
     def test_existing_and_new_broker_files_readable_without_exposing_ca_key(self):
         with tempfile.TemporaryDirectory() as directory:
