@@ -16,3 +16,4 @@ plan/
 .github/
 tests/chaos-testing/out/
 tests/env/__pycache__/
+tests/env/tmp/
