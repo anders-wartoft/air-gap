@@ -1,1 +1,0 @@
-CPUs=12 memory=8319238144 architecture=aarch64
