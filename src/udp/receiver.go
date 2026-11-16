@@ -2,6 +2,7 @@ package udp
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"runtime"
@@ -38,6 +39,13 @@ var (
 	RxqOvflDrops      atomic.Uint64 // Drops since last statistics reset
 	RxqOvflDropsTotal atomic.Uint64 // Total drops since start
 )
+
+func recordRxqOverflow(last *uint32, count uint32) {
+	delta := count - *last
+	*last = count
+	RxqOvflDrops.Add(uint64(delta))
+	RxqOvflDropsTotal.Add(uint64(delta))
+}
 
 func (u *UDPAdapterLinux) Setup(
 	mtu uint16,
@@ -157,17 +165,7 @@ func (u *UDPAdapterLinux) Listen(ip string, port int, rcvBufSize int, handler fu
 								for _, msg := range msgs {
 									if msg.Header.Level == unix.SOL_SOCKET && msg.Header.Type == SO_RXQ_OVFL {
 										if len(msg.Data) >= 4 {
-											// Extract uint32 drop count
-											dropCount := uint32(msg.Data[0]) | uint32(msg.Data[1])<<8 |
-												uint32(msg.Data[2])<<16 | uint32(msg.Data[3])<<24
-
-											// Calculate delta if this isn't the first read
-											if lastDropCount > 0 && dropCount > lastDropCount {
-												delta := dropCount - lastDropCount
-												RxqOvflDrops.Add(uint64(delta))
-												RxqOvflDropsTotal.Add(uint64(delta))
-											}
-											lastDropCount = dropCount
+											recordRxqOverflow(&lastDropCount, binary.NativeEndian.Uint32(msg.Data[:4]))
 										}
 									}
 								}

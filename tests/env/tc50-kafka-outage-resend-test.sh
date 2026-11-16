@@ -98,15 +98,21 @@ produce() {
 }
 
 wait_for_count() {
-    local topic="$1" expected="$2" deadline=$((SECONDS + 120))
+    local topic="$1" expected="$2" deadline=$((SECONDS + 120)) consumer_rc records
     while (( SECONDS < deadline )); do
         if compose exec -T kafka-downstream kafka-console-consumer \
             --bootstrap-server kafka-downstream:9092 --topic "$topic" --from-beginning \
             --isolation-level read_committed --max-messages "$expected" --timeout-ms 4000 \
             >"$WORK/received.txt" 2>"$WORK/consumer-error.log"; then
+            consumer_rc=0
+        else
+            consumer_rc=$?
+        fi
+        records="$(awk 'END { print NR + 0 }' "$WORK/received.txt")"
+        if (( records >= expected )); then
             return 0
         fi
-        if ! grep -q 'TimeoutException' "$WORK/consumer-error.log"; then
+        if (( consumer_rc != 0 )) && ! grep -q 'TimeoutException' "$WORK/consumer-error.log"; then
             echo "TC-50: failed to read $topic:" >&2
             cat "$WORK/consumer-error.log" >&2
             return 1
@@ -161,7 +167,10 @@ found = set()
 for result in bundle["results"]:
     if result["topic"] != "transfer" or result["partition"] != 0:
         raise SystemExit(f"unexpected bundle entry: {result}")
-    for gap in result["gaps"]:
+    gaps = result.get("gaps") or []
+    if not isinstance(gaps, list):
+        raise SystemExit(f"invalid gap list: {gaps}")
+    for gap in gaps:
         if len(gap) not in (1, 2):
             raise SystemExit(f"invalid gap: {gap}")
         found.update(range(gap[0], gap[-1] + 1))

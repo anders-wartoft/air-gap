@@ -1,9 +1,11 @@
 # Release Notes
 
-## Unreleased
+## 0.1.21-SNAPSHOT
 
 ### End-to-end Kafka TCP/TLS throughput
 
+- Fixed UDP `SO_RXQ_OVFL` accounting to include the first reported socket
+  drops and handle the kernel's 32-bit counter wrapping.
 - Healthy upstream memory samples are shared across partition claims for at
   most 1 ms, instead of reading cgroup files before every record. Watermarks,
   paused polling and reclamation remain in force.

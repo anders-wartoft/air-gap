@@ -11,7 +11,8 @@ cp "$HERE/lib/tc16-fake-docker.sh" "$WORK/mock/docker"
 chmod +x "$WORK/mock/docker"
 touch "$WORK/env/bin/LogGenerator-1.1-9.jar"
 export PATH="$WORK/mock:$PATH" FAKE_STATE="$WORK/state"
-export TC16_COUNT=10 TC16_PARTITIONS=1 TC16_SETTLE=1 TC16_TIMEOUT=3 TC16_POLL=1
+export TC16_COUNT=10 TC16_PARTITIONS=1 TC16_SETTLE=1 TC16_POLL=1
+unset TC16_TIMEOUT
 printf 'dedup fixture' > "$WORK/dedup.jar"
 export TC16_CURRENT_DEDUP_JAR="$WORK/dedup.jar"
 
@@ -29,6 +30,7 @@ line() { grep -nE "$1" "$FAKE_STATE/calls" | head -1 | cut -d: -f1; }
 before() { [[ "$(line "$1")" -lt "$(line "$2")" ]] || { echo "Ordering failed: $1 before $2" >&2; exit 1; }; }
 
 run_case 0 16
+grep -qx '300' "$FAKE_STATE/timeout"
 grep -q 'TC-16 PASS' "$WORK/result"
 if [[ -z "${NO_COLOR-}" ]]; then
     grep -Fq $'\033[0;32m─── TC-16 (all): PASS' "$WORK/result"
@@ -60,8 +62,9 @@ before 'up .*lg-producer$' 'up .*upstream$'
 before 'stop .*downstream$' 'up .*dedup$'
 before 'stop .*upstream$' 'up .*dedup$'
 before 'stop .*dedup$' 'up .*lg-sink$'
-echo "PASS: single-machine phase ordering and full verification"
+echo "PASS: single-machine default timeout, phase ordering and full verification"
 
+export TC16_TIMEOUT=3
 rc=0
 TC16_CURRENT_DEDUP_JAR="$WORK/missing.jar" bash "$WORK/env/tc16-performance.sh" all > "$WORK/result" 2>&1 || rc=$?
 [[ "$rc" == 1 ]]
@@ -76,6 +79,7 @@ rm "$FAKE_STATE/upstream" "$FAKE_STATE/lg-producer"
 : > "$FAKE_STATE/calls"
 export FAKE_DROP=1
 run_case 1 16
+grep -qx '3' "$FAKE_STATE/timeout"
 grep -q 'transfer timed out' "$WORK/result"
 grep -q 'Upstream sent (last statistics).*| 10' "$WORK/result"
 grep -q 'Downstream received (last statistics).*| 9' "$WORK/result"
@@ -104,7 +108,9 @@ echo "PASS: extra arguments and duplicate verification fail explicitly"
 
 : > "$FAKE_STATE/calls"
 rm "$FAKE_STATE/upstream" "$FAKE_STATE/lg-producer"
+unset TC16_TIMEOUT
 run_case 0 TC-16-US
+grep -qx '1800' "$FAKE_STATE/timeout"
 grep -q 'sender startup only; delivery verification runs on DS: PASS' "$WORK/result"
 if grep -qE 'up .*downstream$|up .*dedup$|up .*lg-sink$|up .*kafka-ds' "$FAKE_STATE/calls"; then
     echo "US alias started downstream workloads" >&2; exit 1
@@ -115,10 +121,12 @@ for service in upstream lg-producer downstream dedup lg-sink; do rm -f "$FAKE_ST
 : > "$FAKE_STATE/calls"
 export FAKE_REMOTE=1
 run_case 0 TC-16-DS
+grep -qx '1800' "$FAKE_STATE/timeout"
 if grep -qE 'up .*upstream$|up .*lg-producer$|up .*kafka-us' "$FAKE_STATE/calls"; then
     echo "DS alias started upstream workloads" >&2; exit 1
 fi
 echo "PASS: DS alias starts only its own services and defers dedup/verification"
+export TC16_TIMEOUT=3
 
 for service in downstream dedup lg-sink; do rm -f "$FAKE_STATE/$service"; done
 export FAKE_EXTRA=1

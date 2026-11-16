@@ -2,6 +2,7 @@
 # Deterministic Docker boundary for the orchestration regression tests.
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_STATE/calls"
+printf '%s\n' "$TC16_TIMEOUT" > "$FAKE_STATE/timeout"
 if [[ "$1" == inspect ]]; then
     case "$3" in
         *Status*) [[ "$4" != lg-producer ]] || { echo exited; exit; }; echo running ;;

@@ -16,9 +16,19 @@ die() {
 }
 positive() { [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer"; }
 
+MODE="${1:-all}"
+case "$MODE" in all|us|ds|verify|stop-us|reset-us|reset-ds) ;; *)
+    die "usage: $0 {all|us|ds|verify|stop-us|reset-us|reset-ds}" ;;
+esac
+[[ $# -le 1 ]] || die "unexpected arguments"
+
 export TC16_COUNT="${TC16_COUNT:-1000000}"
 export TC16_PARTITIONS="${TC16_PARTITIONS:-5}"
-export TC16_TIMEOUT="${TC16_TIMEOUT:-1800}"
+if [[ "$MODE" == all ]]; then
+    export TC16_TIMEOUT="${TC16_TIMEOUT:-300}"
+else
+    export TC16_TIMEOUT="${TC16_TIMEOUT:-1800}"
+fi
 export TC16_POLL="${TC16_POLL:-1}"
 export TC16_SETTLE="${TC16_SETTLE:-5}"
 positive TC16_COUNT "$TC16_COUNT"
@@ -28,11 +38,6 @@ positive TC16_POLL "$TC16_POLL"
 positive TC16_SETTLE "$TC16_SETTLE"
 [[ "${TC16_EPS:-50000}" =~ ^(-1|[1-9][0-9]*)$ ]] || die "TC16_EPS must be -1 or a positive integer"
 
-MODE="${1:-all}"
-case "$MODE" in all|us|ds|verify|stop-us|reset-us|reset-ds) ;; *)
-    die "usage: $0 {all|us|ds|verify|stop-us|reset-us|reset-ds}" ;;
-esac
-[[ $# -le 1 ]] || die "unexpected arguments"
 RESULTS="${TC16_RESULTS_DIR:-$ROOT/tmp/tc16}"
 mkdir -p "$RESULTS"
 RESULTS="$(cd "$RESULTS" && pwd)"

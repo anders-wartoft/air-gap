@@ -75,6 +75,11 @@ The downstream application can optionally enable `SO_RXQ_OVFL` socket monitoring
 - **`SO_RXQ_OVFL`** - Socket receive queue drops since last statistics printout (resets each interval)
 - **`SO_RXQ_OVFL_TOTAL`** - Total socket receive queue drops since application start
 
+Linux attaches each socket's cumulative 32-bit drop count to a subsequently
+received packet. Reporting may therefore be delayed until another packet is
+read. Counter wraparound is handled, but multiple wraps between observations
+cannot be distinguished.
+
 **What SO_RXQ_OVFL Measures:**
 
 - ✅ Packets that reached the application's socket but were dropped because the socket receive buffer was full
