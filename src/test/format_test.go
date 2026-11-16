@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	"sitia.nu/airgap/src/protocol"
@@ -55,6 +58,68 @@ func TestFormatPreservesWireChecksum(t *testing.T) {
 		packet := protocol.FormatMessage(protocol.TYPE_CLEARTEXT, "id", []byte(fixture.payload), 100)[0]
 		if got := string(packet[9:13]); got != fixture.checksum {
 			t.Fatalf("wire checksum for %q changed: %q", fixture.payload, got)
+		}
+	}
+}
+
+func TestFormatMessageRejectsInvalidFrameSize(t *testing.T) {
+	for _, tt := range []struct {
+		name, id string
+		payload  []byte
+		mtu      uint16
+	}{
+		{"mtu-too-small", "", nil, 12},
+		{"id-too-long", strings.Repeat("x", 65535), nil, 65535},
+		{"no-payload-room", "id", []byte("x"), 15},
+		{"too-many-fragments", "", make([]byte, 65536), 14},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			frames, err := protocol.FormatMessageChecked(protocol.TYPE_CLEARTEXT, tt.id, tt.payload, tt.mtu)
+			if err == nil || frames != nil {
+				t.Fatalf("expected an error and no frames, got %v and %d frames", err, len(frames))
+			}
+			if frames := protocol.FormatMessage(protocol.TYPE_CLEARTEXT, tt.id, tt.payload, tt.mtu); frames != nil {
+				t.Fatalf("legacy formatter emitted %d frames for invalid input", len(frames))
+			}
+		})
+	}
+}
+
+func TestValidateMessageSizeBoundaries(t *testing.T) {
+	if err := protocol.ValidateMessageSize("", math.MaxUint16, 14); err != nil {
+		t.Fatalf("maximum fragment count rejected: %v", err)
+	}
+	if err := protocol.ValidateMessageSize("", math.MaxUint16+1, 14); err == nil {
+		t.Fatal("fragment count overflow was accepted")
+	}
+	if err := protocol.ValidateMessageSize("", math.MaxInt32, 65535); err != nil {
+		t.Fatalf("maximum message length rejected: %v", err)
+	}
+	if strconv.IntSize > 32 {
+		tooLarge := int64(math.MaxInt32) + 1
+		if err := protocol.ValidateMessageSize("", int(tooLarge), 65535); err == nil {
+			t.Fatal("message length overflow was accepted")
+		}
+	}
+}
+
+func TestFormatMessageAtMinimumFrameSize(t *testing.T) {
+	for _, fixture := range []struct {
+		payload     string
+		mtu         uint16
+		packetSizes []int
+	}{
+		{"", 13, []int{13}},
+		{"ab", 14, []int{14, 14}},
+	} {
+		packets := protocol.FormatMessage(protocol.TYPE_CLEARTEXT, "", []byte(fixture.payload), fixture.mtu)
+		if len(packets) != len(fixture.packetSizes) {
+			t.Fatalf("got %d packets, expected %d", len(packets), len(fixture.packetSizes))
+		}
+		for i, packet := range packets {
+			if len(packet) != fixture.packetSizes[i] {
+				t.Fatalf("frame %d: size %d, expected %d", i, len(packet), fixture.packetSizes[i])
+			}
 		}
 	}
 }

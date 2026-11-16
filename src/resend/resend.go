@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -601,25 +602,36 @@ func runResend(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClient
 		var messageType uint8
 		if config.encryption {
 			var ciphertext []byte
-			ciphertext, err = protocol.Encrypt(received, config.key)
+			if len(received) > math.MaxInt32-protocol.EncryptionOverhead {
+				err = fmt.Errorf("encrypted payload exceeds maximum %d bytes", math.MaxInt32)
+			} else {
+				err = protocol.ValidateMessageSize(sendID, len(received)+protocol.EncryptionOverhead, config.payloadSize)
+			}
+			if err == nil {
+				ciphertext, err = protocol.Encrypt(received, config.key)
+			}
 			if isCompressed {
 				messageType = protocol.Merge(protocol.TYPE_MESSAGE, protocol.TYPE_COMPRESSED_GZIP)
 			} else {
 				messageType = protocol.Merge(protocol.TYPE_MESSAGE, 0)
 			}
-			messages = protocol.FormatMessage(messageType, sendID, ciphertext, config.payloadSize)
+			if err == nil {
+				messages, err = protocol.FormatMessageChecked(messageType, sendID, ciphertext, config.payloadSize)
+			}
 		} else {
 			if isCompressed {
 				messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, protocol.TYPE_COMPRESSED_GZIP)
 			} else {
 				messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, 0)
 			}
-			messages = protocol.FormatMessage(messageType, sendID, received, config.payloadSize)
+			messages, err = protocol.FormatMessageChecked(messageType, sendID, received, config.payloadSize)
 		}
 		if err != nil {
-			Logger.Error(logging.Event(logging.EventCryptoEncrypt,
+			Logger.Errorf(logging.Event(logging.EventProtocolEncode,
+				logging.Failure(),
 				logging.Str("airgap.message.id", sendID),
-			).Merge(logging.Err(err)), err)
+			).Merge(logging.Err(err)), "Could not encode resend event; event was not sent: %v", err)
+			return false
 		}
 
 		// EPS limiter: if config.eps > 0, limit sending rate
@@ -911,7 +923,9 @@ func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 			Logger.Info(logging.Event(logging.EventAppStop), "Resend process finished. Exiting...")
 			messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 				fmt.Appendf(nil, "%s %s finished", protocol.GetTimestamp(), config.id), config.payloadSize)
-			udpAdapter.SendMessage(messages[0])
+			if len(messages) > 0 {
+				udpAdapter.SendMessage(messages[0])
+			}
 			udpAdapter.Close()
 			return
 		case <-sigterm:
@@ -922,7 +936,9 @@ func mainWithKafka(build string, kafkaAdapter KafkaClient) {
 			<-done
 			messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 				fmt.Appendf(nil, "%s %s shutting down", protocol.GetTimestamp(), config.id), config.payloadSize)
-			udpAdapter.SendMessage(messages[0])
+			if len(messages) > 0 {
+				udpAdapter.SendMessage(messages[0])
+			}
 			udpAdapter.Close()
 			return
 		case <-hup:

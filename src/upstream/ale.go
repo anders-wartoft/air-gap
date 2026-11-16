@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -28,13 +29,13 @@ const lostEventPrefix = "AIRGAP LOST EVENT"
 // placeholder, plus the lost-event context listed in lostEventContext.
 const defaultAirgapLostEventMessage = lostEventPrefix +
 	": Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}." +
-	" The message can be found in its entirety on upstream machine {upstream_id}, in {lostEventDirectory}." +
+	" Original event file on upstream machine {upstream_id}: {lostEventFile}." +
 	" Max message length is {kafkaMaxMessageBytes}."
 
 // defaultLostEvent is the log record written when an event is lost. It is the
 // delivered guard without the prefix: the log already says what it is.
 const defaultLostEvent = "INFO:Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}." +
-	" The message can be found in its entirety on upstream machine {upstream_id}, in {lostEventDirectory}."
+	" Original event file on upstream machine {upstream_id}: {lostEventFile}."
 
 // defaultLostEventDirectory holds the original payload of a lost event, so the
 // guard can point at something that actually exists.
@@ -48,6 +49,9 @@ const defaultLostMessageTruncatedMessage = "AIRGAP LOST MESSAGE TRUNCATED: The m
 // when no directory is configured, so a message never claims the original
 // payload was kept when it was not.
 const lostEventDirectoryDisabled = "no directory (lostEventDirectory is not configured)"
+const lostEventWriteFailed = "not saved (lost-event file write failed)"
+
+var lostEventDirectoryMu sync.Mutex
 
 // lostEventDirectoryValue renders the lost-event directory for templates.
 func lostEventDirectoryValue(c TransferConfiguration) string {
@@ -89,9 +93,12 @@ func splitMessageID(id string) (topic string, partition string, offset string) {
 func lostEventContext(id string, reason string, lostEventFile string, eventBytes int) map[string]string {
 	topic, partition, offset := splitMessageID(id)
 	if lostEventFile == "" {
-		lostEventFile = lostEventDirectoryDisabled
+		lostEventFile = lostEventWriteFailed
+		if config.lostEventDirectory == "" {
+			lostEventFile = lostEventDirectoryDisabled
+		}
 	}
-	return map[string]string{
+	context := map[string]string{
 		"topic_name":    topic,
 		"partition":     partition,
 		"row":           offset,
@@ -99,6 +106,10 @@ func lostEventContext(id string, reason string, lostEventFile string, eventBytes
 		"eventBytes":    strconv.Itoa(eventBytes),
 		"lostEventFile": lostEventFile,
 	}
+	if lostEventFile == lostEventWriteFailed {
+		context["lostEventDirectory"] = lostEventWriteFailed
+	}
+	return context
 }
 
 // lostEventPayload renders the Airgap Lost Event (ALE) guard that replaces a
@@ -183,7 +194,11 @@ func emitLostMessageTruncated(transport TransportClient, fileName string, fileDa
 	if transport == nil || rendered == "" {
 		return
 	}
-	messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS", []byte(rendered), config.payloadSize)
+	messages, err := protocol.FormatMessageChecked(protocol.TYPE_STATUS, "STATUS", []byte(rendered), config.payloadSize)
+	if err != nil {
+		Logger.Errorf(attrs.With(logging.ErrorType(err)), "Could not format lost-message-truncated status for file %s: %v", fileName, err)
+		return
+	}
 	if err := transport.SendMessages(messages); err != nil {
 		Logger.Errorf(attrs.With(
 			logging.Str("airgap.transport.kind", config.transport),
@@ -244,7 +259,7 @@ func compressOldLostEventFiles(transport TransportClient, dir string, now time.T
 	}
 	compressed := 0
 	for _, entry := range entries {
-		if entry.IsDir() || strings.HasSuffix(entry.Name(), ".zip") {
+		if entry.IsDir() || strings.HasSuffix(entry.Name(), ".zip") || strings.HasSuffix(entry.Name(), ".tmp") {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -273,7 +288,7 @@ func compressOldLostEventFiles(transport TransportClient, dir string, now time.T
 		if err != nil {
 			continue
 		}
-		tempArchive, err := os.CreateTemp(dir, "."+entry.Name()+".*.zip.tmp")
+		tempArchive, err := os.CreateTemp(dir, ".airgap-archive-*.zip.tmp")
 		if err != nil {
 			source.Close()
 			continue
@@ -360,7 +375,7 @@ func deleteOldLostEventFiles(transport TransportClient, dir string, now time.Tim
 	}
 	deleted := 0
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || strings.HasSuffix(entry.Name(), ".tmp") {
 			continue
 		}
 		info, err := entry.Info()
@@ -463,6 +478,31 @@ func reclaimLostEventDirectorySpaceWithFree(transport TransportClient, dir strin
 	}
 }
 
+func removeInterruptedLostEventWrites(transport TransportClient, dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		Logger.Warnf(logging.Event(logging.EventMessageLost, logging.Failure(), logging.ErrorType(err)),
+			"Could not scan lost-event directory for interrupted writes: %v", err)
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !(strings.HasPrefix(name, ".airgap-lost-") && strings.HasSuffix(name, ".tmp")) &&
+			!(strings.HasPrefix(name, ".airgap-archive-") && strings.HasSuffix(name, ".zip.tmp")) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			Logger.Warnf(logging.Event(logging.EventMessageLost, logging.Failure(), logging.ErrorType(err)),
+				"Could not inspect interrupted lost-event file %s: %v", entry.Name(), err)
+			continue
+		}
+		if info.Mode().IsRegular() {
+			removeLostEventFile(transport, filepath.Join(dir, entry.Name()), info, "write_failed")
+		}
+	}
+}
+
 // writeLostEvent stores the original payload of a lost event so it can be
 // inspected afterwards. It returns the path that was written, or an empty
 // string when the feature is disabled or the write failed. A failed write is
@@ -471,6 +511,8 @@ func writeLostEvent(transport TransportClient, id string, payload []byte) string
 	if config.lostEventDirectory == "" {
 		return ""
 	}
+	lostEventDirectoryMu.Lock()
+	defer lostEventDirectoryMu.Unlock()
 	if err := os.MkdirAll(config.lostEventDirectory, 0o750); err != nil {
 		Logger.Warnf(logging.Event(logging.EventMessageLost,
 			logging.Failure(),
@@ -480,12 +522,58 @@ func writeLostEvent(transport TransportClient, id string, payload []byte) string
 		), "Could not create lost-event directory %s: %v", config.lostEventDirectory, err)
 		return ""
 	}
+	dir, err := os.Open(config.lostEventDirectory)
+	if err != nil {
+		Logger.Warnf(logging.Event(logging.EventMessageLost, logging.Failure(),
+			logging.Str("airgap.event.lost.directory", config.lostEventDirectory), logging.ErrorType(err)),
+			"Could not open lost-event directory for locking: %v", err)
+		return ""
+	}
+	defer dir.Close()
+	if err := syscall.Flock(int(dir.Fd()), syscall.LOCK_EX); err != nil {
+		Logger.Warnf(logging.Event(logging.EventMessageLost, logging.Failure(),
+			logging.Str("airgap.event.lost.directory", config.lostEventDirectory), logging.ErrorType(err)),
+			"Could not lock lost-event directory: %v", err)
+		return ""
+	}
+	defer func() {
+		if err := syscall.Flock(int(dir.Fd()), syscall.LOCK_UN); err != nil {
+			Logger.Warnf(logging.Event(logging.EventMessageLost, logging.Failure(), logging.ErrorType(err)),
+				"Could not unlock lost-event directory: %v", err)
+		}
+	}()
+	removeInterruptedLostEventWrites(transport, config.lostEventDirectory)
 	reclaimLostEventDirectorySpace(transport, config.lostEventDirectory, int64(len(payload))+1024, time.Now())
-	path := filepath.Join(config.lostEventDirectory,
-		fmt.Sprintf("%s-%d.bin", lostEventFileName(id), time.Now().UnixNano()))
-	if err := os.WriteFile(path, payload, 0o640); err != nil {
-		if info, statErr := os.Stat(path); statErr == nil {
-			removeLostEventFile(transport, path, info, "write_failed")
+	file, err := os.CreateTemp(config.lostEventDirectory, ".airgap-lost-*.tmp")
+	if err != nil {
+		Logger.Warnf(logging.Event(logging.EventMessageLost,
+			logging.Failure(),
+			logging.Str("airgap.message.id", id),
+			logging.Str("airgap.event.lost.directory", config.lostEventDirectory),
+			logging.ErrorType(err),
+		), "Could not create temporary lost-event file: %v", err)
+		return ""
+	}
+	tempPath := file.Name()
+	name := lostEventFileName(id)
+	if len(name) > 180 {
+		name = name[:180]
+	}
+	token := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(tempPath), ".airgap-lost-"), ".tmp")
+	path := filepath.Join(config.lostEventDirectory, name+"-"+token+".bin")
+	err = file.Chmod(0o640)
+	if err == nil {
+		_, err = file.Write(payload)
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tempPath, path)
+	}
+	if err != nil {
+		if info, statErr := os.Stat(tempPath); statErr == nil {
+			removeLostEventFile(transport, tempPath, info, "write_failed")
 		}
 		Logger.Warnf(logging.Event(logging.EventMessageLost,
 			logging.Failure(),
@@ -533,7 +621,7 @@ func recordLostEvent(transport TransportClient, id string, reason string, origin
 		logging.Str("messaging.kafka.offset", offset),
 		logging.Int("airgap.message.size", int64(len(original))),
 		logging.Str("airgap.event.lost.reason", reason),
-		logging.Bool("airgap.event.lost.guard_sent", len(guard) > 0),
+		logging.Bool("airgap.event.lost.guard_prepared", len(guard) > 0),
 		logging.Str("airgap.event.lost.file", lostEventFile),
 	)
 	emitConfiguredMessage(parseMessageSpec(config.lostEvent, logging.INFO), attrs, context)

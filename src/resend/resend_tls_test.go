@@ -40,7 +40,8 @@ func (m *mockKafkaClient) GetLastOffset(bootstrapServers, topic string, partitio
 }
 
 type mockUDPClient struct {
-	sent [][]byte
+	sent              [][]byte
+	sendMessagesCalls int
 }
 
 func (m *mockUDPClient) SendMessage(msg []byte) error {
@@ -49,6 +50,7 @@ func (m *mockUDPClient) SendMessage(msg []byte) error {
 }
 
 func (m *mockUDPClient) SendMessages(msgs [][]byte) error {
+	m.sendMessagesCalls++
 	m.sent = append(m.sent, msgs...)
 	return nil
 }
@@ -118,10 +120,40 @@ func TestRunResend_NoTLSDoesNotCallSetTLS(t *testing.T) {
 	if mockKafka.setTLSCalls != 0 {
 		t.Fatalf("expected SetTLS not to be called when TLS settings are absent")
 	}
+
 	if len(mockKafka.getOffsetTLSState) == 0 {
 		t.Fatalf("expected GetLastOffset to be called")
 	}
 	if mockKafka.getOffsetTLSState[0] {
 		t.Fatalf("expected TLS to be disabled for non-TLS configuration")
+	}
+}
+
+func TestRunResendDoesNotSendInvalidEvent(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		mtu       uint16
+		wantSends int
+	}{
+		{"valid", 1400, 1},
+		{"header-too-large", 20, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			config := baseResendConfig()
+			config.payloadSize = tt.mtu
+			config.to = "9999-12-31T23:59:59Z"
+			udpClient := &mockUDPClient{}
+			done := make(chan struct{})
+			go RunResend(&mockKafkaClient{}, udpClient, config, done)
+
+			select {
+			case <-done:
+				if udpClient.sendMessagesCalls != tt.wantSends {
+					t.Fatalf("got %d bulk sends, want %d", udpClient.sendMessagesCalls, tt.wantSends)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("resend did not complete")
+			}
+		})
 	}
 }

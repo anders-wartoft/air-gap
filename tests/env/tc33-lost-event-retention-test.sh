@@ -66,7 +66,7 @@ grep -q "up and running" "$WORK/upstream-before.log" || {
     exit 1
 }
 
-echo "TC-33: producing one oversized record to trigger retention"
+echo "TC-33: producing a record over the receiver fragment limit to trigger retention"
 compose run --rm producer | tee "$WORK/producer.log"
 
 deadline=$((SECONDS + 90))
@@ -92,7 +92,7 @@ if compose run --rm seed verify-retention --dir=/airgap/work/lost-events >"$WORK
     retention_result="passed"
 fi
 status_result="failed"
-if compose run --rm seed verify-status --file=/airgap/work/internal.log --expected=3 >"$WORK/status.log" 2>&1; then
+if compose run --rm seed verify-status --file=/airgap/work/internal.log --expected=4 >"$WORK/status.log" 2>&1; then
     status_result="passed"
 fi
 
@@ -101,6 +101,7 @@ upstream_restarts="$(docker inspect --format '{{.RestartCount}}' "$UPSTREAM_CID"
 downstream_restarts="$(docker inspect --format '{{.RestartCount}}' "$DOWNSTREAM_CID")"
 upstream_state="$(docker inspect --format '{{.State.Status}}' "$UPSTREAM_CID")"
 downstream_state="$(docker inspect --format '{{.State.Status}}' "$DOWNSTREAM_CID")"
+stored_sizes="$(docker exec "$UPSTREAM_CID" sh -c 'for f in /airgap/work/lost-events/transfer_0_0-*.bin; do [ -f "$f" ] || continue; wc -c < "$f"; done' | tr -d '[:space:]')"
 
 rc=0
 if [[ "$retention_result" == "passed" ]]; then
@@ -109,14 +110,19 @@ else
     report_check "retention policy" "70-day files deleted, 10-day file compressed with age preserved, 1-day file retained" "$(<"$WORK/retention.log")" 1 || rc=1
 fi
 if [[ "$status_result" == "passed" ]]; then
-    report_check "truncation status routing" "3 valid JSON status records in airgap-internal" "$(<"$WORK/status.log")" 0 || rc=1
+    report_check "truncation status routing" "4 valid JSON status records in airgap-internal" "$(<"$WORK/status.log")" 0 || rc=1
 else
-    report_check "truncation status routing" "3 valid JSON status records in airgap-internal" "$(<"$WORK/status.log")" 1 || rc=1
+    report_check "truncation status routing" "4 valid JSON status records in airgap-internal" "$(<"$WORK/status.log")" 1 || rc=1
 fi
-if grep -q "AIRGAP LOST EVENT" "$WORK/transfer.log"; then
-    report_check "guard delivery" "lost-event guard in transfer topic" "observed" 0 || rc=1
+if grep -q "AIRGAP LOST EVENT.*message exceeds maximum of 4 fragments" "$WORK/transfer.log"; then
+    report_check "guard delivery" "fragment-limit lost-event guard in transfer topic" "observed" 0 || rc=1
 else
-    report_check "guard delivery" "lost-event guard in transfer topic" "missing" 1 || rc=1
+    report_check "guard delivery" "fragment-limit lost-event guard in transfer topic" "missing" 1 || rc=1
+fi
+if [[ "$stored_sizes" == "4096" ]]; then
+    report_check "fragment-limit original retained" "one 4096-byte original" "$stored_sizes bytes" 0 || rc=1
+else
+    report_check "fragment-limit original retained" "one 4096-byte original" "${stored_sizes:-missing}" 1 || rc=1
 fi
 if ! grep -q "AIRGAP LOST MESSAGE TRUNCATED" "$WORK/transfer.log"; then
     report_check "status isolation" "no truncation status in transfer topic" "isolated to internal topic" 0 || rc=1

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -323,14 +324,16 @@ func runUpstream(ctx context.Context, kafkaClient KafkaClient, udpClient UDPClie
 	// Send startup status message
 	messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 		fmt.Appendf(nil, "%s Upstream %s starting up...", protocol.GetTimestamp(), config.id), config.payloadSize)
-	transportErr := udpClient.SendMessage(messages[0])
-	if transportErr != nil {
-		Logger.Errorf(logging.Event(logging.EventTransportSend,
-			logging.Failure(),
-			logging.Str("airgap.transport.kind", config.transport),
-			logging.Str("airgap.message.id", "STATUS"),
-			logging.ErrorType(transportErr),
-		), "Failed sending startup message (will continue): %v", transportErr)
+	if len(messages) > 0 {
+		transportErr := udpClient.SendMessage(messages[0])
+		if transportErr != nil {
+			Logger.Errorf(logging.Event(logging.EventTransportSend,
+				logging.Failure(),
+				logging.Str("airgap.transport.kind", config.transport),
+				logging.Str("airgap.message.id", "STATUS"),
+				logging.ErrorType(transportErr),
+			), "Failed sending startup message (will continue): %v", transportErr)
+		}
 	}
 
 	// Encryption
@@ -455,23 +458,40 @@ func kafkaHandler(timeFrom time.Time, udpClient UDPClient, id string, _ []byte, 
 func encodeForTransport(id string, payload []byte, isCompressed bool) ([][]byte, error) {
 	var messageType uint8
 	if config.encryption {
+		if len(payload) > math.MaxInt32-protocol.EncryptionOverhead {
+			return nil, fmt.Errorf("message framing failed: encrypted payload exceeds maximum %d bytes", math.MaxInt32)
+		}
+		if err := protocol.ValidateMessageSizeWithLimit(id, len(payload)+protocol.EncryptionOverhead, config.payloadSize, config.maxNrMessages); err != nil {
+			return nil, fmt.Errorf("message framing failed: %w", err)
+		}
 		ciphertext, err := protocol.Encrypt(payload, config.key)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("encryption failed: %w", err)
 		}
 		if isCompressed {
 			messageType = protocol.Merge(protocol.TYPE_MESSAGE, protocol.TYPE_COMPRESSED_GZIP)
 		} else {
 			messageType = protocol.Merge(protocol.TYPE_MESSAGE, 0)
 		}
-		return protocol.FormatMessage(messageType, id, ciphertext, config.payloadSize), nil
+		messages, err := protocol.FormatMessageChecked(messageType, id, ciphertext, config.payloadSize)
+		if err != nil {
+			return nil, fmt.Errorf("message framing failed: %w", err)
+		}
+		return messages, nil
+	}
+	if err := protocol.ValidateMessageSizeWithLimit(id, len(payload), config.payloadSize, config.maxNrMessages); err != nil {
+		return nil, fmt.Errorf("message framing failed: %w", err)
 	}
 	if isCompressed {
 		messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, protocol.TYPE_COMPRESSED_GZIP)
 	} else {
 		messageType = protocol.Merge(protocol.TYPE_CLEARTEXT, 0)
 	}
-	return protocol.FormatMessage(messageType, id, payload, config.payloadSize), nil
+	messages, err := protocol.FormatMessageChecked(messageType, id, payload, config.payloadSize)
+	if err != nil {
+		return nil, fmt.Errorf("message framing failed: %w", err)
+	}
+	return messages, nil
 }
 
 func setTransportError(err error) {
@@ -571,6 +591,8 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 	}
 
 	id = transformMessageID(id)
+	original := received
+	guarded := false
 
 	// Records that are too large to process safely are replaced by an Airgap
 	// Lost Event guard. The guard carries the same message id, so downstream
@@ -580,9 +602,15 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 		reason := fmt.Sprintf("message size %d bytes exceeds maxEventBytes %d bytes", len(received), config.maxEventBytes)
 		guard := recordLostEvent(udpClient, id, reason, received)
 		if guard == nil {
+			if config.lostEventGuard {
+				Logger.Errorf(logging.Event(logging.EventMessageLost, logging.Failure(),
+					logging.Str("airgap.message.id", id)), "Could not create lost-event guard for id=%s; leaving the message unacknowledged.", id)
+				return false
+			}
 			return keepRunning
 		}
 		received = guard
+		guarded = true
 	}
 
 	// Compress or not
@@ -606,26 +634,34 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 	// Encrypt or not
 	messages, err := encodeForTransport(id, received, isCompressed)
 	if err != nil {
-		Logger.Error(logging.Event(logging.EventCryptoEncrypt,
+		Logger.Error(logging.Event(logging.EventProtocolEncode,
 			logging.Failure(),
 			logging.Str("airgap.message.id", id),
 			logging.Int("airgap.message.size", int64(len(received))),
 			logging.ErrorType(err),
 		), err)
-		// The payload cannot be encrypted, so it can never be delivered. Send
-		// an Airgap Lost Event guard in its place rather than an unencrypted or
-		// empty message.
-		guard := recordLostEvent(udpClient, id, fmt.Sprintf("encryption failed: %v", err), received)
+		if guarded {
+			Logger.Errorf(logging.Event(logging.EventMessageLost, logging.Failure(),
+				logging.Str("airgap.message.id", id), logging.ErrorType(err)),
+				"Could not encode the lost-event guard for id=%s; leaving the message unacknowledged: %v", id, err)
+			return false
+		}
+		guard := recordLostEvent(udpClient, id, err.Error(), original)
 		if guard == nil {
+			if config.lostEventGuard {
+				Logger.Errorf(logging.Event(logging.EventMessageLost, logging.Failure(),
+					logging.Str("airgap.message.id", id)), "Could not create lost-event guard for id=%s; leaving the message unacknowledged.", id)
+				return false
+			}
 			return keepRunning
 		}
 		messages, err = encodeForTransport(id, guard, false)
 		if err != nil {
-			Logger.Errorf(logging.Event(logging.EventCryptoEncrypt,
+			Logger.Errorf(logging.Event(logging.EventProtocolEncode,
 				logging.Failure(),
 				logging.Str("airgap.message.id", id),
 				logging.ErrorType(err),
-			), "Could not encrypt the lost-event guard for id=%s: %v. Message will be retried.", id, err)
+			), "Could not encode the lost-event guard for id=%s: %v. Leaving the message unacknowledged.", id, err)
 			return false
 		}
 	}
@@ -1020,7 +1056,9 @@ func Main(build string) {
 			reloadWorkers.Wait()
 			messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 				fmt.Appendf(nil, "%s Upstream %s terminating by signal...", protocol.GetTimestamp(), config.id), config.payloadSize)
-			transportAdapter.SendMessage(messages[0])
+			if len(messages) > 0 {
+				transportAdapter.SendMessage(messages[0])
+			}
 			transportAdapter.Close()
 			config.WarnProductionConfiguration("shutdown")
 			return

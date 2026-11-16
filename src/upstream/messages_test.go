@@ -271,6 +271,32 @@ func TestLostEventRetentionConfigurationOverrides(t *testing.T) {
 	}
 }
 
+func TestReceiverFragmentLimitConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upstream.properties")
+	if err := os.WriteFile(path, []byte("maxNrMessages=2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fromFile, err := ReadParameters(path, DefaultConfiguration())
+	if err != nil || fromFile.maxNrMessages != 2 {
+		t.Fatalf("file fragment limit = %d, error %v", fromFile.maxNrMessages, err)
+	}
+	t.Setenv("AIRGAP_UPSTREAM_MAX_NR_MESSAGES", "3")
+	if got := overrideConfiguration(DefaultConfiguration()).maxNrMessages; got != 3 {
+		t.Fatalf("environment fragment limit = %d", got)
+	}
+	if got := parseCommandLineOverrides([]string{"upstream", "--maxNrMessages=4"}, DefaultConfiguration()).maxNrMessages; got != 4 {
+		t.Fatalf("command-line fragment limit = %d", got)
+	}
+	for _, invalid := range []string{"0", "65536"} {
+		if err := os.WriteFile(path, []byte("maxNrMessages="+invalid+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadParameters(path, DefaultConfiguration()); err == nil {
+			t.Fatalf("accepted invalid maxNrMessages=%s", invalid)
+		}
+	}
+}
+
 func TestJSONTruncationMessageAllowsLevelPrefixAndNone(t *testing.T) {
 	jsonSpec := parseMessageSpec(`WARN:{"eventName":"message.lost.truncated","body":{"stringValue":"{fileName}"}}`, logging.WARN)
 	if !jsonSpec.enabled {

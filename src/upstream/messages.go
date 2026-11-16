@@ -253,6 +253,7 @@ func templateValues(c TransferConfiguration) map[string]string {
 		"memoryHighWatermarkLog":              c.memoryHighWatermarkLog,
 		"memoryLowWatermarkLog":               c.memoryLowWatermarkLog,
 		"maxEventBytes":                       strconv.Itoa(c.maxEventBytes),
+		"maxNrMessages":                       strconv.Itoa(c.maxNrMessages),
 		"lostEventGuard":                      strconv.FormatBool(c.lostEventGuard),
 		"lostEvent":                           c.lostEvent,
 		"airgapLostEventMessage":              c.airgapLostEventMessage,

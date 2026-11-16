@@ -2,12 +2,18 @@ package upstream
 
 import (
 	"archive/zip"
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -95,7 +101,7 @@ func TestLostEventPayloadUsesDefaultTemplate(t *testing.T) {
 	got := string(payload)
 	want := "AIRGAP LOST EVENT: Event transfer 3:42 couldn't be delivered due to " +
 		"message size 10 bytes exceeds maxEventBytes 5 bytes. " +
-		"The message can be found in its entirety on upstream machine Upstream_1, in /var/lib/airgap/lost. " +
+		"Original event file on upstream machine Upstream_1: /var/lib/airgap/lost/transfer_3_42-1.bin. " +
 		"Max message length is 6291456."
 	if got != want {
 		t.Errorf("lostEventPayload() = %q, want %q", got, want)
@@ -541,6 +547,105 @@ func TestRecordLostEventWithoutLostEventDirectory(t *testing.T) {
 	}
 }
 
+func TestRecordLostEventReportsFailedSave(t *testing.T) {
+	saved := config
+	defer func() { config = saved }()
+	config = DefaultConfiguration()
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("block"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config.lostEventDirectory = filepath.Join(blocker, "lost")
+
+	guard := recordLostEvent(nil, "transfer_0_9", "too large", []byte("original"))
+	if !strings.Contains(string(guard), lostEventWriteFailed) || strings.Contains(string(guard), "can be found") {
+		t.Fatalf("guard incorrectly describes failed storage: %q", guard)
+	}
+}
+
+func TestConcurrentLostEventWritesAndInterruptedCleanup(t *testing.T) {
+	saved := config
+	defer func() { config = saved }()
+	config = DefaultConfiguration()
+	config.lostEventDirectory = t.TempDir()
+	config.payloadSize = 1400
+	stale := []string{
+		filepath.Join(config.lostEventDirectory, ".airgap-lost-interrupted.tmp"),
+		filepath.Join(config.lostEventDirectory, ".airgap-archive-interrupted.zip.tmp"),
+	}
+	for _, path := range stale {
+		if err := os.WriteFile(path, []byte("partial"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const count = 12
+	paths := make([]string, count)
+	var wg sync.WaitGroup
+	for i := range paths {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			paths[i] = writeLostEvent(nil, fmt.Sprintf("topic_0_%d", i), bytes.Repeat([]byte{byte(i)}, 4096))
+		}(i)
+	}
+	wg.Wait()
+	for i, path := range paths {
+		if path == "" {
+			t.Fatalf("write %d failed", i)
+		}
+		payload, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(payload, bytes.Repeat([]byte{byte(i)}, 4096)) {
+			t.Fatalf("write %d is missing or incomplete: %v", i, err)
+		}
+	}
+	for _, path := range stale {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("interrupted temporary file was not removed: %v", err)
+		}
+	}
+}
+
+func TestLostEventDirectoryLockProtectsWrites(t *testing.T) {
+	saved := config
+	defer func() { config = saved }()
+	config = DefaultConfiguration()
+	config.lostEventDirectory = t.TempDir()
+	dir, err := os.Open(config.lostEventDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	if err := syscall.Flock(int(dir.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			syscall.Flock(int(dir.Fd()), syscall.LOCK_UN)
+		}
+	}()
+	done := make(chan string, 1)
+	go func() { done <- writeLostEvent(nil, "topic_0_1", []byte("original")) }()
+	select {
+	case path := <-done:
+		t.Fatalf("write bypassed the directory lock: %q", path)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := syscall.Flock(int(dir.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	locked = false
+	select {
+	case path := <-done:
+		if path == "" {
+			t.Fatal("write failed after releasing the lock")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("write did not resume after releasing the lock")
+	}
+}
+
 func TestEncodeForTransportCleartext(t *testing.T) {
 	saved := config
 	defer func() { config = saved }()
@@ -569,5 +674,260 @@ func TestEncodeForTransportEncryptionErrorIsReturned(t *testing.T) {
 
 	if _, err := encodeForTransport("transfer_0_1", []byte("hello"), false); err == nil {
 		t.Fatal("expected an error for an invalid symmetric key")
+	}
+}
+
+func TestFramingFailureSavesOriginalAndHandlesGuard(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		encrypted bool
+		guard     bool
+	}{
+		{"cleartext", false, true},
+		{"encrypted", true, true},
+		{"guard-disabled", false, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			saved := config
+			defer func() { config = saved }()
+			config = DefaultConfiguration()
+			config.lostEventDirectory = t.TempDir()
+			config.lostEventGuard = tt.guard
+			config.encryption = tt.encrypted
+			config.key = []byte("0123456789abcdef0123456789abcdef")
+			const id = "t_0_1"
+			config.payloadSize = 13 + uint16(len(id)) + 1
+			original := bytes.Repeat([]byte("x"), 65536)
+			transport := &captureTransport{}
+
+			if !kafkaHandlerWithContext(context.Background(), time.Time{}, transport, id, nil, time.Now(), original) {
+				t.Fatal("event processing should continue after handling the loss")
+			}
+			entries, err := os.ReadDir(config.lostEventDirectory)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("expected one saved original, got %d entries, error %v", len(entries), err)
+			}
+			savedPayload, err := os.ReadFile(filepath.Join(config.lostEventDirectory, entries[0].Name()))
+			if err != nil || !bytes.Equal(savedPayload, original) {
+				t.Fatalf("saved payload differs from original: %v", err)
+			}
+			if !tt.guard {
+				if len(transport.messages) != 0 {
+					t.Fatal("guard-disabled case sent a message")
+				}
+				return
+			}
+			cache := protocol.CreateMessageCache()
+			var payload []byte
+			for _, frame := range transport.messages {
+				kind, gotID, part, err := protocol.ParseMessage(frame, cache)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if part != nil {
+					if gotID != id {
+						t.Fatalf("guard ID = %q, want %q", gotID, id)
+					}
+					if tt.encrypted {
+						if !protocol.IsMessageType(kind, protocol.TYPE_MESSAGE) {
+							t.Fatalf("guard type = %d, want encrypted", kind)
+						}
+						part, err = protocol.Decrypt(part, config.key)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					payload = part
+				}
+			}
+			if !strings.HasPrefix(string(payload), lostEventPrefix) {
+				t.Fatalf("missing lost-event guard: %q", payload)
+			}
+		})
+	}
+}
+
+func TestUnencodableGuardLeavesOriginalUnacknowledged(t *testing.T) {
+	for _, tt := range []struct {
+		name, id   string
+		mtu        uint16
+		compressed bool
+		encrypted  bool
+		maxEvent   int
+	}{
+		{"header-too-large", "longtopic_0_1", 20, false, false, 0},
+		{"oversize-guard-header-too-large", "longtopic_0_1", 20, false, false, 1},
+		{"encryption-error-after-compression", "t_0_1", 1400, true, true, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			saved := config
+			defer func() { config = saved }()
+			config = DefaultConfiguration()
+			config.lostEventDirectory = t.TempDir()
+			config.payloadSize = tt.mtu
+			config.maxEventBytes = tt.maxEvent
+			config.encryption = tt.encrypted
+			config.key = []byte("invalid")
+			if tt.compressed {
+				config.compressWhenLengthExceeds = 1
+			}
+			original := bytes.Repeat([]byte("original"), 100)
+			transport := &captureTransport{}
+			if kafkaHandlerWithContext(context.Background(), time.Time{}, transport, tt.id, nil, time.Now(), original) {
+				t.Fatal("event with an unencodable guard was acknowledged")
+			}
+			if len(transport.messages) != 0 {
+				t.Fatal("unexpected frames sent")
+			}
+			entries, err := os.ReadDir(config.lostEventDirectory)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("expected one saved original, got %d entries, error %v", len(entries), err)
+			}
+			payload, err := os.ReadFile(filepath.Join(config.lostEventDirectory, entries[0].Name()))
+			if err != nil || !bytes.Equal(payload, original) {
+				t.Fatalf("saved payload differs from original: %v", err)
+			}
+		})
+	}
+}
+
+func TestReceiverFragmentLimitHandlesOversizedEvents(t *testing.T) {
+	const id = "topic_0_1"
+	const mtu = 1400
+	const capacity = mtu - 13 - len(id)
+	for _, tt := range []struct {
+		name      string
+		encrypted bool
+		length    int
+		wantGuard bool
+	}{
+		{"cleartext-at-limit", false, 2 * capacity, false},
+		{"cleartext-over-limit", false, 2*capacity + 1, true},
+		{"encrypted-at-limit", true, 2*capacity - protocol.EncryptionOverhead, false},
+		{"encrypted-over-limit", true, 2*capacity - protocol.EncryptionOverhead + 1, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			saved := config
+			defer func() { config = saved }()
+			config = DefaultConfiguration()
+			config.payloadSize = mtu
+			config.maxNrMessages = 2
+			config.encryption = tt.encrypted
+			config.key = []byte("0123456789abcdef0123456789abcdef")
+			config.lostEventDirectory = t.TempDir()
+			original := bytes.Repeat([]byte("x"), tt.length)
+			transport := &captureTransport{}
+			if !kafkaHandlerWithContext(context.Background(), time.Time{}, transport, id, nil, time.Now(), original) {
+				t.Fatal("event processing did not complete")
+			}
+			cache := protocol.CreateMessageCache()
+			cache.SetLimits(10, uint16(config.maxNrMessages))
+			var payload []byte
+			for _, frame := range transport.messages {
+				_, gotID, part, err := protocol.ParseMessage(frame, cache)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if part != nil {
+					if gotID != id {
+						t.Fatalf("message ID = %q, want %q", gotID, id)
+					}
+					if tt.encrypted {
+						part, err = protocol.Decrypt(part, config.key)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+
+					payload = part
+				}
+			}
+			entries, err := os.ReadDir(config.lostEventDirectory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantGuard {
+				if !strings.HasPrefix(string(payload), lostEventPrefix) || len(entries) != 1 {
+					t.Fatalf("expected a guard and saved original, got %q and %d files", payload, len(entries))
+				}
+				stored, err := os.ReadFile(filepath.Join(config.lostEventDirectory, entries[0].Name()))
+				if err != nil || !bytes.Equal(stored, original) {
+					t.Fatalf("saved event differs from original: %v", err)
+				}
+			} else if !bytes.Equal(payload, original) || len(entries) != 0 {
+				t.Fatalf("expected original delivery and no saved files; got %d bytes and %d files", len(payload), len(entries))
+			}
+		})
+	}
+}
+
+func TestReceiverFragmentLimitUsesCompressedSize(t *testing.T) {
+	saved := config
+	defer func() { config = saved }()
+	config = DefaultConfiguration()
+	config.payloadSize = 1400
+	config.maxNrMessages = 2
+	config.compressWhenLengthExceeds = 1
+	config.lostEventDirectory = t.TempDir()
+	original := bytes.Repeat([]byte("compressible"), 1000)
+	transport := &captureTransport{}
+	if !kafkaHandlerWithContext(context.Background(), time.Time{}, transport, "topic_0_1", nil, time.Now(), original) {
+		t.Fatal("compressed event processing failed")
+	}
+	if len(transport.messages) != 1 {
+		t.Fatalf("got %d frames, want one compressed frame", len(transport.messages))
+	}
+	_, _, payload, err := protocol.ParseMessage(transport.messages[0], protocol.CreateMessageCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+	decompressed, err := protocol.DecompressGzip(payload, len(original))
+	if err != nil || !bytes.Equal(decompressed, original) {
+		t.Fatalf("compressed event was not delivered intact: %v", err)
+	}
+	entries, err := os.ReadDir(config.lostEventDirectory)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("compressed event was unexpectedly saved as lost: %v", err)
+	}
+}
+
+func TestLostGuardTransportFailureLeavesEventUnacknowledged(t *testing.T) {
+	saved := config
+	savedStatus, savedPrevious := transportStatus, previousTransportStatus
+	defer func() {
+		config = saved
+		transportStatus, previousTransportStatus = savedStatus, savedPrevious
+	}()
+	config = DefaultConfiguration()
+	config.lostEventDirectory = t.TempDir()
+	config.payloadSize = 1400
+	config.maxEventBytes = 1
+	config.transport = "tcp"
+	config.tcpRetryTimes = 0
+	config.tcpRetryInterval = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	transport := udpFuzzHandler{
+		SendMessagesFunc: func([][]byte) error {
+			calls++
+			cancel()
+			return errors.New("transport unavailable")
+		},
+	}
+	original := []byte("original")
+	if kafkaHandlerWithContext(ctx, time.Time{}, transport, "topic_0_1", nil, time.Now(), original) {
+		t.Fatal("event was acknowledged despite failed guard delivery")
+	}
+	if calls != 1 {
+		t.Fatalf("got %d transport attempts, want 1", calls)
+	}
+	entries, err := os.ReadDir(config.lostEventDirectory)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected one saved original, got %d entries, error %v", len(entries), err)
+	}
+	payload, err := os.ReadFile(filepath.Join(config.lostEventDirectory, entries[0].Name()))
+	if err != nil || !bytes.Equal(payload, original) {
+		t.Fatalf("saved payload differs from original: %v", err)
 	}
 }

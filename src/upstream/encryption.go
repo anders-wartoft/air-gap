@@ -141,7 +141,12 @@ func sendNewKey(conn *udp.UDPConn) {
 		logging.Str("airgap.message.id", guard),
 		logging.Int("airgap.message.size", int64(len(toSend))),
 	), "Sending key exchange message...")
-	messages := protocol.FormatMessage(protocol.TYPE_KEY_EXCHANGE, "KEY_UPDATE#", toSend, config.payloadSize)
+	messages, err := protocol.FormatMessageChecked(protocol.TYPE_KEY_EXCHANGE, "KEY_UPDATE#", toSend, config.payloadSize)
+	if err != nil {
+		Logger.Errorf(logging.Event(logging.EventCryptoKeyExchange, logging.Failure(), logging.ErrorType(err)),
+			"Could not format encryption key: %v", err)
+		return
+	}
 	if conn != nil {
 		udpErr := conn.SendMessages(messages)
 		if udpErr != nil {

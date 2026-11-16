@@ -40,7 +40,11 @@ func memoryStallMessage(c TransferConfiguration, notice memoryStallNotice) strin
 }
 
 func sendMemoryStallStatus(transport TransportClient, c TransferConfiguration, message string) error {
-	return transport.SendMessages(protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS", []byte(message), c.payloadSize))
+	messages, err := protocol.FormatMessageChecked(protocol.TYPE_STATUS, "STATUS", []byte(message), c.payloadSize)
+	if err != nil {
+		return err
+	}
+	return transport.SendMessages(messages)
 }
 
 // The monitor owns one delivery at a time, with no pending-message queue.

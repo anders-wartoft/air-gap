@@ -292,6 +292,7 @@ func seedRetention(args []string) {
 		{"delete-me.zip", "expired archive", 70 * 24 * time.Hour},
 		{`compress "quoted"\backslash.bin`, "compress payload", 10 * 24 * time.Hour},
 		{"fresh.bin", "fresh payload", 24 * time.Hour},
+		{".airgap-lost-interrupted.tmp", "partial payload", time.Hour},
 	}
 	for _, file := range files {
 		path := filepath.Join(*dir, file.name)
@@ -311,7 +312,7 @@ func verifyRetention(args []string) {
 	dir := flags.String("dir", "/airgap/work/lost-events", "lost-event directory to verify")
 	_ = flags.Parse(args)
 
-	for _, name := range []string{"delete-me.bin", "delete-me.zip", `compress "quoted"\backslash.bin`} {
+	for _, name := range []string{"delete-me.bin", "delete-me.zip", `compress "quoted"\backslash.bin`, ".airgap-lost-interrupted.tmp"} {
 		if _, err := os.Stat(filepath.Join(*dir, name)); !os.IsNotExist(err) {
 			fatalf("%s should have been removed, stat error=%v", name, err)
 		}
@@ -357,7 +358,7 @@ func verifyRetention(args []string) {
 func verifyStatus(args []string) {
 	flags := flag.NewFlagSet("verify-status", flag.ExitOnError)
 	path := flags.String("file", "", "Kafka console-consumer output")
-	expected := flags.Int("expected", 3, "expected truncation status records")
+	expected := flags.Int("expected", 4, "expected truncation status records")
 	_ = flags.Parse(args)
 	file, err := os.Open(*path)
 	if err != nil {
@@ -403,10 +404,10 @@ func verifyStatus(args []string) {
 	if records != *expected {
 		fatalf("truncation status records=%d, want %d", records, *expected)
 	}
-	if actions["deleted"] != 2 || actions["compressed"] != 1 {
-		fatalf("status actions=%v, want deleted=2 compressed=1", actions)
+	if actions["deleted"] != 2 || actions["compressed"] != 1 || actions["write_failed"] != 1 {
+		fatalf("status actions=%v, want deleted=2 compressed=1 write_failed=1", actions)
 	}
-	for _, name := range []string{"delete-me.bin", "delete-me.zip", `compress "quoted"\backslash.bin`} {
+	for _, name := range []string{"delete-me.bin", "delete-me.zip", `compress "quoted"\backslash.bin`, ".airgap-lost-interrupted.tmp"} {
 		if names[name] != 1 {
 			fatalf("status for %q occurred %d times, want 1; names=%v", name, names[name], names)
 		}

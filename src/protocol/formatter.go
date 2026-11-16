@@ -4,6 +4,8 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
+	"math"
 	"time"
 
 	"sitia.nu/airgap/src/logging"
@@ -61,8 +63,48 @@ func CalculateChecksum(message []byte) string {
 *
 */
 
-// Return a message in the format that can be sent over the network
+// FormatMessage returns nil and logs an error if the message cannot be framed.
 func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][]byte {
+	result, err := FormatMessageChecked(messageType, id, message, mtu)
+	if err != nil {
+		Logger.Errorf(logging.Event(logging.EventProtocolEncode, logging.Failure(), logging.ErrorType(err)),
+			"Cannot format message: %v", err)
+	}
+	return result
+}
+
+// ValidateMessageSize checks whether a payload can be represented on the wire.
+func ValidateMessageSize(id string, length int, mtu uint16) error {
+	return ValidateMessageSizeWithLimit(id, length, mtu, math.MaxUint16)
+}
+
+// ValidateMessageSizeWithLimit also enforces the receiving peer's fragment limit.
+func ValidateMessageSizeWithLimit(id string, length int, mtu uint16, maxFragments int) error {
+	if maxFragments < 1 || maxFragments > math.MaxUint16 {
+		return fmt.Errorf("invalid fragment limit %d", maxFragments)
+	}
+	if length < 0 {
+		return fmt.Errorf("negative message length %d", length)
+	}
+	if int(mtu) < 13 || len(id) > int(mtu)-13 || (length > 0 && len(id) == int(mtu)-13) {
+		return fmt.Errorf("header and payload do not fit in MTU %d", mtu)
+	}
+	if length > math.MaxInt32 {
+		return fmt.Errorf("message length %d exceeds maximum %d bytes", length, math.MaxInt32)
+	}
+	capacity := int(mtu) - 13 - len(id)
+	if length > 0 && 1+(length-1)/capacity > maxFragments {
+		return fmt.Errorf("message exceeds maximum of %d fragments", maxFragments)
+	}
+	return nil
+}
+
+// FormatMessageChecked returns an error rather than emitting an invalid frame.
+func FormatMessageChecked(messageType uint8, id string, message []byte, mtu uint16) ([][]byte, error) {
+	if err := ValidateMessageSize(id, len(message), mtu); err != nil {
+		return nil, err
+	}
+	remainingLength := int32(int(mtu) - 13 - len(id))
 	var result [][]byte
 	// log.Printf("message length: %d", len(message))
 	payloadLength := int32(len(message))
@@ -70,7 +112,7 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 	// Special case: empty payload must still produce exactly one packet so that the
 	// downstream sequence is contiguous (e.g. for filtered events that must fill gaps).
 	if payloadLength == 0 {
-		part := make([]byte, 0, 13+len(id))
+		part := make([]byte, 0, int(mtu)-int(remainingLength))
 		b := make([]byte, 2)
 		part = append(part, messageType)
 		binary.BigEndian.PutUint16(b, 1)
@@ -87,7 +129,7 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 		part = append(part, b...) // payload length = 0
 		// no payload bytes
 		result = append(result, part)
-		return result
+		return result, nil
 	}
 
 	// This call will calculate the correct number of messages
@@ -100,10 +142,8 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 	var messageNumber uint16 = 1
 	var position int32 = 0
 	for position < payloadLength {
-		partCapacity := 13 + len(id) + int(payloadLength-position)
-		if partCapacity > int(mtu) {
-			partCapacity = int(mtu)
-		}
+		fragmentLength := min(remainingLength, payloadLength-position)
+		partCapacity := int(mtu) - int(remainingLength-fragmentLength)
 		part := make([]byte, 0, partCapacity)
 		// Create a byte slice with enough space to hold a uint8
 		b := make([]byte, 1)
@@ -140,13 +180,6 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 		// 4 bytes checksum
 		// 2 bytes length of payload
 		// payload ([] byte)
-		var remainingLength int32 = int32(mtu) - 13 - int32(len(id))
-
-		if remainingLength < 0 {
-			Logger.Panicf(logging.Event(logging.EventProtocolEncode,
-				logging.Failure(),
-			), "Error. The Header is longer than the MTU.")
-		}
 		var payload []byte = []byte{}
 		var checksum string
 		if payloadLength-position <= remainingLength {
@@ -181,9 +214,9 @@ func FormatMessage(messageType uint8, id string, message []byte, mtu uint16) [][
 			// Add the message to the result
 			result = append(result, part)
 		}
-		position += int32(remainingLength)
+		position += int32(len(payload))
 		messageNumber++
 	}
 	// log.Printf("Formatted message into %d parts\n", len(result))
-	return result
+	return result, nil
 }

@@ -399,7 +399,7 @@ resend bundles forever, or refuse to commit it, which stalls the partition.
 Instead upstream forwards a short guard payload under the *same* message id:
 
 ```text
-AIRGAP LOST EVENT: Event transfer 3:91824 couldn't be delivered due to message size 12582912 bytes exceeds maxEventBytes 6291456 bytes. The message can be found in its entirety on upstream machine Upstream_1, in /airgap/lost_events/. Max message length is 6291456.
+AIRGAP LOST EVENT: Event transfer 3:91824 couldn't be delivered due to message size 12582912 bytes exceeds maxEventBytes 6291456 bytes. Original event file on upstream machine Upstream_1: /airgap/lost_events/transfer_3_91824-123.bin. Max message length is 6291456.
 ```
 
 Downstream sees a continuous offset sequence, so the event is not resent, and
@@ -408,12 +408,23 @@ also reported through the configurable `lostEvent` event, always carries
 `eventName=message.lost`, and is counted as `lost_events` /
 `total_lost_events` in the statistics record.
 
+Framing failures, including encoded messages over 2,147,483,647 bytes or the
+upstream `maxNrMessages` limit, use the same lost-event handling. Set upstream
+`maxNrMessages` to no more than the downstream value; both default to 4096.
+The limit applies after compression and encryption. The saved payload is the
+original before compression or encryption. Saving is disabled when
+`lostEventDirectory` is empty; write failures are logged and do not prevent
+guard delivery. `{lostEventFile}` reports the actual file or says it was not
+saved, so use it in custom templates instead of asserting that a file exists.
+If an enabled guard cannot itself be encoded, upstream leaves the record
+unacknowledged instead of sending an empty message.
+
 ```properties
 maxEventBytes=6291456
 lostEventGuard=true
-lostEvent=INFO:Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. The message can be found in its entirety on upstream machine {upstream_id}, in {lostEventDirectory}.
+lostEvent=INFO:Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. Original event file on upstream machine {upstream_id}: {lostEventFile}.
 airgapLostEventMessageFormat=text
-airgapLostEventMessage=AIRGAP LOST EVENT: Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. The message can be found in its entirety on upstream machine {upstream_id}, in {lostEventDirectory}. Max message length is {kafkaMaxMessageBytes}.
+airgapLostEventMessage=AIRGAP LOST EVENT: Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. Original event file on upstream machine {upstream_id}: {lostEventFile}. Max message length is {kafkaMaxMessageBytes}.
 lostEventDirectory=/airgap/lost_events/
 lostEventDirectoryCompressAfterDays=7
 lostEventDirectoryDeleteAfterDays=60
@@ -424,6 +435,7 @@ lostMessageTruncatedMessage=AIRGAP LOST MESSAGE TRUNCATED: The message file {fil
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `maxEventBytes` | `0` (disabled) | Largest record upstream forwards. Larger records are replaced by a guard. |
+| `maxNrMessages` | `4096` | Maximum fragments upstream sends for an event; set no higher than downstream's `maxNrMessages`. |
 | `lostEventGuard` | `true` | When `false`, an undeliverable record is discarded instead of being replaced by a guard. |
 | `lostEvent` | `INFO:...` | Log record written when an event is lost. `NONE` turns it off. |
 | `airgapLostEventMessageFormat` | `text` | Rendering mode for the guard payload: `text` or `json`. |
@@ -438,7 +450,17 @@ lostMessageTruncatedMessage=AIRGAP LOST MESSAGE TRUNCATED: The message file {fil
 
 Retaining the original payload makes an ALE auditable, but an unbounded
 `lostEventDirectory` can fill the filesystem and affect Kafka, logging, and the
-rest of the host. The recommended solution is layered:
+rest of the host. For production, put `lostEventDirectory` on a separate
+filesystem or partition, with sufficient capacity and space monitoring, so
+lost-event files cannot fill the filesystem used by the operating system,
+Kafka, or logs. Ensure the underlying storage is also capacity-isolated.
+If the lost-event filesystem fills, saving originals can still fail.
+Lost-event writes and retention use an advisory directory lock; all Airgap
+instances sharing the directory must support it. Other programs must not
+modify files there. Interrupted temporary writes are removed on the next
+lost-event write.
+
+The recommended retention policy is layered:
 
 1. Alert on filesystem utilization before upstream needs to reclaim space.
 2. Compress older payloads to reduce their footprint.
@@ -898,6 +920,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | groupID | AIRGAP_UPSTREAM_GROUP_ID | | The prefix for the group to use when reading from Kafka. The complete group id will be this value, concatenated with the name from the sendingThreads. This will give each sending thread a unique group id |
 | kafkaRetryInterval | AIRGAP_UPSTREAM_KAFKA_RETRY_INTERVAL | 5000 | Positive milliseconds to wait between failed Kafka consumer startup attempts (`source=kafka`). Temporary network/broker/not-ready errors retry indefinitely at WARN level; identifiable configuration, TLS certificate, and authentication/authorization errors remain fatal. Also accepts `--kafkaRetryInterval=N`. |
 | payloadSize | AIRGAP_UPSTREAM_PAYLOAD_SIZE | 0 | 0 - ask the NIC for the MTU and subtract 68 bytes from that (IPv6 + UDP header) or set manually to the payload size (available size of UDP packets, i.e., MTU - headers) |
+| maxNrMessages | AIRGAP_UPSTREAM_MAX_NR_MESSAGES | 4096 | Maximum fragments per upstream event; configure no higher than downstream's `maxNrMessages`. |
 | from | AIRGAP_UPSTREAM_FROM | | Don't read anything from Kafka that was delivered to Kafka before this timestamp |
 | enryption | AIRGAP_UPSTREAM_ENCRYPTION | false | true - encrypt all payload when sending to downstream air-gap. Status messages are still in clear text to help configuration and set-up |
 | publicKeyFile | AIRGAP_UPSTREAM_PUBLIC_KEY_FILE | | If encryption is on, this is the public key of the receiver |
@@ -1055,7 +1078,7 @@ The four settings above protect the downstream listening port against denial-of-
 **When to change the defaults:**
 
 - **`maxCacheEntries`** — increase only if you see `"Fragment cache full"` warnings during normal high-throughput operation. Estimate the required value as: `peak concurrent in-flight multi-part messages × average fragments per message`. On a heavily loaded deployment receiving 1 MiB payloads at MTU 1500, ~730 cache entries are active per message; 100 000 covers roughly 136 concurrent such messages.
-- **`maxNrMessages`** — leave at the default unless upstream is configured to produce payloads larger than `maxNrMessages × (MTU − protocol header)` bytes. For a 1 MiB payload cap, anything above ~750 is sufficient.
+- **`maxNrMessages`** — keep this at least as large as upstream's `maxNrMessages`. Raise both settings together when larger fragmented events are required.
 - **`maxTCPConnections`** — relevant only when `transport=tcp`. Match to the number of legitimate concurrent upstream senders plus a small safety margin (e.g., `numUpstreamInstances + 10`).
 - **`keyExchangeMinIntervalSecs`** — keep at `1` or higher in all production deployments. The only reason to set it to `0` is during testing when you want to cycle keys very rapidly.
 

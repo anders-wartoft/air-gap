@@ -2,6 +2,24 @@
 
 ## 0.1.21-SNAPSHOT
 
+### Protocol safety
+
+- Bounded protocol frame allocation arithmetic and reject invalid frames,
+  messages larger than 2,147,483,647 bytes, and more than 65,535 fragments.
+  Upstream saves affected originals and sends lost-event guards when configured;
+  if a guard cannot be encoded, the record remains unacknowledged.
+  The lost-event log now reports `guard_prepared` rather than claiming that a
+  guard was sent before transport delivery. Resend logs unencodable events
+  without sending an empty message; it has no lost-event storage or guard.
+- Upstream now defaults to at most 4,096 fragments per event, matching the
+  downstream default; set upstream `maxNrMessages` no higher than downstream's
+  value. Events exceeding it use lost-event handling, rather than producing
+  frames that the default receiver rejects.
+- Lost-event writes and retention are serialized with a directory lock.
+  Payloads are published after complete writes; interrupted temporary files
+  are removed on the next lost-event write. Default guard and log messages
+  report the actual file or a save failure.
+
 ### End-to-end Kafka TCP/TLS throughput
 
 - Fixed UDP `SO_RXQ_OVFL` accounting to include the first reported socket

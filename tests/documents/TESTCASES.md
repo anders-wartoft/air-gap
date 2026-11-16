@@ -5319,7 +5319,7 @@ Upstream uses [upstream-airgap-32-docker.properties](../../config/testcases/upst
 maxEventBytes=1048576
 lostEventGuard=true
 tcpTLSCAFile=value "quoted"\backslash
-lostEvent=ERROR:Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. The message can be found in its entirety on upstream machine {upstream_id}, in {lostEventDirectory}.
+lostEvent=ERROR:Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. Original event file on upstream machine {upstream_id}: {lostEventFile}.
 airgapLostEventMessageFormat=json
 airgapLostEventMessage={"eventName":"message.lost","severityText":"ERROR","body":{"stringValue":"AIRGAP LOST EVENT: Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}"},"attributes":[{"key":"messaging.destination.name","value":{"stringValue":"{topic_name}"}},{"key":"messaging.destination.partition.id","value":{"stringValue":"{partition}"}},{"key":"messaging.kafka.offset","value":{"intValue":"{row}"}},{"key":"error.type","value":{"stringValue":"airgap.event.lost"}},{"key":"airgap.event.lost.reason","value":{"stringValue":"{reason}"}},{"key":"service.instance.id","value":{"stringValue":"{upstreamId}"}},{"key":"airgap.event.lost.file","value":{"stringValue":"{lostEventFile}"}},{"key":"airgap.message.size","value":{"intValue":"{eventBytes}"}},{"key":"airgap.message.max_size","value":{"intValue":"{kafkaMaxMessageBytes}"}},{"key":"airgap.test.escape","value":{"stringValue":"{tcpTLSCAFile}"}}]}
 lostEventDirectory=/airgap/work/lost-events
@@ -5413,11 +5413,15 @@ The seed helper creates:
 | `delete-me.zip` | 70 days | deleted |
 | `compress "quoted"\backslash.bin` | 10 days | zipped, source removed, original mtime retained |
 | `fresh.bin` | 1 day | retained unchanged; no status |
+| `.airgap-lost-interrupted.tmp` | 1 hour | removed as an interrupted write |
 
 Upstream is configured with:
 
 ```properties
 lostEventDirectory=/airgap/work/lost-events
+payloadSize=512
+maxEventBytes=0
+maxNrMessages=4
 lostEventDirectoryCompressAfterDays=7
 lostEventDirectoryDeleteAfterDays=60
 lostMessageTruncatedMessageFormat=json
@@ -5431,19 +5435,21 @@ being consumed again by the same upstream.
 ### Automated procedure
 
 1. Build the Linux binaries and helper.
-2. Start Kafka, seed the four retained files, and start downstream and upstream.
-3. Produce one 4 KiB record above `maxEventBytes=1024`, triggering retention
-   before the original payload is retained.
+2. Start Kafka, seed the retained and interrupted files, and start downstream and upstream.
+3. Produce one 4 KiB record requiring more than four fragments, triggering
+   retention before the original payload is retained. Downstream also has
+   `maxNrMessages=4`.
 4. Wait for source consumer lag zero.
 5. Verify both 70-day files are absent.
 6. Verify the 10-day source is absent, its ZIP archive is readable, both the
    archive and entry remain approximately 10 days old, and the payload is
    intact.
 7. Verify `fresh.bin` remains intact.
-8. Consume `airgap-internal` and require exactly three valid JSON records with
-   `eventName=message.lost.truncated`: two `deleted` and one `compressed`.
+8. Consume `airgap-internal` and require exactly four valid JSON records with
+   `eventName=message.lost.truncated`: two `deleted`, one `compressed`, and
+   one `write_failed` for the interrupted write.
    Require the quote and backslash in the compressed filename to round-trip.
-9. Consume `transfer` and require the ALE guard but no truncation status,
+9. Consume `transfer` and require the fragment-limit ALE guard but no truncation status,
    proving `TYPE_STATUS`/`STATUS` was routed only to `internalTopic`.
 10. Require both processes running with zero restarts.
 
@@ -5451,7 +5457,7 @@ being consumed again by the same upstream.
 
 ```text
 retention policy: archive age preserved, fresh=true, expired=false
-truncation status routing: records=3 actions=compressed:1 deleted:2
+truncation status routing: records=4 actions=compressed:1 deleted:2 write_failed:1
 guard delivery: observed
 status isolation: isolated to internal topic
 partition progress: lag 0

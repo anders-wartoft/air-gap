@@ -175,7 +175,7 @@ is mandatory.
    of REQ-8c. On top of every configuration property it may use
    `{topic_name}`, `{partition}`, `{row}`, `{reason}`, `{eventBytes}` and
    `{lostEventFile}`. The default is
-   `AIRGAP LOST EVENT: Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. The message can be found in its entirety on upstream machine {upstream_id}, in {lostEventDirectory}. Max message length is {kafkaMaxMessageBytes}.`
+   `AIRGAP LOST EVENT: Event {topic_name} {partition}:{row} couldn't be delivered due to {reason}. Original event file on upstream machine {upstream_id}: {lostEventFile}. Max message length is {kafkaMaxMessageBytes}.`
    The `AIRGAP LOST EVENT` marker is what downstream and operators search for
    to find every event that was lost in transfer.
 4. `airgapLostEventMessageFormat` selects `text` (the default) or `json`. In
@@ -189,11 +189,11 @@ is mandatory.
 6. When `lostEventDirectory` is set (default `/airgap/lost_events/`), the
    original payload is written there as one file per lost event before the
    guard is sent. A failed write is logged but never prevents delivery of the
-   guard. When it is empty, the guard states that no directory is configured
-   rather than pointing at one.
+   guard. The default guard reports the actual path or that saving failed; when
+   the directory is empty it states that no directory is configured.
 7. Every lost event produces the configurable `lostEvent` record, which always
    carries `eventName=message.lost`, the message id, topic, partition, offset,
-   original size, reason, whether a guard was sent, and the stored file path
+   original size, reason, whether a guard was prepared, and the stored file path
    when one was written.
 8. Lost events are counted and reported as `lost_events` and
    `total_lost_events` in the periodic statistics record.
@@ -223,6 +223,12 @@ is mandatory.
     JSON uses the same validated and escaping-safe object rendering as the ALE
     guard. `lostMessageTruncatedMessage=NONE` disables the configurable local
     record and status message.
+15. Upstream `maxNrMessages` defaults to 4096 and limits the encoded event's
+    fragments; exceeding it triggers lost-event handling. It must not exceed
+    the downstream `maxNrMessages` setting.
+16. Directory locking serializes lost-event writes and retention, including
+    across cooperating processes. A completed file is published by rename;
+    interrupted temporary writes are removed on the next lost-event write.
 
 Records larger than `kafkaMaxMessageBytes` are skipped by the Kafka client
 before upstream sees them and therefore cannot be replaced by a guard.

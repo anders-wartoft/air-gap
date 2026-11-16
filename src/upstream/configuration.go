@@ -16,6 +16,7 @@ import (
 	"sitia.nu/airgap/src/internal/pinnedtls"
 	"sitia.nu/airgap/src/internal/properties"
 	"sitia.nu/airgap/src/logging"
+	"sitia.nu/airgap/src/protocol"
 )
 
 type TransferConfiguration struct {
@@ -83,6 +84,7 @@ type TransferConfiguration struct {
 	memoryHighWatermarkLog              string                   // LEVEL:message written when Kafka record admission is paused, or NONE to stay silent. See messages.go for the template rules
 	memoryLowWatermarkLog               string                   // LEVEL:message written when Kafka record admission resumes, or NONE (default) to stay silent
 	maxEventBytes                       int                      // largest Kafka record upstream will forward; larger records are replaced by an Airgap Lost Event guard. 0 (default) disables the ceiling
+	maxNrMessages                       int                      // maximum fragments the downstream accepts per message
 	lostEventGuard                      bool                     // emit an Airgap Lost Event guard in place of records that cannot be delivered, keeping the offset sequence continuous (default true)
 	lostEvent                           string                   // LEVEL:message written when an event is lost, or NONE to stay silent. Lost-event placeholders are listed in lostEventContext
 	airgapLostEventMessage              string                   // payload delivered in place of a lost record. Keep the AIRGAP LOST EVENT prefix so downstream can find every lost event
@@ -131,6 +133,7 @@ func DefaultConfiguration() TransferConfiguration {
 	config.memoryHighWatermarkLog = defaultMemoryHighWatermarkLog
 	config.memoryLowWatermarkLog = defaultMemoryLowWatermarkLog
 	config.maxEventBytes = 0
+	config.maxNrMessages = int(protocol.DefaultMaxNrMessages)
 	config.lostEventGuard = true
 	config.lostEvent = defaultLostEvent
 	config.airgapLostEventMessage = defaultAirgapLostEventMessage
@@ -370,10 +373,13 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 			}
 		case "kafkaFetchDefaultBytes", "kafkaMaxMessageBytes", "kafkaChannelBufferSize", "kafkaMaxProcessingTimeMs", "kafkaRetryInterval",
 			"memoryHighWatermarkPercent", "memoryLowWatermarkPercent",
-			"memoryCheckIntervalMs", "memoryStallStatusIntervalSeconds", "goMemoryLimitPercent", "maxEventBytes":
+			"memoryCheckIntervalMs", "memoryStallStatusIntervalSeconds", "goMemoryLimitPercent", "maxEventBytes", "maxNrMessages":
 			tmp, err := strconv.Atoi(value)
 			if err != nil || tmp < 0 {
 				return result, fmt.Errorf("Error in config %s. Illegal value: %s. Legal values are non-negative integers", key, value)
+			}
+			if key == "maxNrMessages" && (tmp < 1 || tmp > math.MaxUint16) {
+				return result, fmt.Errorf("invalid maxNrMessages %s: legal values are 1-65535", value)
 			}
 			switch key {
 			case "kafkaFetchDefaultBytes":
@@ -398,6 +404,8 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 				result.goMemoryLimitPercent = tmp
 			case "maxEventBytes":
 				result.maxEventBytes = tmp
+			case "maxNrMessages":
+				result.maxNrMessages = tmp
 			}
 			Logger.Infof(configApplied(key, tmp), "%s: %d", key, tmp)
 		case "lostEventGuard":
@@ -740,6 +748,7 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	applyIntEnvironment(prefix, "MEMORY_STALL_STATUS_INTERVAL_SECONDS", "memoryStallStatusIntervalSeconds", &config.memoryStallStatusIntervalSeconds)
 	applyIntEnvironment(prefix, "GO_MEMORY_LIMIT_PERCENT", "goMemoryLimitPercent", &config.goMemoryLimitPercent)
 	applyIntEnvironment(prefix, "MAX_EVENT_BYTES", "maxEventBytes", &config.maxEventBytes)
+	applyIntEnvironment(prefix, "MAX_NR_MESSAGES", "maxNrMessages", &config.maxNrMessages)
 	if v := os.Getenv(prefix + "LOST_EVENT_GUARD"); v != "" {
 		tmp, err := strconv.ParseBool(v)
 		if err != nil {
@@ -1013,10 +1022,13 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			config.compressWhenLengthExceeds = v
 		case "kafkaFetchDefaultBytes", "kafkaMaxMessageBytes", "kafkaChannelBufferSize", "kafkaMaxProcessingTimeMs", "kafkaRetryInterval",
 			"memoryHighWatermarkPercent", "memoryLowWatermarkPercent",
-			"memoryCheckIntervalMs", "memoryStallStatusIntervalSeconds", "goMemoryLimitPercent", "maxEventBytes":
+			"memoryCheckIntervalMs", "memoryStallStatusIntervalSeconds", "goMemoryLimitPercent", "maxEventBytes", "maxNrMessages":
 			v, err := strconv.Atoi(value)
 			if err != nil || v < 0 {
 				Logger.Fatalf(configInvalid(key, value), "Error parsing --%s: %s. Legal values are non-negative integers", key, value)
+			}
+			if key == "maxNrMessages" && (v < 1 || v > math.MaxUint16) {
+				Logger.Fatalf(configInvalid(key, value), "Error parsing --maxNrMessages: %s. Legal values are 1-65535", value)
 			}
 			switch key {
 			case "kafkaFetchDefaultBytes":
@@ -1041,6 +1053,8 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				config.goMemoryLimitPercent = v
 			case "maxEventBytes":
 				config.maxEventBytes = v
+			case "maxNrMessages":
+				config.maxNrMessages = v
 			}
 		case "lostEventGuard":
 			v, err := strconv.ParseBool(value)
@@ -1356,6 +1370,9 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 	if result.lostEventDirectoryDeleteAfterDays < 0 {
 		Logger.Fatalf(configInvalid("lostEventDirectoryDeleteAfterDays", result.lostEventDirectoryDeleteAfterDays), "Invalid lostEventDirectoryDeleteAfterDays: %d. Legal values are non-negative integers", result.lostEventDirectoryDeleteAfterDays)
 	}
+	if result.maxNrMessages < 1 || result.maxNrMessages > math.MaxUint16 {
+		Logger.Fatalf(configInvalid("maxNrMessages", result.maxNrMessages), "Invalid maxNrMessages: %d. Legal values are 1-65535", result.maxNrMessages)
+	}
 	// Records larger than kafkaMaxMessageBytes are skipped by the Kafka client
 	// before upstream ever sees them, so no lost-event guard can be produced
 	// for them. Keeping maxEventBytes below that ceiling makes every oversized
@@ -1511,6 +1528,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Infof(configApplied("memoryStallStatusIntervalSeconds", config.memoryStallStatusIntervalSeconds), "  memoryStallStatusIntervalSeconds: %d", config.memoryStallStatusIntervalSeconds)
 	Logger.Infof(configApplied("goMemoryLimitPercent", config.goMemoryLimitPercent), "  goMemoryLimitPercent: %d", config.goMemoryLimitPercent)
 	Logger.Infof(configApplied("maxEventBytes", config.maxEventBytes), "  maxEventBytes: %d", config.maxEventBytes)
+	Logger.Infof(configApplied("maxNrMessages", config.maxNrMessages), "  maxNrMessages: %d", config.maxNrMessages)
 	Logger.Infof(configApplied("lostEventGuard", config.lostEventGuard), "  lostEventGuard: %t", config.lostEventGuard)
 	Logger.Infof(configApplied("lostEvent", config.lostEvent), "  lostEvent: %s", config.lostEvent)
 	Logger.Infof(configApplied("airgapLostEventMessage", config.airgapLostEventMessage), "  airgapLostEventMessage: %s", config.airgapLostEventMessage)
