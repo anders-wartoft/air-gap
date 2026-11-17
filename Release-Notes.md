@@ -1,5 +1,21 @@
 # Release Notes
 
+## Unreleased
+
+### UDP receive throughput
+
+- UDP reception reads up to 64 datagrams per batch on Linux, without waiting
+  for a full batch or updating a deadline per datagram. Bounded, reusable batch
+  storage preserves the configured datagram queue capacity even for short
+  batches and reduces allocation and channel overhead; handler workers no longer
+  pin OS threads. Closing the receiver wakes idle reads, drains read batches,
+  and joins workers. Socket setup errors are now reported, and startup logs
+  show requested and effective receive-buffer sizes. UDP statistics expose read
+  batch/datagram totals and sampled queue high-water occupancy.
+- Added TC-53, a Docker UDP-to-Kafka regression test for sparse traffic and
+  repeated bursts after idle periods, checking payload integrity, identities,
+  and socket drops. Workload settings support longer deployment qualification.
+
 ## 0.1.21-SNAPSHOT
 
 ### Protocol safety
