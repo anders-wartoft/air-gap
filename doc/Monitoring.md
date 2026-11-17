@@ -98,6 +98,46 @@ cannot be distinguished.
 
 **Critical Limitation:** In virtualized environments (VMware, KVM, VirtualBox), SO_RXQ_OVFL will show **zero drops** even if packets are lost at the host NIC, virtual switch, or VM NIC driver. This can create false confidence that the air-gap will work in production when testing between VMs on the same host.
 
+### UDP receive capacity and CPU contention
+
+On Linux, downstream reads up to 64 datagrams at a time; sparse traffic is
+delivered without waiting for a full batch. Other supported platforms read
+one datagram at a time through the same bounded batch pipeline. Socket readers
+copy into reusable, compact batches, and workers release each batch only after
+all callbacks have returned. Callbacks must not retain the input buffer after
+returning; protocol assembly and the Kafka writer copy retained payloads.
+
+`channelBufferSize` remains the maximum number of queued datagrams, counted
+across batches. On Linux each batch holds at most
+`min(64, channelBufferSize)` datagrams (one on other platforms). Short batches
+do not reduce the datagram budget. In-flight reader and worker batches are
+additional, bounded by `numReceivers` each. The reusable-storage cache is also
+bounded; oversized storage is shrunk before enqueueing a smaller batch. No
+unbounded queue is used to conceal overload.
+
+Startup logs report `SO_RCVBUF requested=... effective=...` for each socket.
+Linux normally reports twice the requested value for kernel bookkeeping, subject
+to host limits. Setting `net.core.rmem_max` raises a ceiling, not the guaranteed
+receive capacity. Socket-option failures are reported rather than ignored.
+
+UDP statistics additionally include:
+
+- `udp_read_batches_total`: successful nonempty reads since process start.
+- `udp_read_datagrams_total`: datagrams read, including any rejected as truncated.
+  Divide its increase by the increase in batches to estimate actual batch size.
+- `udp_queue_batches_high_water`: largest queue occupancy sampled immediately
+  after a reader enqueues a batch. This is a lower bound on peak occupancy,
+  measured in batches, not datagrams.
+
+Buffers absorb short bursts, not a sustained CPU deficit or a blocked Kafka
+pipeline. Monitor CPU run queues and scheduling delays together with socket drops
+and Kafka throughput. `SO_REUSEPORT` normally distributes unicast by flow, so a
+single fixed source/destination pair may concentrate on one socket regardless of
+`numReceivers`. Validate cold starts after idle periods as well as steady traffic.
+Where downstream shares CPUs with dedup or other services, consider relative
+CPU weights in the relevant systemd slices, or additional/reserved CPU capacity.
+No scheduler priority or GC setting is changed automatically.
+
 ### Where Packets Can Be Dropped
 
 Here's the complete packet path and where drops can occur:

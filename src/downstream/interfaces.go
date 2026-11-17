@@ -5,6 +5,7 @@ package downstream
 // TransportReceiver defines the interface for any transport protocol (UDP, TCP, etc.)
 // The handler processes incoming messages regardless of transport type
 // The protocol parsing remains the same for all transports
+// Handlers must copy message data they retain after returning.
 type TransportReceiver interface {
 	Listen(ip string, port int, rcvBufSize int, handler func([]byte), mtu uint16, stopChan <-chan struct{}, numReceivers int)
 	Close() error

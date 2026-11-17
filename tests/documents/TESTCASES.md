@@ -6739,3 +6739,69 @@ the overdue-record safety limit aborts the run. In that case, report the
 actual measured duration, not a five-minute result, and do not classify all
 remaining outstanding records as confirmed transmission losses.
 `-pause` is unsupported.
+
+## TC-53 — UDP receiver batching and loss regression
+
+* Runner: `./run-testcases.sh --log-dir tmp/logs 53`
+* Requires Go and Docker.
+
+This isolated fixture builds the actual downstream binary for the Docker
+host's architecture and sends production-protocol UDP datagrams directly to
+its bound receiver using a single paced sender socket. It sends a burst,
+idles, sends one sparse probe, and leaves the wire quiet for the full sparse
+latency limit before repeating. The helper does
+not wait for Kafka delivery before scheduling later datagrams.
+
+Every test record is consumed from the isolated target Kafka topic and
+validated byte-for-byte, including its protocol topic/partition/offset
+identity, stress payload sequence and timestamp. Duplicate, unexpected,
+missing or corrupt records fail; the run requires exact expected
+cardinality and final per-partition Kafka end offsets. Payload timestamps
+are deterministic per-run identities; separate send-time measurements
+track sparse-probe latency without storing a timestamp for every record.
+Sparse-probe send-to-Kafka latency has a configurable upper
+bound, so a partially filled batch cannot silently wait for a long batch
+timeout. The runner also records the downstream container's `/proc/net/snmp`
+before and after the workload, requires zero `Udp:RcvbufErrors` delta, and
+checks the downstream `SO_RXQ_OVFL` plus UDP batch/datagram/queue telemetry.
+No host sysctl is changed. The workload and diagnostics are retained in the
+printed `tests/env/tmp/airgap-tc53-<run-id>` directory; `-pause` is unsupported.
+
+This transport-isolating regression starts at the UDP wire protocol and ends
+at downstream Kafka. It does not exercise production upstream delivery,
+deduplication or end-to-end retry behavior, and is not production capacity
+certification. Optional CPU contention is intentionally omitted; qualify
+capacity and host-specific contention separately.
+
+Defaults provide a short smoke run: 3 cycles of 2-second 10,000-datagram/s
+bursts, each followed by 1 second idle, one sparse probe and a 2.1-second
+quiet observation interval, with 600-byte payloads. Even with idle set to zero,
+probes follow at least 100 ms of silence. A longer repeated-burst qualification can run:
+
+```bash
+TC53_RATE=60000 TC53_DURATION=30 TC53_IDLE=60 TC53_CYCLES=10 ./run-testcase.sh 53
+```
+
+For a sustained 10-minute run without inter-cycle idle:
+
+```bash
+TC53_RATE=60000 TC53_DURATION=600 TC53_IDLE=0 TC53_CYCLES=1 ./run-testcase.sh 53
+```
+
+`TC53_MAX_SPARSE_LATENCY` defaults to 2 seconds, `TC53_DRAIN_TIMEOUT` to 30
+seconds, and `TC53_BATCH_SIZE` to 512 (maximum supported). The helper bounds
+its exact-identity bitmap to 50 million expected records and rejects larger
+workloads rather than weakening verification.
+
+`TC53_RECEIVERS` defaults to 10, matching downstream's normal default and
+TC-52. The sender still uses one source socket; multiple handler workers can
+process a hot socket through the receiver's shared work queue. Use
+`TC53_RECEIVERS=1` explicitly for a single-worker diagnostic, not as the
+production-default configuration. Earlier single-worker diagnostic runs
+lost records under sustained load; retain and report those failures rather
+than treating this fixture as a zero-loss guarantee.
+
+The runner samples Docker CPU/memory/I/O for only its own downstream and Kafka
+containers, retaining `docker-stats.jsonl` and sampler errors alongside the
+exact properties, workload, Kafka/receiver logs and socket counters.
+CPU priority, GC settings, host sysctls and queue capacity are not adjusted.

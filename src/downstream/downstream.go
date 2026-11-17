@@ -363,6 +363,11 @@ func logStatistics(stopChan <-chan struct{}) {
 				stats["SO_RXQ_OVFL"] = rxqOvflDrops
 				stats["SO_RXQ_OVFL_TOTAL"] = rxqOvflDropsTotal
 			}
+			if config.transport == "udp" {
+				stats["udp_read_batches_total"] = udp.ReadBatchesTotal.Load()
+				stats["udp_read_datagrams_total"] = udp.ReadDatagramsTotal.Load()
+				stats["udp_queue_batches_high_water"] = udp.QueueBatchesHighWater.Load()
+			}
 
 			if Logger.CanLog(logging.INFO) {
 				b, _ := json.Marshal(stats)

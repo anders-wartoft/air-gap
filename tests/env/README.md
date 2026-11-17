@@ -12,6 +12,10 @@ covers the shared environment, prerequisites, and ways to run and maintain it.
 The package-install smoke tests are separate; see the
 [package-test guide](../README.md).
 The repository-root Compose project is a separate RPM-installed demo.
+TC-53 is a standalone receiver regression: it sends framed UDP datagrams
+directly to downstream and verifies every record through its isolated Kafka
+topic. See the [testcase catalogue](../documents/TESTCASES.md) for settings,
+scope limitations, and retained diagnostics.
 
 ## Environment overview
 
