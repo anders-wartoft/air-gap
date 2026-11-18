@@ -546,6 +546,12 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		), "Overriding bootstrapServers with environment variable: "+prefix+"BOOTSTRAP_SERVERS"+" with value: "+bootstrapServers)
 		config.bootstrapServers = bootstrapServers
 	}
+	if clientID := os.Getenv(prefix + "CLIENT_ID"); clientID != "" {
+		Logger.Infof(configStr(logging.EventConfigOverride, "clientId", clientID).With(
+			logging.Str("airgap.config.source", prefix+"CLIENT_ID"),
+		), "Overriding clientId with environment variable: %sCLIENT_ID with value: %s", prefix, clientID)
+		config.clientID = clientID
+	}
 	if mtu := os.Getenv(prefix + "MTU"); mtu != "" {
 		Logger.Info(configStr(logging.EventConfigOverride, "mtu", mtu).With(
 			logging.Str("airgap.config.source", prefix+"MTU"),

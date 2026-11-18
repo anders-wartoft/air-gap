@@ -12,7 +12,7 @@ RUNNER = (HERE / "tc31-unsafe-memory-test.sh").read_text()
 
 
 class TC31ControlTests(unittest.TestCase):
-    def verdict(self, *, killed, log):
+    def verdict(self, *, killed, log, sampled_memory=192 * 1024 * 1024):
         with tempfile.TemporaryDirectory() as work:
             path = Path(work)
             (path / "captured.log").write_text(log)
@@ -21,6 +21,7 @@ class TC31ControlTests(unittest.TestCase):
                 WORK=work, OOM="true" if killed else "false",
                 CODE="137" if killed else "0",
                 STATE="exited" if killed else "running", NO_COLOR="1",
+                SAMPLED_MEMORY=str(sampled_memory),
             )
             start = RUNNER.rindex('compose logs --no-color --no-log-prefix upstream >')
             script = """
@@ -36,8 +37,7 @@ docker() {
     esac
 }
 UPSTREAM_CID=fixture
-CAP_BYTES=$((192 * 1024 * 1024))
-max_memory=$CAP_BYTES
+max_memory="$SAMPLED_MEMORY"
 TC_PAUSE=1
 """ + RUNNER[start:]
             environment["HERE"] = str(HERE)
@@ -61,6 +61,20 @@ TC_PAUSE=1
         result = self.verdict(killed=True, log="[INFO] starting upstream\n")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("no watermark transition observed; consumer killed", result.stdout)
+
+    def test_missed_peak_does_not_override_container_verdict(self):
+        for sampled_memory in (77877248, ""):
+            for killed in (False, True):
+                with self.subTest(sampled_memory=sampled_memory, killed=killed):
+                    result = self.verdict(
+                        killed=killed, log="[INFO] starting upstream\n",
+                        sampled_memory=sampled_memory,
+                    )
+                    self.assertEqual(
+                        result.returncode, 0 if killed else 1,
+                        result.stdout + result.stderr,
+                    )
+                    self.assertIn("diagnostic only", result.stdout)
 
     def test_actual_transition_is_reported_without_changing_kill_requirement(self):
         log = "[WARN] Upstream Upstream_31 entering high memory watermark. " \

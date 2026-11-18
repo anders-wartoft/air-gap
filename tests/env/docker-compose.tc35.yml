@@ -9,6 +9,7 @@ services:
     volumes:
       - upstream-logs:/var/log/airgap
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_CONFIG: /airgap/config/upstream-airgap-35-docker.properties
 
   upstream-b:
@@ -28,6 +29,7 @@ services:
       - ../../config/testcases:/airgap/config:ro,z
       - upstream-b-logs:/var/log/airgap
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_CONFIG: /airgap/config/upstream-airgap-35b-docker.properties
     command: ["upstream"]
     restart: "no"

@@ -217,9 +217,10 @@ report_check "three sending threads over UDP" \
     "216 Kafka records, correct copies and offsets, no abandonment" \
     "216 records across three partitions" 0
 
-echo "TC-49: running Kafka delay and rebalance regression tests"
+echo "TC-49: running Kafka delay, bounded pause/resume and rebalance regression tests"
 airgap_docker_run --rm --network "${PROJECT}_default" \
     -v "$WORK:/airgap/work:ro,z" \
     -e AIRGAP_DELAY_KAFKA_BROKERS=kafka:9092 \
     --entrypoint /airgap/work/kafka-delay.test "$KAFKA_IMAGE" \
-    -test.v -test.run '^TestDelayedSubscriptionWithKafka$' -test.timeout 3m
+    -test.v -test.run '^(TestDelayedSubscriptionWithKafka|TestBoundedDelayedReaderWithKafka)$' \
+    -test.skip '/paced-delivery$' -test.timeout 3m

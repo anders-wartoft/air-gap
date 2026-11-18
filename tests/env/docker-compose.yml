@@ -393,6 +393,7 @@ services:
       # container recreate. Harmless for every other testcase (unused).
       - ../../tmp:/airgap/tmp:z
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_CONFIG: ${UPSTREAM_A_CONFIG:-/airgap/config/upstream-docker.properties}
       AIRGAP_UPSTREAM_NIC: ${UPSTREAM_A_NIC:-eth0}
       AIRGAP_UPSTREAM_TARGET_IP: ${UPSTREAM_A_TARGET_IP:-downstream}
@@ -432,6 +433,7 @@ services:
       - ../../config:/airgap/config:ro,z
       - ../../certs:/airgap/certs:ro,z
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_CONFIG: ${UPSTREAM_B_CONFIG:-/airgap/config/upstream-docker.properties}
       AIRGAP_UPSTREAM_NIC: ${UPSTREAM_B_NIC:-eth0}
       AIRGAP_UPSTREAM_TARGET_IP: ${UPSTREAM_B_TARGET_IP:-downstream}

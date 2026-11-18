@@ -67,10 +67,13 @@ compose() {
     COMPOSE_PROJECT_NAME="$project" docker compose -p "$project" -f "$HERE/docker-compose.tc16.yml" "$@"
 }
 kafka() {
-    local side="$1"; shift
+    kafka_bounded 30 "$@"
+}
+kafka_bounded() {
+    local seconds="$1" side="$2"; shift 2
     local port=39092
     [[ "$side" != us ]] || port=29092
-    compose "$side" exec -T "kafka-$side-1" timeout 30s "$@" --bootstrap-server "127.0.0.1:$port"
+    compose "$side" exec -T "kafka-$side-1" timeout "${seconds}s" "$@" --bootstrap-server "127.0.0.1:$port"
 }
 now() { date +%s; }
 metric() {
@@ -240,6 +243,25 @@ create_topic() {
         --partitions "$TC16_PARTITIONS" --replication-factor 2 \
         --config retention.ms=-1 --config cleanup.policy=delete
 }
+downstream_udp_ready() {
+    # Read the full stream: an early exit can SIGPIPE Compose under pipefail.
+    compose ds logs --no-color downstream | awk '
+        /UDP listener starting on [^ ]*:1234 with [0-9]+ workers/ {
+            workers = $0
+            sub(/^.*:1234 with /, "", workers)
+            sub(/ workers.*$/, "", workers)
+        }
+        /UDP socket [0-9]+: SO_RCVBUF requested=/ {
+            index_text = $0
+            sub(/^.*UDP socket /, "", index_text)
+            sub(/:.*/, "", index_text)
+            bound[index_text + 0] = 1
+        }
+        END {
+            if (workers < 1 || workers == "") exit 1
+            for (i = 0; i < workers; i++) if (!(i in bound)) exit 1
+        }'
+}
 prepare() {
     local side="$1" services
     echo "TC-16: Starting $side Kafka cluster and preparing test topics..."
@@ -258,9 +280,10 @@ prepare() {
         echo "TC-16: Starting downstream UDP receiver..."
         compose ds up -d --build --no-deps downstream
         local deadline=$((SECONDS + 120))
-        until compose ds logs --no-color downstream | grep -q 'UDP listener starting'; do
-            (( SECONDS < deadline )) || die "downstream UDP listener not ready"
-            assert_running ds downstream
+        while :; do
+            assert_running ds downstream || die "downstream stopped before binding UDP/1234; see $RESULTS/ds.log"
+            downstream_udp_ready && break
+            (( SECONDS < deadline )) || die "downstream UDP listener not ready: not all UDP/1234 socket binds confirmed; see $RESULTS/ds.log"
             sleep 1
         done
         echo "TC-16-DS READY: UDP/1234; waiting for $TC16_COUNT events. Start TC-16-US now."
@@ -308,8 +331,8 @@ send_events() {
 # Kafka Streams output offsets include transaction markers, so dedup completion
 # is measured with its committed INPUT offsets instead.
 group_progress() {
-    local group="$1" topic="$2" output
-    output="$(kafka ds kafka-consumer-groups --describe --group "$group")" || return
+    local group="$1" topic="$2" seconds="$3" output
+    output="$(kafka_bounded "$seconds" ds kafka-consumer-groups --describe --group "$group")" || return
     printf '%s\n' "$output" | awk -v g="$group" -v t="$topic" -v p="$TC16_PARTITIONS" '
         $1==g && $2==t && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ && $5~/^[0-9]+$/ && $6~/^[0-9]+$/ {
             rows++; current+=$4; end+=$5; lag+=$6
@@ -318,29 +341,44 @@ group_progress() {
 }
 wait_phase() {
     local phase="$1" service="$2" group="${3:-}" topic="${4:-tc16-transfer}"
-    local deadline=$((SECONDS + TC16_TIMEOUT)) first=0 previous last_zero started count end lag sample
+    local deadline=$((SECONDS + TC16_TIMEOUT)) first=0 previous last_zero started count="" end lag sample
+    local remaining probe_timeout poll_rc sampled poll_timeouts=0 valid_sample
     started="$(now)"; previous="$started"; last_zero="$started"
     while :; do
         assert_running ds "$service"
+        valid_sample=1
         if [[ -z "$group" ]]; then
             count="$(offset_count ds tc16-transfer)"; end="$TC16_COUNT"; lag=$((TC16_COUNT - count))
             (( count <= TC16_COUNT )) || die "received $count raw records, expected $TC16_COUNT"
         else
-            sample="$(group_progress "$group" "$topic")"
-            read -r count end lag <<< "$sample"
+            remaining=$((deadline - SECONDS))
+            valid_sample=0
+            if (( remaining > 0 )); then
+                poll_timeout=$((remaining < 30 ? remaining : 30))
+                if sample="$(group_progress "$group" "$topic" "$poll_timeout")"; then
+                    read -r count end lag <<< "$sample"
+                    valid_sample=1
+                else
+                    poll_rc=$?
+                    (( poll_rc == 124 )) || die "$phase offset poll failed: group=$group topic=$topic exit=$poll_rc"
+                    poll_timeouts=$((poll_timeouts + 1))
+                    echo "TC-16: $phase offset poll timed out after ${poll_timeout}s (group=$group topic=$topic); retrying if phase time remains" >&2
+                fi
+            fi
         fi
-        local sampled
         sampled="$(now)"
-        if (( count > 0 && first == 0 )); then
+        if (( valid_sample && count > 0 && first == 0 )); then
             first="$sampled"
             echo "$phase: first progress observed at epoch=$first"
-        elif (( count == 0 )); then
+        elif (( valid_sample && count == 0 )); then
             # Use the beginning of the query, not its completion, as a
             # conservative lower bracket for the first append/commit.
             last_zero="$previous"
         fi
-        printf '%s,%s,%s,%s,%s\n' "$phase" "$sampled" "$count" "$end" "$lag" >> "$RESULTS/progress.csv"
-        if (( count > 0 && lag == 0 && count == end )); then
+        if (( valid_sample )); then
+            printf '%s,%s,%s,%s,%s\n' "$phase" "$sampled" "$count" "$end" "$lag" >> "$RESULTS/progress.csv"
+        fi
+        if (( valid_sample && count > 0 && lag == 0 && count == end )); then
             if [[ "$phase" == dedup ]]; then
                 (( count == TC16_COUNT )) || die "dedup committed $count input records, expected $TC16_COUNT"
             fi
@@ -350,6 +388,7 @@ wait_phase() {
             return
         fi
         if (( SECONDS >= deadline )); then
+            [[ -n "$count" ]] || die "$phase timed out: no successful offset poll (group=$group topic=$topic poll-timeouts=$poll_timeouts)"
             metric "$phase (incomplete/armed wall clock)" "$((sampled - started))" "$count"
             if [[ "$phase" == transfer && "$count" == 0 ]]; then
                 echo "TC-16: no raw Kafka records arrived. Confirm TC-16-US finished generation and started upstream; DS alone produces no traffic." >&2
@@ -357,8 +396,13 @@ wait_phase() {
             fi
             die "$phase timed out: current=$count end=$end lag=$lag; no success inferred from an idle topic"
         fi
-        previous="$sampled"
-        sleep "$TC16_POLL"
+        if (( valid_sample )); then
+            previous="$sampled"
+        fi
+        remaining=$((deadline - SECONDS))
+        if (( remaining > 0 )); then
+            sleep "$((TC16_POLL < remaining ? TC16_POLL : remaining))"
+        fi
     done
 }
 verify() {

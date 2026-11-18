@@ -12,6 +12,8 @@ services:
     restart: "no"
 
   upstream:
+    environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
     platform: linux/amd64
     volumes:
       - ${TC_WORK}:/airgap/work:z

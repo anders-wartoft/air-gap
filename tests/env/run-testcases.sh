@@ -7,6 +7,8 @@
 #   --json PATH    write per-case codes/status/duration/reason as JSON
 #   --junit PATH   write a JUnit XML report (can be combined with --json)
 #   --log-dir DIR  retain per-case logs and live overview.log in DIR
+# UDP pacing is calibrated once per batch and used as a fallback for UDP
+# upstreams. Explicit settings and manifests with TC_UDP_CALIBRATION=0 win.
 #   Report paths are relative to the caller's working directory.
 #   Reports require Python 3 (standard library only).
 #   Exit: 0 = no failed cases (skips allowed), 1 = testcase failure,
@@ -68,6 +70,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CALLER_DIR="$PWD"
 cd "$HERE"
 source "$HERE/lib/docker-test.sh"
+source "$HERE/lib/udp-calibration.sh"
 
 usage() { sed -n '2,/^set -euo pipefail/{ /^set -euo pipefail/d; p; }' "$0"; exit "${1:-1}"; }
 
@@ -360,6 +363,32 @@ tc_is_standalone() {
     )
 }
 
+tc_uses_calibrated_pacing() (
+    unset TC_UDP_CALIBRATION
+    source "testcases/$(printf '%02d' "$1").env"
+    [[ "${TC_UDP_CALIBRATION:-1}" != 0 ]]
+)
+
+unset AIRGAP_TEST_UDP_PACING
+for id in "${IDS[@]}"; do
+    if tc_has_auto_exit "$id" && tc_uses_calibrated_pacing "$id"; then
+        calibration_dir="$CASE_LOGDIR/udp-calibration"
+        echo "runner: calibrating UDP pacing once before the batch"
+        overview "  UDP calibration: running"
+        mkdir -p "$calibration_dir"
+        if ! bash "$HERE/calibrate-test-udp.sh" "$calibration_dir" >"$calibration_dir/preflight.log" 2>&1 ||
+            ! airgap_load_udp_calibration "$calibration_dir/pacing.properties"; then
+            echo "run-testcases: UDP calibration failed; no testcases started" >&2
+            tail -n 40 "$calibration_dir/preflight.log" >&2
+            overview "  UDP calibration: FAILED; see udp-calibration/preflight.log"
+            exit 2
+        fi
+        cat "$calibration_dir/pacing.properties"
+        overview "  UDP calibration: ready ($AIRGAP_TEST_UDP_PACING datagrams/s,bytes/s,burst)"
+        break
+    fi
+done
+
 for id in "${IDS[@]}"; do
     echo
     echo "========================================================"
@@ -379,14 +408,18 @@ for id in "${IDS[@]}"; do
     overview "─── testcase $id RUNNING ───"
     LOG="$CASE_LOGDIR/tc-${id}.log"
     airgap_init_test "$id"
+    case_pacing="${AIRGAP_TEST_UDP_PACING:-}"
+    if ! tc_uses_calibrated_pacing "$id"; then
+        case_pacing=""
+    fi
     tc_start_epoch="$(date +%s)"
     set +e
     if [[ "$id" == 16 ]]; then
-        TC16_BATCH_MODE=1 ./run-testcase.sh "$id" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} 2>&1 | tee "$LOG"
+        AIRGAP_TEST_UDP_PACING="$case_pacing" TC16_BATCH_MODE=1 ./run-testcase.sh "$id" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} 2>&1 | tee "$LOG"
     elif (( ${#EXTRA_ARGS[@]} )); then
-        ./run-testcase.sh "$id" "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG"
+        AIRGAP_TEST_UDP_PACING="$case_pacing" ./run-testcase.sh "$id" "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG"
     else
-        ./run-testcase.sh "$id" 2>&1 | tee "$LOG"
+        AIRGAP_TEST_UDP_PACING="$case_pacing" ./run-testcase.sh "$id" 2>&1 | tee "$LOG"
     fi
     pipeline_status=("${PIPESTATUS[@]}")
     rc="${pipeline_status[0]}"

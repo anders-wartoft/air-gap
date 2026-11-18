@@ -69,6 +69,7 @@ services:
       - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
       - ../../config/testcases:/airgap/config:ro,z
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_CONFIG: /airgap/config/upstream.properties
     command: ["upstream"]
     restart: on-failure:3

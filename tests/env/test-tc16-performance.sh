@@ -7,6 +7,7 @@ mkdir -p "$WORK/env/lib" "$WORK/env/bin" "$WORK/mock" "$WORK/state"
 cp "$HERE/tc16-performance.sh" "$HERE/run-testcase.sh" "$WORK/env/"
 cp "$HERE/lib/report.sh" "$HERE/lib/docker-test.sh" "$HERE/lib/docker-images.sh" "$WORK/env/lib/"
 cp "$HERE/lib/dedup-jar.sh" "$WORK/env/lib/"
+cp "$HERE/lib/udp-calibration.sh" "$WORK/env/lib/"
 cp "$HERE/lib/tc16-fake-docker.sh" "$WORK/mock/docker"
 chmod +x "$WORK/mock/docker"
 touch "$WORK/env/bin/LogGenerator-1.1-9.jar"
@@ -28,6 +29,50 @@ run_case() {
 }
 line() { grep -nE "$1" "$FAKE_STATE/calls" | head -1 | cut -d: -f1; }
 before() { [[ "$(line "$1")" -lt "$(line "$2")" ]] || { echo "Ordering failed: $1 before $2" >&2; exit 1; }; }
+
+test_dedup_polling() (
+    export FAKE_REMOTE=1 TC16_TIMEOUT=4 TC16_RESULTS_DIR="$WORK/poll-results"
+    local scenario expected
+    for scenario in once always error; do
+        rm -f "$FAKE_STATE/downstream" "$FAKE_STATE/dedup" "$FAKE_STATE/lg-sink"
+        : > "$FAKE_STATE/calls"
+        expected=1
+        [[ "$scenario" != once ]] || expected=0
+        if [[ "$scenario" == once ]]; then
+            FAKE_UDP_READY=delayed FAKE_DEDUP_POLL="$scenario" run_case "$expected" TC-16-DS
+            [[ "$(grep -c 'logs --no-color downstream$' "$FAKE_STATE/calls")" == 2 ]]
+            before 'logs --no-color downstream$' 'up .*dedup$'
+        else
+            FAKE_DEDUP_POLL="$scenario" run_case "$expected" TC-16-DS
+        fi
+        case "$scenario" in
+            once)
+                grep -q 'dedup offset poll timed out' "$WORK/result"
+                grep -q 'TC-16 PASS: all 10 sequence IDs delivered exactly once' "$WORK/result"
+                [[ "$(grep -c '^dedup,' "$TC16_RESULTS_DIR/progress.csv")" == 1 ]]
+                ;;
+            always)
+                grep -q 'dedup timed out: no successful offset poll' "$WORK/result"
+                [[ "$(grep -c 'dedup offset poll timed out' "$WORK/result")" -gt 1 ]]
+                if grep -Eq '^dedup,' "$TC16_RESULTS_DIR/progress.csv" ||
+                    grep -Eq 'up .*lg-sink$' "$FAKE_STATE/calls"; then
+                    echo "Timed-out polls were treated as progress" >&2
+                    exit 1
+                fi
+                ;;
+            error)
+                grep -q 'dedup offset poll failed: group=tc16-dedup topic=tc16-transfer exit=2' "$WORK/result"
+                [[ "$(grep -c 'kafka-consumer-groups' "$FAKE_STATE/calls")" == 1 ]]
+                ;;
+        esac
+    done
+    rm -f "$FAKE_STATE/downstream" "$FAKE_STATE/dedup" "$FAKE_STATE/lg-sink"
+    : > "$FAKE_STATE/calls"
+    echo "PASS: delayed UDP socket binds with verbose logs, transient/persistent dedup timeouts, and command errors"
+)
+
+test_dedup_polling
+if [[ "${1:-}" == --polling-only ]]; then exit 0; fi
 
 run_case 0 16
 grep -qx '300' "$FAKE_STATE/timeout"

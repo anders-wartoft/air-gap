@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -799,6 +800,15 @@ func kafkaHandlerWithContext(ctx context.Context, timeFrom time.Time, udpClient 
 }
 
 func Main(build string) {
+	if len(os.Args) > 1 && os.Args[1] == "--calibrate" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := calibrateUDP(ctx, os.Args[2:], os.Stdout, os.Stderr); err != nil && err != flag.ErrHelp {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, err := pinnedtls.GenerateCommand(os.Args[1:], "client", os.Stdout); handled {
 		if err != nil {
 			Logger.Fatal(logging.Event(logging.EventAppFailure,
@@ -855,6 +865,9 @@ func Main(build string) {
 	}
 	conf = overrideConfiguration(conf)
 	conf = parseCommandLineOverrides(overrideArgs, conf)
+	if err := conf.applyTestUDPPacing(os.Getenv("AIRGAP_TEST_UDP_PACING")); err != nil {
+		Logger.Fatal(configInvalid("udpPacing", nil), err)
+	}
 	resolved := conf
 	if conf.tcpTLSAuthMode == "pinned" {
 		if err := pinnedtls.ValidateReloadFile(fileName); err != nil {
@@ -1035,6 +1048,12 @@ func Main(build string) {
 
 	// Run upstream
 	runContext, cancelRun := context.WithCancel(context.Background())
+	if adapter, ok := transportAdapter.(*UDPAdapter); ok && config.udpPacingDatagramsPerSecond > 0 {
+		if err := adapter.conn.ConfigurePacing(runContext, config.udpPacingDatagramsPerSecond,
+			config.udpPacingBytesPerSecond, config.udpPacingBurstDatagrams); err != nil {
+			Logger.Fatal(configInvalid("udpPacing", nil), err)
+		}
+	}
 	done := make(chan struct{})
 	var reloadWorkers sync.WaitGroup
 	var reloadMu sync.Mutex
@@ -1057,7 +1076,13 @@ func Main(build string) {
 			messages := protocol.FormatMessage(protocol.TYPE_STATUS, "STATUS",
 				fmt.Appendf(nil, "%s Upstream %s terminating by signal...", protocol.GetTimestamp(), config.id), config.payloadSize)
 			if len(messages) > 0 {
-				transportAdapter.SendMessage(messages[0])
+				if adapter, ok := transportAdapter.(*UDPAdapter); ok && config.udpPacingDatagramsPerSecond > 0 {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					adapter.conn.SendMessageContext(ctx, messages[0])
+					cancel()
+				} else {
+					transportAdapter.SendMessage(messages[0])
+				}
 			}
 			transportAdapter.Close()
 			config.WarnProductionConfiguration("shutdown")

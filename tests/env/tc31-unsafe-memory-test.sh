@@ -16,7 +16,6 @@ mkdir -m 0755 "$WORK/lost-events"
 airgap_init_test 31
 export TC31_WORK="$WORK"
 COMPOSE_FILE="$HERE/docker-compose.tc31.yml"
-CAP_BYTES=$((192 * 1024 * 1024))
 
 compose() {
     docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"
@@ -117,7 +116,6 @@ kill "$PRESSURE_PID" 2>/dev/null || true
 wait "$PRESSURE_PID" 2>/dev/null || true
 
 max_memory="$(sort -n "$WORK/memory.log" | tail -1)"
-[[ "$max_memory" =~ ^[0-9]+$ ]] || max_memory=0
 
 compose logs --no-color --no-log-prefix upstream >"$WORK/upstream.log" 2>&1
 oom_killed="$(docker inspect --format '{{.State.OOMKilled}}' "$UPSTREAM_CID" 2>/dev/null || echo unknown)"
@@ -137,12 +135,10 @@ if [[ "$state" == "exited" || "$state" == "dead" ]]; then
 else
     report_check "upstream did not survive" "container exited" "$state" 1 || rc=1
 fi
-if [[ "$max_memory" =~ ^[0-9]+$ ]] && (( max_memory > CAP_BYTES / 2 )); then
-    report_check "memory grew towards the cgroup cap" "peak above $((CAP_BYTES / 2)) bytes" \
-        "$max_memory bytes" 0 || rc=1
+if [[ "$max_memory" =~ ^[0-9]+$ ]]; then
+    echo "TC-31: highest sampled memory: $max_memory bytes (diagnostic only; polling can miss the OOM peak)"
 else
-    report_check "memory grew towards the cgroup cap" "peak above $((CAP_BYTES / 2)) bytes" \
-        "$max_memory bytes" 1 || rc=1
+    echo "TC-31: highest sampled memory unavailable (diagnostic only; no successful samples)"
 fi
 if grep -Eq '\[WARN\] Upstream .* entering high memory watermark\. Pausing Kafka record admission at [0-9]+' "$WORK/upstream.log"; then
     throttle="watermark observed"

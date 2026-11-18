@@ -1,6 +1,7 @@
 package udp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -9,7 +10,8 @@ import (
 
 // UDPConn wraps a reusable UDP connection
 type UDPConn struct {
-	conn net.Conn
+	conn  net.Conn
+	pacer *pacer
 }
 
 // NewUDPConn creates a new UDP connection to the given address.
@@ -105,6 +107,20 @@ func (u *UDPConn) Close() error {
 
 // SendMessage sends a single UDP message.
 func (u *UDPConn) SendMessage(message []byte) error {
+	if u.pacer != nil {
+		return u.SendMessageContext(u.pacer.ctx, message)
+	}
+	return u.writeMessage(message)
+}
+
+func (u *UDPConn) SendMessageContext(ctx context.Context, message []byte) error {
+	if u.pacer != nil {
+		return u.pacer.send(ctx, [][]byte{message}, u.writeMessage)
+	}
+	return u.writeMessage(message)
+}
+
+func (u *UDPConn) writeMessage(message []byte) error {
 	if u.conn == nil {
 		return net.ErrClosed
 	}
@@ -128,6 +144,9 @@ func (u *UDPConn) SendMessage(message []byte) error {
 func (u *UDPConn) SendMessages(messages [][]byte) error {
 	if u.conn == nil {
 		return net.ErrClosed
+	}
+	if u.pacer != nil {
+		return u.pacer.send(u.pacer.ctx, messages, u.writeMessage)
 	}
 
 	for _, msg := range messages {

@@ -84,6 +84,7 @@ services:
       - ../../config/testcases:/airgap/config:ro,z
       - ${TC33_WORK:?TC33_WORK is required}:/airgap/work:z
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_CONFIG: /airgap/config/upstream-airgap-33-docker.properties
     command: ["upstream"]
     restart: on-failure:3

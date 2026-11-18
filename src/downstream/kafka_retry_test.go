@@ -16,6 +16,26 @@ import (
 	"github.com/IBM/sarama"
 )
 
+func TestKafkaClientIDEnvironmentOverride(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "downstream.properties")
+	if err := os.WriteFile(path, []byte("clientId=from-properties\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := readConfigurationFile(path, defaultConfiguration(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("AIRGAP_DOWNSTREAM_CLIENT_ID", "")
+	if got := overrideConfiguration(config).clientID; got != "from-properties" {
+		t.Fatalf("with empty environment: clientId = %q, want from-properties", got)
+	}
+	t.Setenv("AIRGAP_DOWNSTREAM_CLIENT_ID", "from-environment")
+	if got := overrideConfiguration(config).clientID; got != "from-environment" {
+		t.Fatalf("with environment override: clientId = %q, want from-environment", got)
+	}
+}
+
 func TestRetryableKafkaStartupError(t *testing.T) {
 	for _, test := range []struct {
 		name  string

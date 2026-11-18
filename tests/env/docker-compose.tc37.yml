@@ -11,6 +11,7 @@ services:
       - ${AIRGAP_BIN_DIR:-../../target/linux-amd64}:/airgap/bin:ro,z
       - ${TC_WORK:?TC_WORK is required}:${TC_WORK}:z
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_CONFIG: ${TC_WORK}/upstream.properties
     command: ["upstream"]
     restart: "no"

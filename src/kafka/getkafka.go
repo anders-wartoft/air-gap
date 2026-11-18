@@ -912,24 +912,11 @@ func (consumer *Consumer) delayedFetchError(err error) error {
 func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	delimiter := "_"
 	keepRunning := true
-	messages := claim.Messages()
 	// Check admission while idle without sleeping through newly available records.
 	idleCheck := time.NewTicker(10 * time.Millisecond)
 	defer idleCheck.Stop()
-	var delayedPartition sarama.PartitionConsumer
-	var stopDrain, drained chan struct{}
-	defer func() {
-		if delayedPartition != nil {
-			if err := delayedPartition.Close(); err != nil {
-				Logger.Errorf(logging.Event(logging.EventKafkaConsume).Merge(logging.Err(err)),
-					"Error closing delayed partition consumer: %v", err)
-			}
-		}
-		if stopDrain != nil {
-			close(stopDrain)
-			<-drained
-		}
-	}()
+	reader := delayedClaimReader{consumer: consumer, claim: claim}
+	defer reader.close()
 	for keepRunning {
 		if consumer.beforeMessage != nil {
 			if err := consumer.beforeMessage(session.Context()); err != nil {
@@ -939,134 +926,100 @@ func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 				return fmt.Errorf("before consuming Kafka message: %w", err)
 			}
 		}
-		select {
-		case message, ok := <-messages:
-			if !ok {
-				if stopDrain != nil && session.Context().Err() == nil {
-					return consumer.delayedFetchError(fmt.Errorf(
-						"delayed Kafka partition consumer closed unexpectedly: %s/%d",
-						claim.Topic(), claim.Partition()))
-				}
-				Logger.Info(logging.Event(logging.EventKafkaConsume,
-					logging.Str("airgap.kafka.consumer.name", consumer.name),
-					logging.Str("messaging.destination.name", claim.Topic()),
-					logging.Decimal("messaging.destination.partition.id", int64(claim.Partition())),
-					logging.Str("airgap.kafka.stage", "claim.closed"),
-				), "message channel was closed")
-				return nil
-			}
-			if consumer.onHealthy != nil {
-				consumer.onHealthy()
-			}
-			sleepTime := time.Until(message.Timestamp.Add(-consumer.delay))
-			if sleepTime > 0 {
-				delayAttrs := logging.Event(logging.EventMessageDeliver,
-					logging.Str("airgap.kafka.consumer.name", consumer.name),
-					logging.Str("messaging.destination.name", message.Topic),
-					logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
-					logging.Int("messaging.kafka.offset", message.Offset),
-					logging.Int("airgap.delay.configured_ms", consumer.delay.Milliseconds()),
-					logging.Int("airgap.delay.sleep_ms", sleepTime.Milliseconds()),
-				)
-				Logger.Debug(delayAttrs, "Consumer.delay: "+consumer.delay.String())
-				Logger.Debug(delayAttrs, "Delaying message delivery on thread: "+consumer.name+" for "+sleepTime.String())
-				if consumer.delayFetcher != nil && sleepTime >= consumer.maxProcessingTime/2 {
-					if stopDrain == nil {
-						// Pause prevents new fetches, not records already in flight.
-						// Drain those records and reread them from Kafka after the wait.
-						consumer.group.Pause(map[string][]int32{claim.Topic(): {claim.Partition()}})
-						stopDrain, drained = make(chan struct{}), make(chan struct{})
-						go func() {
-							defer close(drained)
-							for {
-								select {
-								case _, ok := <-claim.Messages():
-									if !ok {
-										return
-									}
-								case <-stopDrain:
-									return
-								}
-							}
-						}()
-					}
-					if delayedPartition != nil {
-						if err := delayedPartition.Close(); err != nil {
-							return consumer.delayedFetchError(fmt.Errorf("close delayed Kafka partition: %w", err))
-						}
-						delayedPartition = nil
-					}
-					sleepTime = time.Until(message.Timestamp.Add(-consumer.delay))
-				}
-				for sleepTime > 0 {
-					timer := time.NewTimer(sleepTime)
-					select {
-					case <-timer.C:
-					case <-session.Context().Done():
-						timer.Stop()
-						return nil
-					}
-					if session.Context().Err() != nil {
-						return nil
-					}
-					sleepTime = time.Until(message.Timestamp.Add(-consumer.delay))
-				}
-			}
-			if Logger.CanLog(logging.DEBUG) {
-				maxLen := 80
-				var payload string
-				if len(message.Value) < maxLen {
-					payload = string(message.Value)
-				} else {
-					payload = string(message.Value[0:maxLen]) + "..."
-				}
-				Logger.Debugf(logging.Event(logging.EventKafkaConsume,
-					logging.Str("airgap.kafka.consumer.name", consumer.name),
-					logging.Str("messaging.destination.name", message.Topic),
-					logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
-					logging.Int("messaging.kafka.offset", message.Offset),
-					logging.Str("messaging.kafka.message.key", string(message.Key)),
-					logging.Int("airgap.message.size", int64(len(message.Value))),
-				), "Message on thread %s: topic=%s partition=%d offset=%d timestamp=%s key=%s value=%s",
-					consumer.name, message.Topic, message.Partition, message.Offset, message.Timestamp.String(),
-					string(message.Key), payload)
-			}
-
-			id := message.Topic + delimiter +
-				fmt.Sprint(message.Partition) + delimiter +
-				fmt.Sprint(message.Offset)
-			keepRunning = consumer.callback(id, message.Key, message.Timestamp, message.Value)
-
-			// Only mark message as consumed if callback succeeded (returned true)
-			// If callback returns false, the message will be reprocessed on next poll
-			if keepRunning {
-				session.MarkMessage(message, "")
-				if stopDrain != nil && delayedPartition == nil {
-					if session.Context().Err() != nil {
-						return nil
-					}
-					var err error
-					delayedPartition, err = consumer.delayFetcher.ConsumePartition(
-						claim.Topic(), claim.Partition(), message.Offset+1)
-					if err != nil {
+		message := reader.takeBuffered()
+		if message == nil {
+			var ok bool
+			select {
+			case message, ok = <-reader.messages():
+				if !ok {
+					if reader.stopDrain != nil && session.Context().Err() == nil {
 						return consumer.delayedFetchError(fmt.Errorf(
-							"resume delayed Kafka partition at offset %d: %w", message.Offset+1, err))
+							"delayed Kafka partition consumer closed unexpectedly: %s/%d",
+							claim.Topic(), claim.Partition()))
 					}
-					messages = delayedPartition.Messages()
+					Logger.Info(logging.Event(logging.EventKafkaConsume,
+						logging.Str("airgap.kafka.consumer.name", consumer.name),
+						logging.Str("messaging.destination.name", claim.Topic()),
+						logging.Decimal("messaging.destination.partition.id", int64(claim.Partition())),
+						logging.Str("airgap.kafka.stage", "claim.closed"),
+					), "message channel was closed")
+					return nil
 				}
-			} else {
-				Logger.Debugf(logging.Event(logging.EventKafkaCommit,
-					logging.Failure(),
-					logging.Str("airgap.kafka.consumer.name", consumer.name),
-					logging.Str("messaging.destination.name", message.Topic),
-					logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
-					logging.Int("messaging.kafka.offset", message.Offset),
-					logging.Str("airgap.message.id", id),
-				), "Message id=%s not marked as consumed, will be retried", id)
+			case <-session.Context().Done():
+				return nil
+			case <-idleCheck.C:
+				continue
 			}
-		case <-session.Context().Done():
+		}
+		if consumer.onHealthy != nil {
+			consumer.onHealthy()
+		}
+		sleepTime := time.Until(message.Timestamp.Add(-consumer.delay))
+		if sleepTime > 0 {
+			delayAttrs := logging.Event(logging.EventMessageDeliver,
+				logging.Str("airgap.kafka.consumer.name", consumer.name),
+				logging.Str("messaging.destination.name", message.Topic),
+				logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
+				logging.Int("messaging.kafka.offset", message.Offset),
+				logging.Int("airgap.delay.configured_ms", consumer.delay.Milliseconds()),
+				logging.Int("airgap.delay.sleep_ms", sleepTime.Milliseconds()),
+			)
+			Logger.Debug(delayAttrs, "Consumer.delay: "+consumer.delay.String())
+			Logger.Debug(delayAttrs, "Delaying message delivery on thread: "+consumer.name+" for "+sleepTime.String())
+			if err := reader.wait(session.Context(), message); err != nil {
+				if session.Context().Err() != nil {
+					return nil
+				}
+				return consumer.delayedFetchError(err)
+			}
+		}
+		if session.Context().Err() != nil {
 			return nil
-		case <-idleCheck.C:
+		}
+		if Logger.CanLog(logging.DEBUG) {
+			maxLen := 80
+			var payload string
+			if len(message.Value) < maxLen {
+				payload = string(message.Value)
+			} else {
+				payload = string(message.Value[0:maxLen]) + "..."
+			}
+			Logger.Debugf(logging.Event(logging.EventKafkaConsume,
+				logging.Str("airgap.kafka.consumer.name", consumer.name),
+				logging.Str("messaging.destination.name", message.Topic),
+				logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
+				logging.Int("messaging.kafka.offset", message.Offset),
+				logging.Str("messaging.kafka.message.key", string(message.Key)),
+				logging.Int("airgap.message.size", int64(len(message.Value))),
+			), "Message on thread %s: topic=%s partition=%d offset=%d timestamp=%s key=%s value=%s",
+				consumer.name, message.Topic, message.Partition, message.Offset, message.Timestamp.String(),
+				string(message.Key), payload)
+		}
+
+		id := message.Topic + delimiter +
+			fmt.Sprint(message.Partition) + delimiter +
+			fmt.Sprint(message.Offset)
+		keepRunning = consumer.callback(id, message.Key, message.Timestamp, message.Value)
+
+		// Only mark message as consumed if callback succeeded (returned true)
+		// If callback returns false, the message will be reprocessed on next poll
+		if keepRunning {
+			session.MarkMessage(message, "")
+			if err := reader.delivered(session.Context(), message.Offset); err != nil {
+				if session.Context().Err() != nil {
+					return nil
+				}
+				return consumer.delayedFetchError(err)
+			}
+		} else {
+			Logger.Debugf(logging.Event(logging.EventKafkaCommit,
+				logging.Failure(),
+				logging.Str("airgap.kafka.consumer.name", consumer.name),
+				logging.Str("messaging.destination.name", message.Topic),
+				logging.Decimal("messaging.destination.partition.id", int64(message.Partition)),
+				logging.Int("messaging.kafka.offset", message.Offset),
+				logging.Str("airgap.message.id", id),
+			), "Message id=%s not marked as consumed, will be retried", id)
 		}
 	}
 	// shutting down

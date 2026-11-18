@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Test reliability
+
+- TC-16 retries timed-out Kafka consumer-group offset checks during dedup
+  and verification within the existing phase deadline. Exact delivery
+  checks are unchanged.
+- TC-16 confirms all downstream UDP socket binds before starting the workload
+  and avoids false readiness timeouts when Compose emits verbose logs.
+
+### Configuration
+
+- Downstream now honors `AIRGAP_DOWNSTREAM_CLIENT_ID` as an override for the
+  Kafka producer's `clientId`. An empty value leaves the properties setting unchanged.
+- Corrected the documented environment variable names for downstream
+  `privateKeyFiles` (`AIRGAP_DOWNSTREAM_PRIVATE_KEY_GLOB`) and upstream
+  `compressWhenLengthExceeds` (`AIRGAP_UPSTREAM_COMPRESS_WHEN_LENGTH_EXCEEDS`).
+  Their runtime behavior is unchanged.
+
 ### UDP receive throughput
 
 - UDP reception reads up to 64 datagrams per batch on Linux, without waiting
@@ -15,6 +32,19 @@
 - Added TC-53, a Docker UDP-to-Kafka regression test for sparse traffic and
   repeated bursts after idle periods, checking payload integrity, identities,
   and socket drops. Workload settings support longer deployment qualification.
+- Added opt-in UDP sender pacing: a shared datagram and byte budget smooths
+  bursts after fragmentation without replacing `eps` or requiring feedback
+  across the diode. TC-54 calibrates on the Docker host, then compares unpaced,
+  fixed-rate and calibrated delivery through a brief downstream stall. It
+  reports delivered EPS, p99 latency, losses and the calibrated settings.
+
+### Delayed Kafka subscriptions
+
+- Long delivery waits now pause fetching and retain up to 64 additional
+  records and 64 KiB of key, value and header bytes per partition, reducing
+  subscription close/reopen churn. Overflow falls back to rereading
+  uncommitted records after the current record is delivered. Ordering,
+  delivery deadlines and one-way diode transport behavior are unchanged.
 
 ## 0.1.21-SNAPSHOT
 

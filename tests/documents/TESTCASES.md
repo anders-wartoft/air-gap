@@ -2650,6 +2650,9 @@ starts and measures dedup, stops dedup, then verifies every sequence ID using
 LogGenerator 1.1-9+ with `--from-beginning true`. Missing/duplicate events fail
 the delivery check; throughput has no fixed pass threshold. Timing is sampled,
 not an exact first-packet timestamp. See the guide above.
+Timed-out Kafka group-offset polls are logged and retried within the existing
+`TC16_TIMEOUT` phase budget. A timed-out poll does not count as a progress
+sample, and an expired phase still fails without verified completion.
 
 **Legacy standalone baseline / manual tuning reference.**
 
@@ -5266,9 +5269,13 @@ start gate holds upstream until the pressure helper and memory sampler are ready
 6. Wait until the container leaves the running state, or for at most 180
    seconds.
 7. Inspect the upstream container and require:
-   * `OOMKilled=true` or exit code 137;
-   * a non-running container state; and
-   * a sampled memory peak above half the cgroup ceiling.
+   * `OOMKilled=true` or exit code 137; and
+   * an exited or dead container state.
+
+The highest sampled memory value is diagnostic only. External `docker exec`
+polling can miss a rapid allocation spike before the OOM kill, even when
+sampling starts before upstream. A low or unavailable sample must not override
+the container's kill verdict.
 
 Watermark diagnostics match actual WARN transitions, not the logged configuration
 template. Regardless of whether a transition occurred, survival is a failure.
@@ -5279,16 +5286,17 @@ Daemon-free verdict checks: `python3 -m unittest discover -s tests/env -p test_t
 ```text
 unbounded consumer is killed: OOMKilled=true, exit=137
 upstream did not survive: exited
-memory grew towards the cgroup cap: peak above 100663296 bytes
-watermark cannot save an oversized buffer: killed before the watermark was reached
+TC-31: highest sampled memory: <bytes> (diagnostic only; polling can miss the OOM peak)
+watermark cannot save an oversized buffer: watermark observed; consumer killed
 ```
 
 ### What it proves
 
 Memory watermarks cannot rescue a consumer whose buffer envelope already
 exceeds the process limit. Sarama decodes a whole fetch response before any of
-it reaches upstream, so the peak is paid before any watermark can be observed,
-and the cost is multiplied by the number of concurrent consumers. Bounding
+it reaches upstream, so allocations can outrun record-admission throttling
+even if a watermark transition is logged. The cost is multiplied by the
+number of concurrent consumers. Bounding
 `kafkaFetchDefaultBytes`, `kafkaMaxMessageBytes` and `kafkaChannelBufferSize`
 against the number of sending threads, as TC-30 does, is therefore mandatory
 rather than advisory.
@@ -6603,12 +6611,56 @@ subscription abandonment and checks delivery timing, per-partition ordering,
 independent partition progress, repeated waits, duplicates, committed offsets,
 cancellation while records are ineligible, and a real consumer-group
 rebalance. It also checks the production reader and a 30,000-record,
-30-partition burst.
+30-partition burst. Additional 30-partition cases check bounded pause/resume,
+overflow recovery for both group and dedicated readers, and cancellation
+while paused.
 
 The short processing timeout made the original issue reproducible quickly.
 This is not a 24-hour soak or a production throughput benchmark. Requires Go
 and Docker Compose. The isolated project uses the Docker engine's native
 architecture; `-pause` is unsupported.
+
+### Bounded pause/resume
+
+Long delayed-delivery waits pause Kafka fetching and drain in-flight records
+into a bounded queue instead of closing the subscription. Fetching resumes
+after the retained records have been delivered successfully. Each partition
+retains at most 64 additional records and 64 KiB of key, value and header
+bytes. These limits exclude the current record, Sarama fetch buffers and Go
+allocation overhead; they are not a process-memory cap.
+
+On overflow, queued records are discarded without marking them consumed.
+After successful delivery of the current record, a dedicated reader rereads
+from the next offset. Dedicated readers close and reopen on subsequent
+overflows, so occasional "closed dead subscription" messages remain expected.
+Cancellation or rebalance releases the reader and restores group pause state.
+The behavior requires no downstream connection, ICMP or acknowledgment.
+
+TC-49 runs the production regression cases except the longer paced case.
+To include that case against a disposable, reachable Kafka broker, run from
+the repo root:
+
+```sh
+AIRGAP_DELAY_KAFKA_BROKERS=localhost:9092 \
+  go test ./src/kafka -run '^TestBoundedDelayedReaderWithKafka$' -count=1 -v -timeout=4m
+```
+
+The paced case waits roughly 120 seconds using the
+production 30-second processing timeout and four-record channel, then
+delivers 30 records every 750 ms (40 records/second on average). Input for
+this test is pre-seeded, not a live producer or throughput benchmark.
+It checks delivery times, per-partition ordering, committed offsets and no
+subscription closes before shutdown.
+
+### Optional pause-only comparison
+
+`TestPauseResumeWithKafka` retains the test-only prototype and does not run
+as part of TC-49. Run it with the same broker setting and Go command above,
+replacing the test selector with `^TestPauseResumeWithKafka$`. It compares
+pause-only (expected to reproduce in-flight delivery timeouts) with bounded
+draining, including paced delivery and cancellation. Its payload limit counts
+keys and values only. Unlike production overflow recovery, prototype overflow
+deliberately stops without committing undelivered records.
 
 ## TC-50 — Create/resend after downstream Kafka outage
 
@@ -6693,6 +6745,12 @@ delivered rates and Kafka lag, source/target counts, mean generation-to-Kafka
 latency, Docker CPU/memory/I/O samples and all service logs in the printed
 `tc52.XXXXXX/` result directory. These are local-container measurements with
 single-broker replication, not production capacity certification.
+The UDP phase enables `enableRxqOvfl` so downstream statistics include Linux
+socket receive-queue drops (`SO_RXQ_OVFL` and `SO_RXQ_OVFL_TOTAL`). These count
+datagrams, not missing application records; loss of one fragment can prevent
+an entire record from being delivered. A zero counter does not rule out loss
+elsewhere in the path. UDP remains best effort under saturation, and any
+missing record still fails the test, including records sent during warmup.
 After the retained-results path and before the final verdict, the runner
 prints a Markdown table of delivered EPS for the selected transports, rounded
 to whole events/second with thousands separators. Values come from this run's
@@ -6805,3 +6863,47 @@ The runner samples Docker CPU/memory/I/O for only its own downstream and Kafka
 containers, retaining `docker-stats.jsonl` and sampler errors alongside the
 exact properties, workload, Kafka/receiver logs and socket counters.
 CPU priority, GC settings, host sysctls and queue capacity are not adjusted.
+
+## TC-54 — UDP pacing comparison
+
+* Runner: `./run-testcases.sh --log-dir tmp/logs 54`
+
+Reuses TC-52's Docker Kafka-to-Kafka UDP pipeline. `run-testcases.sh` runs
+`upstream --calibrate` once before the batch against normal downstream and a
+dedicated Kafka topic, without injecting a stall. The verified recommendation
+is a default for UDP upstreams throughout that batch; TCP/TLS and explicit
+pacing settings (including zero to disable pacing) are unchanged. Testcases
+that require their original load or settings set `TC_UDP_CALIBRATION=0` in
+their manifests (TC-16, 25, 30, 31, 45, 47, and 48). A failed preflight aborts
+the batch before any testcase starts.
+
+TC-54 reuses the batch's result (or runs the shared preflight when invoked
+standalone). It runs **unpaced**, **paced with fixed settings**, and **paced with
+the calibrated settings**, in that order. Each mode uses the same binaries,
+400–1,600 byte payloads, fresh Kafka state, a three-second warmup and 20 measured
+seconds. During each measurement, pauses the isolated downstream container, requests a
+20 ms wait, then unpauses it. The actual stall also includes Docker command
+overhead and varies by host.
+
+Both paced modes must deliver every acknowledged record with zero socket drops.
+Missing records in the unpaced baseline are reported without failing the test.
+Duplicate or corrupt records, infrastructure errors, and incomplete
+measurements fail any mode. TC-52's original strict delivery checks are unchanged.
+
+The final table reports delivered EPS, p99 generation-to-Kafka latency
+(rounded up to the nearest millisecond), missing records and UDP socket drops.
+Latency is measured only for records delivered within the measurement window.
+Below the table, TC-54 prints the calibrated properties for the current Docker
+host. The results directory retains each mode's exact configuration and logs
+and a copy of `pacing.properties`. With `--log-dir`, shared preflight logs and
+the original recommendation are retained in that directory's `udp-calibration/`.
+A successful preflight does not guarantee delivery during the injected stall.
+
+The default test caps (12,000 datagrams/s and 14,000,000 encoded payload bytes/s)
+are conservative fixture settings, not production recommendations. Override
+them with `TC54_DATAGRAMS_PER_SECOND` and `TC54_BYTES_PER_SECOND`;
+`TC54_BURST_DATAGRAMS` adjusts the packet burst for both paced modes, and `TC54_DURATION` and
+`TC54_WARMUP` control the phase lengths. The sender shares
+one budget across all sending threads, including fragments and control
+datagrams, with a default burst of 32 datagrams and at most 64 KiB of payload.
+Pacing does not change `eps` or require a return path across the diode.

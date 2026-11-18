@@ -46,7 +46,16 @@ case "$command" in
                 echo "STATISTICS: {\"total_received\":$count,\"total_sent\":$count}"
             fi
         elif [[ "$service" == downstream ]]; then
-            echo "UDP listener starting"
+            echo "UDP listener starting on 0.0.0.0:1234 with 2 workers (MTU=1500)"
+            echo "UDP socket 0: SO_RCVBUF requested=4194304 effective=8388608, batch=64, queue=65536 datagrams"
+            if [[ "${FAKE_UDP_READY:-}" != delayed || -f "$FAKE_STATE/partial-bind" ]]; then
+                echo "UDP socket 1: SO_RCVBUF requested=4194304 effective=8388608, batch=64, queue=65536 datagrams"
+            else
+                touch "$FAKE_STATE/partial-bind"
+            fi
+            if [[ "${FAKE_UDP_READY:-}" == delayed ]]; then
+                awk 'BEGIN { for (i=0; i<16384; i++) print "Downstream startup diagnostics" }'
+            fi
         elif [[ "$service" == lg-sink ]]; then
             echo "Number of unique received numbers: $TC16_COUNT"
             echo "Duplicate detection found: ${FAKE_DUPLICATES:-0}"
@@ -75,6 +84,18 @@ case "$command" in
                 group="$8"
                 topic=tc16-transfer
                 [[ "$group" != tc16-verifier* ]] || topic=tc16-dedup
+                if [[ "$group" == tc16-dedup ]]; then
+                    case "${FAKE_DEDUP_POLL:-}" in
+                        once)
+                            if [[ ! -f "$FAKE_STATE/dedup-poll-timed-out" ]]; then
+                                touch "$FAKE_STATE/dedup-poll-timed-out"
+                                exit 124
+                            fi
+                            ;;
+                        always) exit 124 ;;
+                        error) exit 2 ;;
+                    esac
+                fi
                 printf '%s %s 0 %s %s 0 consumer host client\n' "$group" "$topic" "$TC16_COUNT" "$TC16_COUNT"
                 ;;
             *) echo "Unexpected Kafka tool: $tool" >&2; exit 1 ;;

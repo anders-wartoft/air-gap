@@ -71,10 +71,16 @@ func (c delayedTestClaim) Messages() <-chan *sarama.ConsumerMessage { return c.m
 
 type delayedTestGroup struct {
 	sarama.ConsumerGroup
-	paused chan struct{}
+	paused  chan struct{}
+	resumed chan struct{}
 }
 
 func (g delayedTestGroup) Pause(map[string][]int32) { g.paused <- struct{}{} }
+func (g delayedTestGroup) Resume(map[string][]int32) {
+	if g.resumed != nil {
+		g.resumed <- struct{}{}
+	}
+}
 
 type failingDelayedFetcher struct {
 	sarama.Consumer
@@ -90,6 +96,7 @@ type testDelayedPartition struct {
 	sarama.PartitionConsumer
 	messages chan *sarama.ConsumerMessage
 	closed   chan struct{}
+	paused   chan struct{}
 }
 
 func (p testDelayedPartition) Messages() <-chan *sarama.ConsumerMessage { return p.messages }
@@ -97,6 +104,12 @@ func (p testDelayedPartition) Close() error {
 	close(p.closed)
 	return nil
 }
+func (p testDelayedPartition) Pause() {
+	if p.paused != nil {
+		p.paused <- struct{}{}
+	}
+}
+func (p testDelayedPartition) Resume() {}
 
 type testDelayedFetcher struct {
 	sarama.Consumer
@@ -112,9 +125,12 @@ func (f testDelayedFetcher) ConsumePartition(_ string, _ int32, offset int64) (s
 func TestDelayedFetchCancelsAfterReopeningPartition(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	messages := make(chan *sarama.ConsumerMessage, 1)
+	messages := make(chan *sarama.ConsumerMessage, 2)
 	messages <- &sarama.ConsumerMessage{Topic: "topic", Timestamp: time.Now().Add(-24*time.Hour + 200*time.Millisecond)}
-	partition := testDelayedPartition{messages: make(chan *sarama.ConsumerMessage, 1), closed: make(chan struct{})}
+	messages <- &sarama.ConsumerMessage{Topic: "topic", Value: make([]byte, delayedBufferBytes+1)}
+	partition := testDelayedPartition{
+		messages: make(chan *sarama.ConsumerMessage, 1), closed: make(chan struct{}), paused: make(chan struct{}, 1),
+	}
 	partition.messages <- &sarama.ConsumerMessage{Topic: "topic", Offset: 1, Timestamp: time.Now()}
 	fetcher := testDelayedFetcher{partition: partition, calls: make(chan int64, 1)}
 	session := canceledDelaySession{ctx: ctx, marked: make(chan struct{}, 2)}
@@ -130,9 +146,14 @@ func TestDelayedFetchCancelsAfterReopeningPartition(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- consumer.ConsumeClaim(session, delayedTestClaim{messages: messages}) }()
 	select {
-	case <-partition.closed:
+	case <-partition.paused:
 	case <-time.After(2 * time.Second):
-		t.Fatal("delayed partition was not closed before its next long wait")
+		t.Fatal("delayed partition was not paused before its next long wait")
+	}
+	select {
+	case <-partition.closed:
+		t.Fatal("delayed partition closed instead of staying paused")
+	default:
 	}
 	cancel()
 	select {
@@ -142,6 +163,11 @@ func TestDelayedFetchCancelsAfterReopeningPartition(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("consumer did not stop after cancellation")
+	}
+	select {
+	case <-partition.closed:
+	default:
+		t.Fatal("delayed partition was not closed on cancellation")
 	}
 	if len(delivered) != 1 || len(session.marked) != 1 {
 		t.Fatalf("delivered=%d marked=%d, want one of each", len(delivered), len(session.marked))
@@ -157,14 +183,19 @@ func TestDelayedFetchCancelsAfterReopeningPartition(t *testing.T) {
 }
 
 func TestDelayedFetchDoesNotMarkRejectedMessage(t *testing.T) {
-	messages := make(chan *sarama.ConsumerMessage, 1)
+	messages := make(chan *sarama.ConsumerMessage, 2)
 	messages <- &sarama.ConsumerMessage{Topic: "topic", Offset: 4, Timestamp: time.Now().Add(-time.Second + 200*time.Millisecond)}
+	messages <- &sarama.ConsumerMessage{Topic: "topic", Offset: 5}
 	session := canceledDelaySession{ctx: context.Background(), marked: make(chan struct{}, 1)}
-	group := delayedTestGroup{paused: make(chan struct{}, 1)}
+	group := delayedTestGroup{paused: make(chan struct{}, 1), resumed: make(chan struct{}, 1)}
 	fetcher := failingDelayedFetcher{calls: make(chan int64, 1)}
+	callbacks := 0
 	consumer := Consumer{
 		delay: -time.Second, group: group, delayFetcher: fetcher, maxProcessingTime: 10 * time.Millisecond,
-		callback: func(string, []byte, time.Time, []byte) bool { return false },
+		callback: func(string, []byte, time.Time, []byte) bool {
+			callbacks++
+			return false
+		},
 	}
 	if err := consumer.ConsumeClaim(session, delayedTestClaim{messages: messages}); err != nil {
 		t.Fatal(err)
@@ -181,11 +212,44 @@ func TestDelayedFetchDoesNotMarkRejectedMessage(t *testing.T) {
 		t.Fatal("fetcher started after a rejected message")
 	default:
 	}
+	if callbacks != 1 || len(group.resumed) != 1 {
+		t.Fatal("rejection delivered buffered records or left the group paused")
+	}
+}
+
+func TestDelayedClaimDeadlineResumesWithoutFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	messages := make(chan *sarama.ConsumerMessage, 1)
+	messages <- &sarama.ConsumerMessage{Topic: "topic", Timestamp: time.Now()}
+	session := canceledDelaySession{ctx: ctx, marked: make(chan struct{}, 1)}
+	group := delayedTestGroup{paused: make(chan struct{}, 1), resumed: make(chan struct{}, 1)}
+	failures := make(chan string, 1)
+	delivered := false
+	consumer := Consumer{
+		delay: -time.Hour, group: group, maxProcessingTime: time.Millisecond,
+		delayFetcher: failingDelayedFetcher{calls: make(chan int64, 1)},
+		onFailure:    func(message string) { failures <- message },
+		callback: func(string, []byte, time.Time, []byte) bool {
+			delivered = true
+			return true
+		},
+	}
+	if err := consumer.ConsumeClaim(session, delayedTestClaim{messages: messages}); err != nil {
+		t.Fatal(err)
+	}
+	if len(group.paused) != 1 || len(group.resumed) != 1 {
+		t.Fatal("session deadline did not restore the paused partition")
+	}
+	if delivered || len(session.marked) != 0 || len(failures) != 0 {
+		t.Fatal("session deadline delivered, marked or reported a failed record")
+	}
 }
 
 func TestDelayedFetchFailureReportsStatus(t *testing.T) {
-	messages := make(chan *sarama.ConsumerMessage, 1)
+	messages := make(chan *sarama.ConsumerMessage, 2)
 	messages <- &sarama.ConsumerMessage{Topic: "topic", Offset: 4, Timestamp: time.Now().Add(-time.Second + 200*time.Millisecond)}
+	messages <- &sarama.ConsumerMessage{Topic: "topic", Value: make([]byte, delayedBufferBytes+1)}
 	session := canceledDelaySession{ctx: context.Background(), marked: make(chan struct{}, 1)}
 	group := delayedTestGroup{paused: make(chan struct{}, 1)}
 	fetcher := failingDelayedFetcher{calls: make(chan int64, 1)}

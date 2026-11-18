@@ -162,8 +162,32 @@ type stressSummary struct {
 	TotalDelivered     uint64   `json:"total_delivered"`
 	Outstanding        int      `json:"outstanding"`
 	MeanLatencyMS      float64  `json:"mean_latency_ms"`
+	P99LatencyMS       *int     `json:"p99_latency_ms,omitempty"`
 	MissingSample      []uint64 `json:"missing_sequence_sample,omitempty"`
 	Errors             string   `json:"errors,omitempty"`
+}
+
+// Millisecond upper bounds, with the final bucket reserved for overflow.
+type stressLatencyHistogram [60002]atomic.Uint64
+
+func (h *stressLatencyHistogram) record(latency time.Duration) {
+	ms := (max(0, latency) + time.Millisecond - 1) / time.Millisecond
+	h[min(int(ms), len(h)-1)].Add(1)
+}
+
+func (h *stressLatencyHistogram) p99(count uint64) *int {
+	if count == 0 {
+		return nil
+	}
+	rank := count - count/100
+	var cumulative uint64
+	for ms := 0; ms < len(h)-1; ms++ {
+		cumulative += h[ms].Load()
+		if cumulative >= rank {
+			return &ms
+		}
+	}
+	return nil
 }
 
 func stress(args []string) {
@@ -259,6 +283,7 @@ func runStress(o stressOptions, out io.Writer) (result stressSummary, retErr err
 	var receivers sync.WaitGroup
 	defer func() { stopReceiving(); receivers.Wait() }()
 	var acknowledged, delivered, measured, measuredBytes, latencyNS atomic.Uint64
+	var latencyHistogram stressLatencyHistogram
 	var measureFrom, measureUntil atomic.Int64
 	failure := make(chan error, 1)
 	fail := func(err error) {
@@ -309,7 +334,9 @@ func runStress(o stressOptions, out io.Writer) (result stressSummary, retErr err
 					if from := measureFrom.Load(); from > 0 && now >= from && now < measureUntil.Load() {
 						measured.Add(1)
 						measuredBytes.Add(uint64(len(msg.Value)))
-						latencyNS.Add(uint64(time.Since(time.Unix(0, sent))))
+						latency := time.Duration(now - sent)
+						latencyNS.Add(uint64(max(0, latency)))
+						latencyHistogram.record(latency)
 					}
 				case err, ok := <-errs:
 					if !ok {
@@ -488,6 +515,7 @@ func runStress(o stressOptions, out io.Writer) (result stressSummary, retErr err
 	}
 	if result.MeasuredRecords > 0 {
 		result.MeanLatencyMS = float64(latencyNS.Load()) / float64(result.MeasuredRecords) / 1e6
+		result.P99LatencyMS = latencyHistogram.p99(result.MeasuredRecords)
 	}
 	if result.Outstanding != 0 || result.SourceAcknowledged != result.TotalDelivered {
 		retErr = errors.Join(retErr, fmt.Errorf("delivery mismatch: source acknowledged=%d delivered=%d outstanding=%d",

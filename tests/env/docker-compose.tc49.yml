@@ -12,6 +12,7 @@ services:
     volumes:
       - ${TC49_LOG_DIR:?TC49_LOG_DIR is required}:/airgap/logs:z
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_CONFIG: /airgap/config/upstream-airgap-49-docker.properties
       AIRGAP_LOG_REPEAT_INTERVAL: "0"
 

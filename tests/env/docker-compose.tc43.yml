@@ -18,5 +18,6 @@ services:
     entrypoint: ["/airgap/bin/upstream"]
     command: ["/airgap/work/upstream.properties"]
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_LOG_REPEAT_INTERVAL: "0"
     restart: "no"

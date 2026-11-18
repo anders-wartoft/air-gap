@@ -56,6 +56,8 @@ services:
       - ${TC52_WORK}:/airgap/work:ro
       - ${TC52_RESULTS}:/airgap/results
   upstream:
+    environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
     image: ${AIRGAP_BASE_IMAGE}
     mem_limit: 512m
     entrypoint: ["/airgap/bin/upstream", "/airgap/work/upstream.properties"]

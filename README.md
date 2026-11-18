@@ -921,6 +921,9 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | kafkaRetryInterval | AIRGAP_UPSTREAM_KAFKA_RETRY_INTERVAL | 5000 | Positive milliseconds to wait between failed Kafka consumer startup attempts (`source=kafka`). Temporary network/broker/not-ready errors retry indefinitely at WARN level; identifiable configuration, TLS certificate, and authentication/authorization errors remain fatal. Also accepts `--kafkaRetryInterval=N`. |
 | payloadSize | AIRGAP_UPSTREAM_PAYLOAD_SIZE | 0 | 0 - ask the NIC for the MTU and subtract 68 bytes from that (IPv6 + UDP header) or set manually to the payload size (available size of UDP packets, i.e., MTU - headers) |
 | maxNrMessages | AIRGAP_UPSTREAM_MAX_NR_MESSAGES | 4096 | Maximum fragments per upstream event; configure no higher than downstream's `maxNrMessages`. |
+| udpPacingDatagramsPerSecond | AIRGAP_UPSTREAM_UDP_PACING_DATAGRAMS_PER_SECOND | 0 | Maximum UDP datagrams per second, including fragments and control datagrams. Set both pacing rates to positive values to enable pacing, or both to `0` to disable it. |
+| udpPacingBytesPerSecond | AIRGAP_UPSTREAM_UDP_PACING_BYTES_PER_SECOND | 0 | Maximum encoded UDP payload bytes per second, including Airgap framing but not UDP/IP headers. |
+| udpPacingBurstDatagrams | AIRGAP_UPSTREAM_UDP_PACING_BURST_DATAGRAMS | 32 | Maximum burst size in datagrams, from `1` to `256`. |
 | from | AIRGAP_UPSTREAM_FROM | | Don't read anything from Kafka that was delivered to Kafka before this timestamp |
 | enryption | AIRGAP_UPSTREAM_ENCRYPTION | false | true - encrypt all payload when sending to downstream air-gap. Status messages are still in clear text to help configuration and set-up |
 | publicKeyFile | AIRGAP_UPSTREAM_PUBLIC_KEY_FILE | | If encryption is on, this is the public key of the receiver |
@@ -940,7 +943,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | topicTranslations | AIRGAP_UPSTREAM_TOPIC_TRANSLATIONS | | If you need to rename a topic before sending the messages you can use this: `{"inputTopic1":"outputTopic1","inputTopic2":"outputTopic2"}`. Here, if the name of a topic upstreams is `inputTopic1` it will be sent as `outputTopic1` from upstream |
 | partitionStartValue | AIRGAP_UPSTREAM_PARTITION_START_VALUE | 0 | Adds a fixed value to each source partition before sending. Example: source partitions `0..99` with `partitionStartValue=100` become downstream partitions `100..199`. |
 | logStatistics | AIRGAP_UPSTREAM_LOG_STATISTICS | 0 | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
-| compressWhenLengthExceeds | AIRGAP_UPSTREAM_COMPRESS_WHEN_LOG_EXCEEDS | 0 | Using compression (gzip) on short events can make them longer. The break-even length is around 100 bytes for the gzip compression. Set this to a value (ideally above 1200) to gzip longer events |
+| compressWhenLengthExceeds | AIRGAP_UPSTREAM_COMPRESS_WHEN_LENGTH_EXCEEDS | 0 | Using compression (gzip) on short events can make them longer. The break-even length is around 100 bytes for the gzip compression. Set this to a value (ideally above 1200) to gzip longer events |
 | inputFilterRules | AIRGAP_UPSTREAM_INPUT_FILTER_RULES | | Path to file containing ordered allow/deny regex rules, or inline comma-separated rules. Format: `action:regex_pattern` where action is `allow` or `deny`. Rules evaluated in order, first match wins. Matched events are sent with **empty payload** (not dropped) so the gap-detector sees every sequence ID. The deduplicator discards zero-length events before writing to the clean topic. See [InputFilter.md](doc/InputFilter.md) for details |
 | inputFilterDefaultAction | AIRGAP_UPSTREAM_INPUT_FILTER_DEFAULT_ACTION | allow | Default action when no filter rules match: `allow` or `deny`. Use `deny` for allowlist approach, `allow` for blocklist approach |
 | inputFilterTimeout | AIRGAP_UPSTREAM_INPUT_FILTER_TIMEOUT | 100 | Regex match timeout in milliseconds for input filter rules. Protects against ReDoS attacks. Increase for complex patterns or large payloads |
@@ -1034,11 +1037,11 @@ The property privateKeyFiles should point to one or more private key files that 
 | targetIP | AIRGAP_DOWNSTREAM_TARGET_IP | | Ip address to bind to |
 | targetPort | AIRGAP_DOWNSTREAM_TARGET_PORT | | Port to bind to |
 | bootstrapServers | AIRGAP_DOWNSTREAM_BOOTSTRAP_SERVERS | | Bootstrap url for Kafka, with port |
-| clientId | AIRGAP_DOWNSTREAM_CLIENT_ID | | Id to use when writing to Kafka |
+| clientId | AIRGAP_DOWNSTREAM_CLIENT_ID | | Kafka producer client ID. A nonempty environment value overrides the properties file. |
 | mtu | AIRGAP_DOWNSTREAM_MTU | 0 | 0 - ask the NIC for the MTU, else enter a positive integer |
 | target | AIRGAP_DOWNSTREAM_TARGET | kafka | kafka, cmd and null are valid values. cmd will print the output to the console, null will just forget the received message but collect statistics of received events to calculate EPS when terminated. |
 | transport | AIRGAP_DOWNSTREAM_TRANSPORT | udp | Transport protocol to use: udp or tcp. Use tcp when no diode is needed |
-| privateKeyFiles | AIRGAP_DOWNSTREAM_PRIVATE_KEY_FILES | | Glob covering all private key files to load |
+| privateKeyFiles | AIRGAP_DOWNSTREAM_PRIVATE_KEY_GLOB | | Glob covering all private key files to load |
 | logFileName | AIRGAP_DOWNSTREAM_LOG_FILE_NAME | | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
 | logFormat | AIRGAP_DOWNSTREAM_LOG_FORMAT | text | `text` for the usual one line per record, or `otel` for OpenTelemetry Logs as OTLP/JSON. See [Logging.md](doc/Logging.md) |
 | (environment only) | AIRGAP_LOG_REPEAT_INTERVAL | 10000 | Milliseconds between summaries of repeated application log records; `0` disables suppression. Shared by all Go services. See [Logging.md](doc/Logging.md#repeated-messages) |
@@ -1160,6 +1163,61 @@ Some problems that may arise are:
 
 - The UDP sending fails. Check that you have static arp (arp -s) and route (ip route add) enabled.
 - If the UDP connection is very unstable, then condider using two instances of upstream/downstream sending the same information over two different hardware diodes to the same Kafka and the same topic. Duplicates should be removed by the gap-detection so the result should be a more stable connection.
+
+### Calibrating UDP pacing before installing a data diode
+
+Run calibration once per hardware and network setup, in an isolated maintenance
+window before installing the diode. Start normal UDP downstream, configured to
+write to Kafka. Pre-create a dedicated, short-retention topic named
+`airgap-calibration` or `airgap-calibration-NAME` on that broker. The topic must
+not be translated on downstream, shared with another writer, or consumed by
+production applications. The calibration topic's partition count affects the
+workload; choose a count representative of your deployment.
+
+From the upstream host, with temporary access to downstream Kafka:
+
+```sh
+upstream --calibrate --address=downstream.example:1234 \
+  --brokers=kafka.example:9092 --topic=airgap-calibration-site1
+```
+
+`--nic` optionally binds to the upstream interface. Kafka verification supports
+plaintext, TLS with `--kafka-ca-file`, or mutual TLS with `--kafka-cert-file` and
+`--kafka-key-file` (and `--kafka-key-password-file` if needed). SASL is not
+supported. Calibration reads directly from the topic without joining a consumer
+group, committing offsets, or creating topics.
+
+After checking routing, the command tests increasing caps using synthetic
+400–1,600 byte records with a 1,400-byte UDP payload ceiling. It checks every
+record in Kafka and stops increasing at the first delivery shortfall. By default
+each rate is tested for 10 seconds, plus 3 seconds to observe the Kafka tail.
+Use `--rates`, `--duration`, `--drain`, and `--burst` to adjust the trial and
+`--help` to see the accepted ranges. The recommendation is reduced by 20% from
+the best measured passing rate (never above its configured cap), then tested
+again. Trial details go to stderr; only the three paste-ready UDP pacing
+properties go to stdout. Failed calibration exits nonzero and prints no settings.
+
+Copy the settings into your upstream properties manually and remove upstream's
+temporary access to downstream Kafka before installing the diode. Production
+upstream uses the static pacing settings and needs no return path. These
+results are a starting point, not a guarantee: synthetic traffic does not
+exercise source Kafka, production compression/encryption, or the installed
+diode. Operators can raise `udpPacingDatagramsPerSecond` in small increments
+and recheck loss and latency under representative load after installation.
+The byte-rate cap can still limit throughput independently of the datagram cap.
+
+Instead of editing the properties file, you can set the calibrated values in
+the upstream process environment, for example:
+
+```sh
+export AIRGAP_UPSTREAM_UDP_PACING_DATAGRAMS_PER_SECOND=28939
+export AIRGAP_UPSTREAM_UDP_PACING_BYTES_PER_SECOND=40514600
+export AIRGAP_UPSTREAM_UDP_PACING_BURST_DATAGRAMS=32
+```
+
+Command-line overrides take precedence over environment variables, which take
+precedence over the properties file. The older `AIRGAP_UPSTREAM_UDPPACING...`
+names remain supported when the corresponding underscore-separated name is unset.
 
 ### UDP Broadcast
 

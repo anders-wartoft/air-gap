@@ -53,47 +53,51 @@ type TransferConfiguration struct {
 	inputFilter                         *inputfilter.InputFilter // input filter instance
 	partitionStartValue                 int                      // value added to source partition number before sending
 	eps                                 float64                  // events per second
-	logLevel                            string                   // log level: DEBUG, INFO, WARN, ERROR, FATAL
-	logStatistics                       int32                    // log statistics every n seconds, 0 means no logging
-	compressWhenLengthExceeds           int                      // compress messages when length exceeds this value, 0 means no compression
-	tcpRetryInterval                    int                      // milliseconds between TCP send retries (default 1000)
-	tcpRetryTimes                       int                      // max TCP send retries, 0 = infinite (default 0)
-	tcpRetryErrorLevel                  string                   // log level for TCP retry messages (default "WARN")
-	tcpTLSEnabled                       bool                     // enable TLS for TCP transport (default false)
-	tcpTLSCertFile                      string                   // client certificate file for TCP mTLS
-	tcpTLSKeyFile                       string                   // client private key file for TCP mTLS
-	tcpTLSKeyPasswordFile               string                   // password file for encrypted TCP TLS key
-	tcpTLSCAFile                        string                   // CA certificate file to verify downstream server cert
-	tcpTLSServerCNRegex                 string                   // regex matched against server certificate CN; allows IP-based connections and load-balanced setups
-	tcpTLSCipherSuites                  string                   // TLS protocol policy: empty or "TLS1.3" = TLS 1.3 only; comma-separated TLS 1.2 cipher names = TLS 1.2 with those suites
-	tcpTLSAuthMode                      string                   // TCP peer authentication mode: "ca" (default, CA-issued certificates) or "pinned" (exact SHA-256 public-key fingerprints, no CA)
-	tcpTLSTrustedKeysDir                string                   // directory with JSON trust entries for pinned mode; holds the public keys of the downstream servers we accept
-	tcpTLSRotationEnabled               bool                     // allow acknowledged client identity rotation in pinned mode (default false: never switch identity without an explicit config change)
-	tcpTLSPinIdleSeconds                int                      // deactivate unused overlapping pins in memory after this many idle seconds; 0 (default) disables aging
-	kafkaFetchDefaultBytes              int                      // Sarama Consumer.Fetch.Default: bytes requested per partition per fetch; the normal working-set size (default 1 MiB)
-	kafkaMaxMessageBytes                int                      // Sarama Consumer.Fetch.Max: hard ceiling per partition per fetch. Must be at least the broker's max.message.bytes, otherwise larger records are skipped by Sarama
-	kafkaChannelBufferSize              int                      // Sarama ChannelBufferSize: records pre-buffered per partition before the handler runs. Peak consumer memory is roughly kafkaMaxMessageBytes * (buffer + 1) * partitions
-	kafkaMaxProcessingTimeMs            int                      // Sarama Consumer.MaxProcessingTime: maximum expected interval between draining records from a partition channel (default 30 seconds)
-	kafkaRetryInterval                  int                      // milliseconds to wait after a transient Kafka consumer startup failure (default 5000)
-	memoryLimitBytes                    int64                    // explicit memory budget in bytes; 0 (default) auto-detects from the cgroup. May only lower a detected cgroup limit, never raise it
-	memoryHighWatermarkPercent          int                      // pause Kafka record admission when used memory reaches this percentage of the limit (default 80)
-	memoryLowWatermarkPercent           int                      // resume Kafka record admission when used memory falls back to this percentage of the limit (default 70); must be lower than the high watermark
-	memoryCheckIntervalMs               int                      // milliseconds between memory samples while deciding whether to pause or resume admission (default 100)
-	memoryStallStatusIntervalSeconds    int                      // repeat local warning and downstream STATUS while admission stays paused (default 60 seconds); 0 disables alerts
-	goMemoryLimitPercent                int                      // Go runtime soft memory target as a percentage of the limit (default 60); must be below the low watermark; 0 leaves the runtime limit unchanged
-	memoryHighWatermarkLog              string                   // LEVEL:message written when Kafka record admission is paused, or NONE to stay silent. See messages.go for the template rules
-	memoryLowWatermarkLog               string                   // LEVEL:message written when Kafka record admission resumes, or NONE (default) to stay silent
-	maxEventBytes                       int                      // largest Kafka record upstream will forward; larger records are replaced by an Airgap Lost Event guard. 0 (default) disables the ceiling
-	maxNrMessages                       int                      // maximum fragments the downstream accepts per message
-	lostEventGuard                      bool                     // emit an Airgap Lost Event guard in place of records that cannot be delivered, keeping the offset sequence continuous (default true)
-	lostEvent                           string                   // LEVEL:message written when an event is lost, or NONE to stay silent. Lost-event placeholders are listed in lostEventContext
-	airgapLostEventMessage              string                   // payload delivered in place of a lost record. Keep the AIRGAP LOST EVENT prefix so downstream can find every lost event
-	airgapLostEventMessageFormat        string                   // rendering mode for airgapLostEventMessage: text (default) or json
-	lostEventDirectory                  string                   // directory where the original payload of a lost event is written for forensics; empty disables it
-	lostEventDirectoryCompressAfterDays int                      // age in days after which stale files in lostEventDirectory are compressed to .zip (default 7)
-	lostEventDirectoryDeleteAfterDays   int                      // age in days after which stale files in lostEventDirectory are removed (default 60)
-	lostMessageTruncatedMessage         string                   // LEVEL:message emitted when a lost-event file is removed or truncated to reclaim disk space; NONE disables it
-	lostMessageTruncatedMessageFormat   string                   // rendering mode for lostMessageTruncatedMessage: text (default) or json
+	udpPacingDatagramsPerSecond         int
+	udpPacingBytesPerSecond             int
+	udpPacingBurstDatagrams             int
+	explicitUDPPacing                   bool
+	logLevel                            string // log level: DEBUG, INFO, WARN, ERROR, FATAL
+	logStatistics                       int32  // log statistics every n seconds, 0 means no logging
+	compressWhenLengthExceeds           int    // compress messages when length exceeds this value, 0 means no compression
+	tcpRetryInterval                    int    // milliseconds between TCP send retries (default 1000)
+	tcpRetryTimes                       int    // max TCP send retries, 0 = infinite (default 0)
+	tcpRetryErrorLevel                  string // log level for TCP retry messages (default "WARN")
+	tcpTLSEnabled                       bool   // enable TLS for TCP transport (default false)
+	tcpTLSCertFile                      string // client certificate file for TCP mTLS
+	tcpTLSKeyFile                       string // client private key file for TCP mTLS
+	tcpTLSKeyPasswordFile               string // password file for encrypted TCP TLS key
+	tcpTLSCAFile                        string // CA certificate file to verify downstream server cert
+	tcpTLSServerCNRegex                 string // regex matched against server certificate CN; allows IP-based connections and load-balanced setups
+	tcpTLSCipherSuites                  string // TLS protocol policy: empty or "TLS1.3" = TLS 1.3 only; comma-separated TLS 1.2 cipher names = TLS 1.2 with those suites
+	tcpTLSAuthMode                      string // TCP peer authentication mode: "ca" (default, CA-issued certificates) or "pinned" (exact SHA-256 public-key fingerprints, no CA)
+	tcpTLSTrustedKeysDir                string // directory with JSON trust entries for pinned mode; holds the public keys of the downstream servers we accept
+	tcpTLSRotationEnabled               bool   // allow acknowledged client identity rotation in pinned mode (default false: never switch identity without an explicit config change)
+	tcpTLSPinIdleSeconds                int    // deactivate unused overlapping pins in memory after this many idle seconds; 0 (default) disables aging
+	kafkaFetchDefaultBytes              int    // Sarama Consumer.Fetch.Default: bytes requested per partition per fetch; the normal working-set size (default 1 MiB)
+	kafkaMaxMessageBytes                int    // Sarama Consumer.Fetch.Max: hard ceiling per partition per fetch. Must be at least the broker's max.message.bytes, otherwise larger records are skipped by Sarama
+	kafkaChannelBufferSize              int    // Sarama ChannelBufferSize: records pre-buffered per partition before the handler runs. Peak consumer memory is roughly kafkaMaxMessageBytes * (buffer + 1) * partitions
+	kafkaMaxProcessingTimeMs            int    // Sarama Consumer.MaxProcessingTime: maximum expected interval between draining records from a partition channel (default 30 seconds)
+	kafkaRetryInterval                  int    // milliseconds to wait after a transient Kafka consumer startup failure (default 5000)
+	memoryLimitBytes                    int64  // explicit memory budget in bytes; 0 (default) auto-detects from the cgroup. May only lower a detected cgroup limit, never raise it
+	memoryHighWatermarkPercent          int    // pause Kafka record admission when used memory reaches this percentage of the limit (default 80)
+	memoryLowWatermarkPercent           int    // resume Kafka record admission when used memory falls back to this percentage of the limit (default 70); must be lower than the high watermark
+	memoryCheckIntervalMs               int    // milliseconds between memory samples while deciding whether to pause or resume admission (default 100)
+	memoryStallStatusIntervalSeconds    int    // repeat local warning and downstream STATUS while admission stays paused (default 60 seconds); 0 disables alerts
+	goMemoryLimitPercent                int    // Go runtime soft memory target as a percentage of the limit (default 60); must be below the low watermark; 0 leaves the runtime limit unchanged
+	memoryHighWatermarkLog              string // LEVEL:message written when Kafka record admission is paused, or NONE to stay silent. See messages.go for the template rules
+	memoryLowWatermarkLog               string // LEVEL:message written when Kafka record admission resumes, or NONE (default) to stay silent
+	maxEventBytes                       int    // largest Kafka record upstream will forward; larger records are replaced by an Airgap Lost Event guard. 0 (default) disables the ceiling
+	maxNrMessages                       int    // maximum fragments the downstream accepts per message
+	lostEventGuard                      bool   // emit an Airgap Lost Event guard in place of records that cannot be delivered, keeping the offset sequence continuous (default true)
+	lostEvent                           string // LEVEL:message written when an event is lost, or NONE to stay silent. Lost-event placeholders are listed in lostEventContext
+	airgapLostEventMessage              string // payload delivered in place of a lost record. Keep the AIRGAP LOST EVENT prefix so downstream can find every lost event
+	airgapLostEventMessageFormat        string // rendering mode for airgapLostEventMessage: text (default) or json
+	lostEventDirectory                  string // directory where the original payload of a lost event is written for forensics; empty disables it
+	lostEventDirectoryCompressAfterDays int    // age in days after which stale files in lostEventDirectory are compressed to .zip (default 7)
+	lostEventDirectoryDeleteAfterDays   int    // age in days after which stale files in lostEventDirectory are removed (default 60)
+	lostMessageTruncatedMessage         string // LEVEL:message emitted when a lost-event file is removed or truncated to reclaim disk space; NONE disables it
+	lostMessageTruncatedMessageFormat   string // rendering mode for lostMessageTruncatedMessage: text (default) or json
 }
 
 func DefaultConfiguration() TransferConfiguration {
@@ -108,7 +112,8 @@ func DefaultConfiguration() TransferConfiguration {
 	config.sendingThreads = []map[string]int{
 		{"now": 0},
 	}
-	config.eps = -1                      // default: no throttle
+	config.eps = -1 // default: no throttle
+	config.udpPacingBurstDatagrams = 32
 	config.logStatistics = 0             // default: no statistics
 	config.compressWhenLengthExceeds = 0 // default: no compression
 	config.inputFilterTimeout = 100      // default: 100ms regex timeout
@@ -174,6 +179,52 @@ func configInvalid(setting string, value interface{}) logging.Attrs {
 }
 
 // Parse the configuration file and return a TransferConfiguration struct.
+func (c *TransferConfiguration) udpPacingSettings() map[string]*int {
+	return map[string]*int{
+		"udpPacingDatagramsPerSecond": &c.udpPacingDatagramsPerSecond,
+		"udpPacingBytesPerSecond":     &c.udpPacingBytesPerSecond,
+		"udpPacingBurstDatagrams":     &c.udpPacingBurstDatagrams,
+	}
+}
+
+func setUDPPacingSetting(key, value string, dest *int) error {
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		return fmt.Errorf("%s must be a nonnegative integer, got %q", key, value)
+	}
+	*dest = n
+	return nil
+}
+
+func (c TransferConfiguration) validateUDPPacing() error {
+	datagrams, bytes := c.udpPacingDatagramsPerSecond, c.udpPacingBytesPerSecond
+	if (datagrams != 0 || bytes != 0) && (datagrams <= 0 || bytes <= 0 || c.transport != "udp") {
+		return fmt.Errorf("UDP pacing requires transport=udp and two positive rates (both zero disables it)")
+	}
+	if c.udpPacingBurstDatagrams < 1 || c.udpPacingBurstDatagrams > 256 {
+		return fmt.Errorf("udpPacingBurstDatagrams must be 1..256")
+	}
+	return nil
+}
+
+// Batch tests pass a fallback, not an override of properties, env, or CLI.
+func (c *TransferConfiguration) applyTestUDPPacing(value string) error {
+	if value == "" || c.explicitUDPPacing || (c.transport != "" && c.transport != "udp") {
+		return nil
+	}
+	var datagrams, bytes, burst int
+	parts := strings.Split(value, ",")
+	if len(parts) != 3 ||
+		setUDPPacingSetting("datagrams/s", parts[0], &datagrams) != nil ||
+		setUDPPacingSetting("bytes/s", parts[1], &bytes) != nil ||
+		setUDPPacingSetting("burst", parts[2], &burst) != nil ||
+		datagrams == 0 || bytes == 0 || burst < 1 || burst > 256 {
+		return fmt.Errorf("invalid AIRGAP_TEST_UDP_PACING: expected positive datagrams/s,bytes/s,burst (burst 1..256)")
+	}
+	c.udpPacingDatagramsPerSecond, c.udpPacingBytesPerSecond, c.udpPacingBurstDatagrams = datagrams, bytes, burst
+	return nil
+}
+
 func ReadParameters(fileName string, result TransferConfiguration) (TransferConfiguration, error) {
 	if fileName == "" {
 		// No file, return default configuration
@@ -193,6 +244,7 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 	), "Reading configuration from file "+fileName)
 
 	scanner := bufio.NewScanner(file)
+	pacingSettings := result.udpPacingSettings()
 	for scanner.Scan() {
 		line := properties.StripComment(scanner.Text())
 		if line == "" {
@@ -205,6 +257,13 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
 
+		if dest := pacingSettings[key]; dest != nil {
+			result.explicitUDPPacing = true
+			if err := setUDPPacingSetting(key, value, dest); err != nil {
+				return result, err
+			}
+			continue
+		}
 		switch key {
 		case "eps":
 			tmp, err := strconv.ParseFloat(value, 64)
@@ -595,6 +654,25 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		logging.Str("airgap.config.source", "environment"),
 	), "Checking configuration from environment variables...")
 	prefix := "AIRGAP_UPSTREAM_"
+	pacingSettings := config.udpPacingSettings()
+	for key, suffix := range map[string]string{
+		"udpPacingDatagramsPerSecond": "UDP_PACING_DATAGRAMS_PER_SECOND",
+		"udpPacingBytesPerSecond":     "UDP_PACING_BYTES_PER_SECOND",
+		"udpPacingBurstDatagrams":     "UDP_PACING_BURST_DATAGRAMS",
+	} {
+		name := prefix + suffix
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			name = prefix + strings.ToUpper(key)
+			value, ok = os.LookupEnv(name)
+		}
+		if ok {
+			config.explicitUDPPacing = true
+			if err := setUDPPacingSetting(name, value, pacingSettings[key]); err != nil {
+				Logger.Fatal(configInvalid(key, value), err)
+			}
+		}
+	}
 	if eps := os.Getenv(prefix + "EPS"); eps != "" {
 		if epsFloat, err := strconv.ParseFloat(eps, 64); err == nil {
 			Logger.Info(configOverride("eps", prefix+"EPS", eps), "Overriding eps with environment variable: "+prefix+"EPS"+" with value: "+eps)
@@ -918,6 +996,7 @@ func applyInt64Environment(prefix, environmentName, setting string, destination 
 
 // parseCommandLineOverrides parses --name=value arguments and applies them to the config struct.
 func parseCommandLineOverrides(args []string, config TransferConfiguration) TransferConfiguration {
+	pacingSettings := config.udpPacingSettings()
 	for _, arg := range args {
 		if !strings.HasPrefix(arg, "--") {
 			continue
@@ -929,6 +1008,13 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 		}
 		key := kv[0]
 		value := kv[1]
+		if dest := pacingSettings[key]; dest != nil {
+			config.explicitUDPPacing = true
+			if err := setUDPPacingSetting(key, value, dest); err != nil {
+				Logger.Fatal(configInvalid(key, value), err)
+			}
+			continue
+		}
 		switch key {
 		case "id":
 			config.id = value
@@ -1215,6 +1301,9 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		result.transport = "udp"
 		Logger.Info(configApplied("transport", "udp"), "transport not specified, using default: udp")
 	}
+	if err := result.validateUDPPacing(); err != nil {
+		Logger.Fatal(configInvalid("udpPacing", nil), err)
+	}
 	if result.source == "kafka" {
 		if result.bootstrapServers == "" {
 			Logger.Fatal(configInvalid("bootstrapServers", nil), "Missing required configuration: bootstrapServers")
@@ -1496,6 +1585,11 @@ func logConfiguration(config TransferConfiguration) {
 	}
 	Logger.Infof(configApplied("source", config.source), "  source: %s", config.source)
 	Logger.Infof(configApplied("eps", config.eps), "  eps: %f", config.eps)
+	if config.transport == "udp" {
+		Logger.Infof(configApplied("udpPacing", config.udpPacingDatagramsPerSecond),
+			"  UDP pacing: %d datagrams/s, %d payload bytes/s, burst %d datagrams (0 rates = disabled)",
+			config.udpPacingDatagramsPerSecond, config.udpPacingBytesPerSecond, config.udpPacingBurstDatagrams)
+	}
 
 	Logger.Infof(configApplied("generateNewSymmetricKeyEvery", config.generateNewSymmetricKeyEvery), "  generateNewSymmetricKeyEvery: %d seconds", config.generateNewSymmetricKeyEvery)
 	if len(config.sendingThreads) > 0 {

@@ -25,8 +25,13 @@ class BatchRunnerTests(unittest.TestCase):
         (self.runner / "lib").mkdir()
         shutil.copy2(HERE / "run-testcases.sh", self.runner)
         shutil.copy2(HERE / "lib/chain-report.py", self.runner / "lib")
-        for name in ("docker-test.sh", "docker-images.sh"):
+        for name in ("docker-test.sh", "docker-images.sh", "udp-calibration.sh"):
             shutil.copy2(HERE / "lib" / name, self.runner / "lib")
+        (self.runner / "calibrate-test-udp.sh").write_text(
+            'printf "preflight\\n" >> pacing-calls\n'
+            'printf "%s\\n" udpPacingDatagramsPerSecond=10000 udpPacingBytesPerSecond=14000000 '
+            'udpPacingBurstDatagrams=32 > "$1/pacing.properties"\n'
+        )
         for number in (1, 2, 3):
             (self.runner / f"testcases/{number:02}.env").write_text("TC_RUNNER=stub\n")
         (self.runner / "testcases/16.env").write_text(
@@ -37,6 +42,7 @@ class BatchRunnerTests(unittest.TestCase):
         stub = self.runner / "run-testcase.sh"
         stub.write_text(
             '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> calls\n'
+            'printf "%s=%s\\n" "$1" "${AIRGAP_TEST_UDP_PACING:-}" >> pacing-calls\n'
             'printf "\\033[31mcase <failure> & output\\001\\033[0m\\n"\n'
             'if [[ "$1" == 2 ]]; then exit 7; fi\n'
         )
@@ -121,6 +127,27 @@ class BatchRunnerTests(unittest.TestCase):
         completed = self.run_batch("1,16")
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertIn("chain OK", completed.stdout)
+
+    def test_pacing_preflight_runs_once_and_preserves_exceptions(self):
+        manifest = self.runner / "testcases/03.env"
+        manifest.write_text("TC_RUNNER=stub\nTC_UDP_CALIBRATION=0\n")
+        completed = self.run_batch("--log-dir", "logs", "1,3,2")
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        self.assertEqual((self.runner / "pacing-calls").read_text().splitlines(), [
+            "preflight", "1=10000,14000000,32", "3=", "2=10000,14000000,32",
+        ])
+        self.assertIn("udpPacingBurstDatagrams=32",
+                      (self.root / "logs/udp-calibration/pacing.properties").read_text())
+
+    def test_failed_or_invalid_preflight_starts_no_cases(self):
+        script = self.runner / "calibrate-test-udp.sh"
+        for command in ("exit 7", 'echo malformed > "$1/pacing.properties"'):
+            with self.subTest(command=command):
+                script.write_text(command + "\n")
+                completed = self.run_batch("--log-dir", "logs", "1")
+                self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                self.assertFalse((self.runner / "calls").exists())
+                self.assertIn("UDP calibration: FAILED", (self.root / "logs/overview.log").read_text())
 
     def test_overview_is_live_and_overwritten_on_next_run(self):
         stub = self.runner / "run-testcase.sh"

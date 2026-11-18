@@ -16,6 +16,10 @@ services:
     depends_on: 
       - downstream
     image: ${UPSTREAM_BASE_IMAGE:-docker.io/library/rockylinux:9.3}
+    environment:
+      - AIRGAP_UPSTREAM_UDP_PACING_DATAGRAMS_PER_SECOND
+      - AIRGAP_UPSTREAM_UDP_PACING_BYTES_PER_SECOND
+      - AIRGAP_UPSTREAM_UDP_PACING_BURST_DATAGRAMS
     volumes:
       - ./target/dist:/dist:ro
       - ./config:/config:ro

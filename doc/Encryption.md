@@ -33,7 +33,7 @@ Multiple private key files are tried in sequence, so key rotation on downstream 
 
 | Property (downstream) | Env variable | Description |
 | --------------------- | ------------ | ----------- |
-| `privateKeyFiles` | `AIRGAP_DOWNSTREAM_PRIVATE_KEY_FILES` | Glob covering all private key PEM files to load |
+| `privateKeyFiles` | `AIRGAP_DOWNSTREAM_PRIVATE_KEY_GLOB` | Glob covering all private key PEM files to load |
 
 ### Key Generation
 

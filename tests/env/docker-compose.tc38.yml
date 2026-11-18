@@ -30,6 +30,7 @@ services:
     entrypoint: ["/airgap/work/upstream"]
     command: ["/airgap/config/upstream-airgap-38-docker.properties"]
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_LOG_REPEAT_INTERVAL: ${TC38_REPEAT_INTERVAL:-2000}
       AIRGAP_UPSTREAM_LOG_FILE_NAME: /airgap/work/${TC38_PHASE:-enabled}.jsonl
       AIRGAP_UPSTREAM_TCP_TLS_CERT_FILE: ${TC38_CLIENT_CERT:-}

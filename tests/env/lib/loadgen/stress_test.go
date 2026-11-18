@@ -79,6 +79,7 @@ func TestStressWindowTracksLateAndMissingRecords(t *testing.T) {
 	if err := w.expire(time.Now()); err != nil {
 		t.Fatal(err)
 	}
+
 	if w.size() != 1 || len(w.missingSample()) != 1 {
 		t.Fatal("expiration concealed a missing record")
 	}
@@ -90,5 +91,21 @@ func TestStressWindowTracksLateAndMissingRecords(t *testing.T) {
 	}
 	if err := w.complete(1, sent); err == nil {
 		t.Fatal("late duplicate accepted")
+	}
+}
+
+func TestStressLatencyP99(t *testing.T) {
+	var histogram stressLatencyHistogram
+	for range 98 {
+		histogram.record(time.Millisecond)
+	}
+	histogram.record(12*time.Millisecond + time.Microsecond)
+	histogram.record(time.Hour)
+	if got := histogram.p99(100); got == nil || *got != 13 {
+		t.Fatalf("p99 = %v, want 13 ms", got)
+	}
+	histogram.record(time.Hour)
+	if got := histogram.p99(101); got != nil {
+		t.Fatalf("p99 beyond histogram range = %d, want unavailable", *got)
 	}
 }

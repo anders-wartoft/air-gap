@@ -12,6 +12,7 @@ services:
       - ${TC27_WORK_DIR:?Run through run-testcase.sh 27}/client:/airgap/identity:ro,z
       - ${TC27_WORK_DIR}/${TC27_UPSTREAM_TRUST_DIR:-servers}:/airgap/trusted:ro,z
     environment:
+      AIRGAP_TEST_UDP_PACING: ${AIRGAP_TEST_UDP_PACING:-}
       AIRGAP_CONFIG: /airgap/config/upstream-pinned-27-docker.properties
       AIRGAP_UPSTREAM_TCP_TLS_CERT_FILE: /airgap/identity/client-${TC27_CLIENT_KEY:-1}.crt
       AIRGAP_UPSTREAM_TCP_TLS_KEY_FILE: /airgap/identity/client-${TC27_CLIENT_KEY:-1}.key
