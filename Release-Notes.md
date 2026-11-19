@@ -38,6 +38,20 @@
   fixed-rate and calibrated delivery through a brief downstream stall. It
   reports delivered EPS, p99 latency, losses and the calibrated settings.
 
+  Set both upstream pacing rates to positive values to enable pacing, or set
+  both to `0` (the default) to disable it. The byte limit counts encoded UDP
+  payload bytes, not UDP/IP headers. The burst limit is in datagrams and
+  defaults to `32` (allowed range: `1` to `256`).
+
+  Example upstream environment settings (use rates
+  [calibrated for your link](./README.md#calibrating-udp-pacing-before-installing-a-data-diode)):
+
+  ```sh
+  export AIRGAP_UPSTREAM_UDP_PACING_DATAGRAMS_PER_SECOND=28939
+  export AIRGAP_UPSTREAM_UDP_PACING_BYTES_PER_SECOND=40514600
+  export AIRGAP_UPSTREAM_UDP_PACING_BURST_DATAGRAMS=32
+  ```
+
 ### Delayed Kafka subscriptions
 
 - Long delivery waits now pause fetching and retain up to 64 additional
