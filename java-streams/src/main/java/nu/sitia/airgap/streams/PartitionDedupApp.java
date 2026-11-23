@@ -31,9 +31,11 @@ import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.ConfigEntry;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.RetriableException;
+import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.streams.KafkaStreams;
@@ -502,7 +504,7 @@ public class PartitionDedupApp {
                     }
                 }
 
-                if (!ensureChangelogCompaction(props)) {
+                if (!ensureGapTopicCompaction(props) || !ensureChangelogCompaction(props)) {
                     try {
                         Thread.sleep(applyJitter(Math.max(1L, RETRY_BACKOFF_MS)));
                     } catch (InterruptedException e) {
@@ -1080,36 +1082,73 @@ public class PartitionDedupApp {
 
     static boolean ensureChangelogCompaction(Properties props) {
         String topic = props.getProperty(StreamsConfig.APPLICATION_ID_CONFIG) + "-" + STORE_GAP + "-changelog";
+        return ensureTopicCompaction(props, topic, false);
+    }
+
+    static boolean ensureGapTopicCompaction(Properties props) {
+        return ensureTopicCompaction(props, GAP_TOPIC, true);
+    }
+
+    private static boolean ensureTopicCompaction(Properties props, String topic, boolean gapTopic) {
         ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topic);
         Admin admin = Admin.create(createAdminProps(props));
         try {
-            org.apache.kafka.clients.admin.Config config = admin.describeConfigs(List.of(resource))
-                    .all().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS).get(resource);
+            org.apache.kafka.clients.admin.Config config;
+            try {
+                config = admin.describeConfigs(List.of(resource))
+                        .all().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS).get(resource);
+            } catch (java.util.concurrent.ExecutionException missing) {
+                if (!gapTopic || !(missing.getCause() instanceof UnknownTopicOrPartitionException)) throw missing;
+                List<String> sourceTopics = new ArrayList<>();
+                for (String source : RAW_TOPICS.split(",")) {
+                    if (!source.trim().isEmpty()) sourceTopics.add(source.trim());
+                }
+                Map<String, org.apache.kafka.clients.admin.TopicDescription> descriptions =
+                        admin.describeTopics(sourceTopics).allTopicNames()
+                                .get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                int partitions = descriptions.values().stream()
+                        .mapToInt(description -> description.partitions().size()).max()
+                        .orElseThrow(() -> new IllegalStateException("No source topics configured for " + topic));
+                try {
+                    admin.createTopics(List.of(new NewTopic(topic, partitions, (short) -1)
+                            .configs(Map.of(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT))))
+                            .all().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                    Log.info(LOG, Attrs.event(Events.CONFIG_APPLIED).with("messaging.destination.name", topic),
+                            "Created gap topic with cleanup.policy=compact and {} partitions", partitions);
+                } catch (java.util.concurrent.ExecutionException e) {
+                    // Another instance may have created it. Always verify existing topics too.
+                    if (!(e.getCause() instanceof TopicExistsException)) throw e;
+                }
+                config = admin.describeConfigs(List.of(resource))
+                        .all().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS).get(resource);
+            }
             String policy = config.get(TopicConfig.CLEANUP_POLICY_CONFIG).value();
             if (!TopicConfig.CLEANUP_POLICY_COMPACT.equals(policy)) {
                 Log.warn(LOG, Attrs.event(Events.CONFIG_APPLIED).with("messaging.destination.name", topic),
-                        "Repairing changelog cleanup.policy from {} to compact before processing; "
-                                + "time-based deletion can discard dedup history", policy);
+                        "Repairing {} cleanup.policy from {} to compact before processing; "
+                                + "gap snapshots and dedup history require compaction",
+                        gapTopic ? "gap topic" : "changelog", policy);
                 admin.incrementalAlterConfigs(Map.of(resource, List.of(new AlterConfigOp(
                         new ConfigEntry(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT),
                         AlterConfigOp.OpType.SET)))).all().get(FAIL_FAST_CHECK_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             }
             return true;
         } catch (java.util.concurrent.ExecutionException e) {
-            if (e.getCause() instanceof UnknownTopicOrPartitionException) {
+            if (!gapTopic && e.getCause() instanceof UnknownTopicOrPartitionException) {
                 // Kafka Streams creates a missing changelog with the explicit compact policy.
                 return true;
             }
             if (e.getCause() instanceof RetriableException) {
                 Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT).exception(e.getCause()),
-                        "Cannot verify changelog policy yet; delaying startup until Kafka is available");
+                        "Cannot verify compaction policy for {} yet; delaying startup until Kafka is available", topic);
                 return false;
             }
             throw new IllegalStateException("Cannot verify/repair cleanup.policy=compact for " + topic
-                    + "; check DescribeConfigs/AlterConfigs permissions", e.getCause());
+                    + "; check DescribeConfigs/AlterConfigs permissions"
+                    + (gapTopic ? " and Create permission for a missing gap topic" : ""), e.getCause());
         } catch (java.util.concurrent.TimeoutException e) {
             Log.warn(LOG, Attrs.event(Events.KAFKA_CONNECT).exception(e),
-                    "Timed out verifying changelog policy; delaying startup until Kafka is available");
+                    "Timed out verifying compaction policy for {}; delaying startup until Kafka is available", topic);
             return false;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

@@ -32,9 +32,19 @@ Example bundle entry (two windows merged; offsets are absolute):
 {"gaps":[[3],[1005],[1010,1015]],"partition":0,"topic":"transfer","window_min":0,"window_max":1999}
 ```
 
-In order for this to work, we must make sure the GAP_TOPIC only stores one version of the gaps per window, so we always get the latest state.
+`create` scans records incrementally, keeps the latest state per window and
+honours tombstones even before compaction has finished. Binary gap bitmaps stay
+compressed during the scan; gap ranges are converted to JSON incrementally
+instead of retaining millions of range slices and copies of the complete
+bundle. File output is replaced only after the complete bundle is written, and
+write failures cause a nonzero exit.
 
-If the GAP_TOPIC topic has the property `cleanup.policy=compact`, then only the latest record for each key will be retained after compaction. Newer records with the same key will overwrite older ones.
+`GAP_TOPIC` must use
+`cleanup.policy=compact` to prevent historical updates from accumulating on disk.
+Dedup now creates or repairs this policy at startup, including existing
+delete-only topics. Compaction runs asynchronously; see
+[topic configuration](Deduplication.md#kafka-topic-configuration-specification)
+for cleaner settings and upgrade checks.
 
 To check the property value:
 

@@ -1,13 +1,16 @@
 package create
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,8 +30,9 @@ type parsedWindow struct {
 	partition int
 	windowMin int64
 	windowMax int64
-	// relGaps contains relative gap ranges: each entry is [from] or [from, to].
+	// Legacy JSON uses ranges; binary records retain their compressed bitmap.
 	relGaps [][]int64
+	missing *roaring.Bitmap
 	// legacy is true when the window was decoded from the JSON format written by
 	// dedup 0.1.10 and earlier (key "topic_partition:windowMin").
 	legacy bool
@@ -255,14 +259,25 @@ func parseGapPayload(key, value []byte) (parsedWindow, error) {
 		partition: partition,
 		windowMin: windowMin,
 		windowMax: windowMax,
-		relGaps:   bitmapToRanges(rb),
+		missing:   rb,
 	}, nil
 }
 
-// bitmapToRanges converts a bitmap of relative positions to compact [from] / [from, to] ranges.
-func bitmapToRanges(rb *roaring.Bitmap) [][]int64 {
-	var ranges [][]int64
-	it := rb.Iterator()
+// eachGap visits ranges without expanding a fragmented bitmap into millions of slices.
+func (pw parsedWindow) eachGap(visit func(from, to int64) bool) {
+	if pw.missing == nil {
+		for _, gap := range pw.relGaps {
+			to := gap[0]
+			if len(gap) == 2 {
+				to = gap[1]
+			}
+			if !visit(gap[0], to) {
+				return
+			}
+		}
+		return
+	}
+	it := pw.missing.Iterator()
 	rangeStart, prev := int64(-1), int64(-1)
 	for it.HasNext() {
 		v := int64(it.Next())
@@ -271,22 +286,15 @@ func bitmapToRanges(rb *roaring.Bitmap) [][]int64 {
 		} else if v == prev+1 {
 			prev = v
 		} else {
-			if rangeStart == prev {
-				ranges = append(ranges, []int64{rangeStart})
-			} else {
-				ranges = append(ranges, []int64{rangeStart, prev})
+			if !visit(rangeStart, prev) {
+				return
 			}
 			rangeStart, prev = v, v
 		}
 	}
 	if rangeStart >= 0 {
-		if rangeStart == prev {
-			ranges = append(ranges, []int64{rangeStart})
-		} else {
-			ranges = append(ranges, []int64{rangeStart, prev})
-		}
+		visit(rangeStart, prev)
 	}
-	return ranges
 }
 
 // Main is the entry point of the program.
@@ -436,7 +444,11 @@ func Main(BuildNumber string, kafkaReader KafkaReader) {
 		}
 
 		logParseSummary(state, config.topic)
-		writeResults(state.windows(), config)
+		if err := writeResults(state.windows(), config); err != nil {
+			Logger.Fatalf(logging.Event(logging.EventCreateFileWrite,
+				logging.Str("file.path", config.resendFileName),
+			).Merge(logging.Err(err)), "Failed to write resend bundle: %v", err)
+		}
 
 	}
 
@@ -478,131 +490,123 @@ func logParseSummary(state *gapState, topic string) {
 
 // writeResults formats and outputs the results as JSON, either to a file or the console.
 // Windows for the same topic+partition are merged into a single entry with absolute gap offsets.
-func writeResults(lastEntries map[string]parsedWindow, config TransferConfiguration) {
-	type windowEntry struct {
-		windowMin int64
-		windowMax int64
-		topic     string
-		partition int
-		relGaps   [][]int64
-	}
-
-	// Group window entries by "topic-partition".
-	grouped := make(map[string][]windowEntry)
-	groupOrder := []string{}
-
-	for _, pw := range lastEntries {
-		groupKey := fmt.Sprintf("%s-%d", pw.topic, pw.partition)
-		if _, exists := grouped[groupKey]; !exists {
-			groupOrder = append(groupOrder, groupKey)
+func writeResults(lastEntries map[string]parsedWindow, config TransferConfiguration) error {
+	if config.resendFileName == "" {
+		if err := writeBundle(os.Stdout, lastEntries, config); err != nil {
+			return err
 		}
-		grouped[groupKey] = append(grouped[groupKey], windowEntry{
-			windowMin: pw.windowMin,
-			windowMax: pw.windowMax,
-			topic:     pw.topic,
-			partition: pw.partition,
-			relGaps:   pw.relGaps,
-		})
+		_, err := fmt.Fprintln(os.Stdout)
+		return err
 	}
+	mode := os.FileMode(0644)
+	if info, err := os.Stat(config.resendFileName); err == nil {
+		mode = info.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(config.resendFileName), ".resend-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		file.Close()
+		if err := os.Remove(file.Name()); err != nil && !os.IsNotExist(err) {
+			Logger.Errorf(logging.Event(logging.EventCreateFileWrite,
+				logging.Str("file.path", file.Name()),
+			).Merge(logging.Err(err)), "Failed to remove temporary resend file: %v", err)
+		}
+	}()
+	if err := file.Chmod(mode); err != nil {
+		return err
+	}
+	if err := writeBundle(file, lastEntries, config); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(file.Name(), config.resendFileName); err != nil {
+		return err
+	}
+	Logger.Infof(logging.Event(logging.EventCreateFileWrite,
+		logging.Str("file.path", config.resendFileName),
+	), "Results written to %s", config.resendFileName)
+	return nil
+}
 
-	var results []json.RawMessage
-
-	for _, groupKey := range groupOrder {
-		windows := grouped[groupKey]
-
-		// Sort windows by windowMin so gaps are merged in ascending offset order.
-		sort.Slice(windows, func(i, j int) bool {
-			return windows[i].windowMin < windows[j].windowMin
-		})
-
-		first := windows[0]
-		maxWindowMax := windows[len(windows)-1].windowMax
-
-		// Merge gaps from all windows, converting relative offsets to absolute.
-		var absoluteGaps []interface{}
-		for _, w := range windows {
-			for _, gap := range w.relGaps {
-				if len(gap) == 1 {
-					absOffset := gap[0] + w.windowMin
-					Logger.Debugf(logging.Event(logging.EventCreateScan,
-						logging.Str("messaging.destination.name", w.topic),
-						logging.Decimal("messaging.destination.partition.id", int64(w.partition)),
-						logging.Int("airgap.gap.window.min", w.windowMin),
-						logging.Int("airgap.gap.window.max", w.windowMax),
-						logging.Int("airgap.gap.from", absOffset),
-					), "Converting gap [%d] in window [%d..%d] to absolute offset [%d]",
-						gap[0], w.windowMin, w.windowMax, absOffset)
-					absoluteGaps = append(absoluteGaps, []interface{}{float64(absOffset)})
-				} else if len(gap) == 2 {
-					absFrom := gap[0] + w.windowMin
-					absTo := gap[1] + w.windowMin
-					Logger.Debugf(logging.Event(logging.EventCreateScan,
-						logging.Str("messaging.destination.name", w.topic),
-						logging.Decimal("messaging.destination.partition.id", int64(w.partition)),
-						logging.Int("airgap.gap.window.min", w.windowMin),
-						logging.Int("airgap.gap.window.max", w.windowMax),
-						logging.Int("airgap.gap.from", absFrom),
-						logging.Int("airgap.gap.to", absTo),
-						logging.Int("airgap.gap.length", absTo-absFrom+1),
-					), "Converting gap [%d,%d] in window [%d..%d] to absolute offsets [%d,%d]",
-						gap[0], gap[1], w.windowMin, w.windowMax, absFrom, absTo)
-					absoluteGaps = append(absoluteGaps, []interface{}{
-						float64(absFrom),
-						float64(absTo),
-					})
-				}
+func writeBundle(output io.Writer, lastEntries map[string]parsedWindow, config TransferConfiguration) error {
+	grouped := make(map[string][]parsedWindow)
+	var groupOrder []string
+	for _, pw := range lastEntries {
+		key := fmt.Sprintf("%s-%d", pw.topic, pw.partition)
+		if _, exists := grouped[key]; !exists {
+			groupOrder = append(groupOrder, key)
+		}
+		grouped[key] = append(grouped[key], pw)
+	}
+	writer := bufio.NewWriter(output)
+	limit, err := json.Marshal(config.limit)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "{\n  \"type\": %s,\n  \"results\": [\n", limit); err != nil {
+		return err
+	}
+	for i, key := range groupOrder {
+		windows := grouped[key]
+		sort.Slice(windows, func(i, j int) bool { return windows[i].windowMin < windows[j].windowMin })
+		if i > 0 {
+			if _, err := writer.WriteString(",\n"); err != nil {
+				return err
 			}
 		}
-
-		// For "first" mode, keep only the globally first (smallest absolute offset) gap.
-		if config.limit == "first" && len(absoluteGaps) > 0 {
-			absoluteGaps = absoluteGaps[:1]
+		if _, err := writer.WriteString("  {\"gaps\":"); err != nil {
+			return err
 		}
-
-		outputEntry := map[string]interface{}{
-			"topic":      first.topic,
-			"partition":  first.partition,
-			"window_min": 0,
-			"window_max": maxWindowMax,
-			"gaps":       absoluteGaps,
+		haveGap := false
+		var writeErr error
+		var buffer [48]byte
+		for _, window := range windows {
+			window.eachGap(func(from, to int64) bool {
+				b := buffer[:0]
+				if haveGap {
+					b = append(b, ',')
+				} else {
+					b = append(b, '[')
+				}
+				b = append(b, '[')
+				b = strconv.AppendInt(b, from+window.windowMin, 10)
+				if from != to {
+					b = append(b, ',')
+					b = strconv.AppendInt(b, to+window.windowMin, 10)
+				}
+				b = append(b, ']')
+				_, writeErr = writer.Write(b)
+				haveGap = true
+				return writeErr == nil && config.limit != "first"
+			})
+			if writeErr != nil {
+				return writeErr
+			}
+			if haveGap && config.limit == "first" {
+				break
+			}
 		}
-
-		b, err := json.Marshal(outputEntry)
+		ending := "null"
+		if haveGap {
+			ending = "]"
+		}
+		topic, err := json.Marshal(windows[0].topic)
 		if err != nil {
-			Logger.Errorf(logging.Event(logging.EventCreateFileWrite,
-				logging.Str("messaging.destination.name", first.topic),
-				logging.Decimal("messaging.destination.partition.id", int64(first.partition)),
-			).Merge(logging.Err(err)), "Failed to marshal entry: %v", err)
-			continue
+			return err
 		}
-		results = append(results, json.RawMessage(b))
-	}
-
-	// Compose compact results array as a string
-	resultsStr := "[\n"
-	for i, r := range results {
-		resultsStr += "  " + string(r)
-		if i < len(results)-1 {
-			resultsStr += ","
+		if _, err := fmt.Fprintf(writer, "%s,\"partition\":%d,\"topic\":%s,\"window_max\":%d,\"window_min\":0}",
+			ending, windows[0].partition, topic, windows[len(windows)-1].windowMax); err != nil {
+			return err
 		}
-		resultsStr += "\n"
 	}
-	resultsStr += "]"
-	// Compose top-level JSON manually for compactness
-	outputStr := fmt.Sprintf("{\n  \"type\": \"%s\",\n  \"results\": %s\n}", config.limit, resultsStr)
-	if config.resendFileName != "" {
-		err := os.WriteFile(config.resendFileName, []byte(outputStr), 0644)
-		if err != nil {
-			Logger.Errorf(logging.Event(logging.EventCreateFileWrite,
-				logging.Str("file.path", config.resendFileName),
-			).Merge(logging.Err(err)), "Failed to write resend file: %v", err)
-		} else {
-			Logger.Infof(logging.Event(logging.EventCreateFileWrite,
-				logging.Str("file.path", config.resendFileName),
-				logging.Int("airgap.resend.result.count", int64(len(results))),
-			), "Results written to %s", config.resendFileName)
-		}
-	} else {
-		fmt.Println(outputStr)
+	if _, err := writer.WriteString("\n]\n}"); err != nil {
+		return err
 	}
+	return writer.Flush()
 }

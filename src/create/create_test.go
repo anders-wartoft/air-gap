@@ -2,7 +2,9 @@ package create
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -266,4 +268,97 @@ func TestWriteResults_OnlyEmptyWindowsMergedWithGappedWindow(t *testing.T) {
 	}
 	assertSingleGap(t, "gap[0]", p0.Gaps[0], 1007)      // 1000+7
 	assertRangeGap(t, "gap[1]", p0.Gaps[1], 1020, 1025) // 1000+20, 1000+25
+}
+
+func TestWriteResults_BitmapAndLegacyWindows(t *testing.T) {
+	binary, err := parseGapPayload([]byte("transfer:0:1000"), binaryGapPayload(t, 1000, 1999, 5, 10, 11, 12))
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := parseGapPayload([]byte("transfer:0:0"), binaryGapPayload(t, 0, 999))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := map[string]parsedWindow{
+		"empty":  empty,
+		"binary": binary,
+		"legacy": buildGapWindow("transfer", 0, 2000, 2999, [][]int64{{7}}),
+	}
+	for _, limit := range []string{"all", "first"} {
+		t.Run(limit, func(t *testing.T) {
+			out := tempFile(t)
+			if err := writeResults(entries, TransferConfiguration{limit: limit, resendFileName: out}); err != nil {
+				t.Fatal(err)
+			}
+			got := readBundle(t, out).Results[0]
+			wantCount := 3
+			if limit == "first" {
+				wantCount = 1
+			}
+			if len(got.Gaps) != wantCount || got.WindowMax != 2999 {
+				t.Fatalf("unexpected result: %+v", got)
+			}
+			assertSingleGap(t, "first bitmap gap", got.Gaps[0], 1005)
+			if limit == "all" {
+				assertRangeGap(t, "bitmap range", got.Gaps[1], 1010, 1012)
+				assertSingleGap(t, "legacy gap", got.Gaps[2], 2007)
+			}
+		})
+	}
+}
+
+type failedBundleWriter struct{ err error }
+
+func (w failedBundleWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestWriteBundle_ReturnsWriteFailure(t *testing.T) {
+	want := errors.New("disk full")
+	err := writeBundle(failedBundleWriter{want}, map[string]parsedWindow{
+		"window": buildGapWindow("transfer", 0, 0, 999, [][]int64{{5}}),
+	}, TransferConfiguration{limit: "all"})
+	if !errors.Is(err, want) {
+		t.Fatalf("expected write failure, got %v", err)
+	}
+}
+
+func TestWriteResults_ReplacesBundleAndPreservesPermissions(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "gaps.json")
+	if err := os.WriteFile(out, []byte("old bundle"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeResults(map[string]parsedWindow{
+		"window": buildGapWindow("transfer", 0, 0, 999, [][]int64{{5}}),
+	}, TransferConfiguration{limit: "all", resendFileName: out}); err != nil {
+		t.Fatal(err)
+	}
+	got := readBundle(t, out)
+	if len(got.Results) != 1 {
+		t.Fatalf("unexpected bundle: %+v", got)
+	}
+	assertSingleGap(t, "replacement gap", got.Results[0].Gaps[0], 5)
+	info, err := os.Stat(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("bundle permissions changed: %v", info.Mode())
+	}
+}
+
+func TestWriteResults_ReturnsPublishFailureAndCleansTemporaryFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "gaps.json")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeResults(nil, TransferConfiguration{limit: "all", resendFileName: target}); err == nil {
+		t.Fatal("expected error replacing a directory")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "gaps.json" || !entries[0].IsDir() {
+		t.Fatalf("publish failure changed target or left temporary files: %v", entries)
+	}
 }

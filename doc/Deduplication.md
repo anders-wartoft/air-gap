@@ -150,7 +150,8 @@ kafka-topics.sh --bootstrap-server localhost:9092 --create \
   --config min.insync.replicas=2
 ```
 
-For an existing deployment, fix both policies **before** restarting dedup:
+For an existing deployment, these commands can repair the policies immediately
+(dedup also repairs them automatically at startup):
 
 ```sh
 kafka-configs.sh --bootstrap-server localhost:9092 --alter \
@@ -166,12 +167,25 @@ kafka-configs.sh --bootstrap-server localhost:9092 --describe --all \
 ```
 
 The application explicitly requests `compact` for new changelogs. At startup it
-also checks an existing changelog and repairs `delete` or `compact,delete` to
-`compact` before processing. The Kafka principal needs `DescribeConfigs` and,
-when repair is necessary, `AlterConfigs` on this topic, in addition to normal
-Streams permissions. Permission failures stop startup; transient connectivity
-failures delay startup and retry. The application does not modify the external
-gap topic or recover records that Kafka has already deleted.
+also checks `GAP_TOPIC` and the changelog and repairs `delete` or `compact,delete`
+to `compact` before processing. If `GAP_TOPIC` is missing, dedup creates it with
+`compact`, the largest receive-topic partition count and the broker's default
+replication factor. Pre-create production topics to set replication, ISR and
+cleaner settings explicitly.
+
+The Kafka principal needs `DescribeConfigs` and, when repair is necessary,
+`AlterConfigs` on both topics, in addition to normal Streams permissions.
+Creating a missing gap topic also requires `Create` permission and source-topic
+metadata access. Existing topic partitioning and other settings are preserved.
+Permission failures stop startup; transient connectivity failures delay startup
+and retry. Records that Kafka has already deleted cannot be recovered.
+
+Changing the policy does not synchronously compact an existing backlog. Ensure
+broker log cleaning is enabled and monitor segment rolling and cleaner progress
+using the settings above. After upgrading, check `cleanup.policy=compact` with
+`kafka-configs`, then monitor `journalctl -u create` and the bundle's modification
+time over at least 24 hours. A small Docker regression is not a production
+memory or soak-test guarantee for an existing multi-gigabyte backlog.
 
 When increasing gap-record limits, coordinate the topic/broker limit,
 `KAFKA_PRODUCER_MAX_REQUEST_SIZE`, broker replication fetch limits and consumer

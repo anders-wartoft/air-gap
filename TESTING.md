@@ -79,7 +79,11 @@ Tests use unique topics/application IDs and child dedup JVMs with fresh local
 state directories. They verify hard crashes before/after transaction commit,
 cold changelog restoration, delayed-copy suppression, migration of a fragmented
 legacy value larger than 1 MiB, bounded new state records, repair of existing
-delete-only changelogs and compaction for newly created changelogs. Consumers
+delete-only changelogs, repair of existing gap-topic policies (`delete` and
+`compact,delete`), and compaction policies for newly created changelogs and gap
+topics. TC-42 additionally exercises gap-policy repair, physical compaction,
+tombstone removal and two complete 7,500,000-gap bundle writes under a 1 GiB
+container limit, with streamed verification and a modification-time check. Consumers
 assert committed output using `read_committed`. The broker allows the oversized
 legacy fixture, but dedup retains its default 1 MiB producer limit.
 

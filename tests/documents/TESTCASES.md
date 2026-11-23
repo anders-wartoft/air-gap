@@ -6144,8 +6144,8 @@ retain artifacts at the printed path. `-pause` retains both.
 
 ## TC-42 — Bounded gap topic: tombstones for purged windows
 
-Verify that dedup tombstones every purged window so the compacted gap topic
-keeps only the active windows.
+Verify that dedup repairs an existing delete-only gap topic at startup and
+tombstones every purged window so the compacted topic keeps only active windows.
 
 * Covers: REQ-54
 * Implemented in: 0.1.17-SNAPSHOT
@@ -6170,14 +6170,15 @@ The stack is
 isolated (single Kafka broker, no published ports). Dedup runs with
 `WINDOW_SIZE=100`, `MAX_WINDOWS=2`, `GAP_EMIT_INTERVAL_SEC=1` and a WARN-level
 log4j configuration. The broker uses `log.cleaner.backoff.ms=1000` and the
-gap topic `cleanup.policy=compact`, `segment.ms=2000`,
+gap topic initially `cleanup.policy=delete`, `segment.ms=2000`,
 `min.cleanable.dirty.ratio=0.01`, `min.compaction.lag.ms=0` and
 `delete.retention.ms=1000`.
 
 ### Procedure and assertions
 
-1. Start a console consumer on the gap topic that captures every record,
-   including tombstones, before they are compacted away.
+1. Require the existing gap topic to have `cleanup.policy=delete`. Start a
+   console consumer that captures every record, including tombstones, then
+   start dedup and require it to repair the policy to exactly `compact`.
 2. Produce 20 windows of `transfer` records keyed `source_0_<offset>`, one
    window every 2 seconds, each missing offset `N*100+5`, so every window is
    emitted and all but the last two are purged.
@@ -6187,12 +6188,25 @@ gap topic `cleanup.policy=compact`, `segment.ms=2000`,
    offsets`.
 5. Require at most 2 distinct keys physically in the gap topic once
    compaction and tombstone removal have run.
-6. Run `create` with `limit=all`. Require exit 0, no ERROR/FATAL records, and
+6. Run `create` with `limit=all` and a 1 GiB container memory limit.
+   Require exit 0, no ERROR/FATAL records, and
    the bundle entry for `source`/0 to be exactly `[[1805],[1905]]`.
+7. Insert three binary gap snapshots with `WINDOW_SIZE=5000000`, each missing
+   every other offset. These are valid live windows within `MAX_WINDOWS=5200`
+   and contain 7,500,000 singleton gaps, yielding approximately 77 MB of JSON.
+   Run `create` twice under the same 1 GiB limit. Require exit 0 and Docker
+   `OOMKilled=false`, stream-verify every absolute gap, and require the bundle's
+   modification time to change on the second run. This reproduces the live
+   fragmented state without generating weeks of duplicate snapshots.
 
 ### Expected result
 
-All checks and the final TC-42 verdict pass (green; red on failure). With a
+All checks and the final TC-42 verdict pass (green; red on failure).
+This small regression does not replace a 24-hour production soak test.
+The pre-fix `create` is OOM-killed (exit 137, Docker `OOMKilled=true`) in the
+fragmented-window phase.
+With a dedup built before automatic gap-policy repair, the policy and
+compaction checks fail. With a
 dedup built before REQ-54 the tombstone, WARN and key-count checks fail (all
 20 keys remain) and the bundle contains every window's gap. `NO_COLOR=1`
 disables colors. Successful runs remove containers and temporary files;

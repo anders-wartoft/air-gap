@@ -88,7 +88,7 @@ func TestGapState_BinaryWinsOverLegacyRegardlessOfOrder(t *testing.T) {
 	for _, order := range [][]gapRecord{{legacy, current}, {current, legacy}} {
 		state := applyAll(t, order...)
 		got := state.windows()["t-0-0"]
-		if got.legacy || fmt.Sprint(got.relGaps) != "[[5]]" {
+		if got.legacy || got.missing == nil || fmt.Sprint(got.missing.ToArray()) != "[5]" {
 			t.Errorf("binary record should win, got %+v", got)
 		}
 		if state.stats.legacy != 1 || state.superseded() != 1 {

@@ -3,6 +3,8 @@ package nu.sitia.airgap.streams;
 import nu.sitia.airgap.gapdetector.DetectorFixtures;
 import nu.sitia.airgap.gapdetector.GapDetectorStore;
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AlterConfigOp;
+import org.apache.kafka.clients.admin.ConfigEntry;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -227,6 +229,33 @@ class DedupStateIT {
         ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, changelog);
         assertEquals("compact", admin.describeConfigs(List.of(resource)).all().get(30, TimeUnit.SECONDS)
                 .get(resource).get("cleanup.policy").value());
+    }
+
+    @Test
+    void existingGapTopicPoliciesAreRepairedBeforeProcessing() throws Exception {
+        ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, gaps);
+        for (String policy : List.of("delete", "compact,delete")) {
+            admin.incrementalAlterConfigs(Map.of(resource, List.of(new AlterConfigOp(
+                    new ConfigEntry("cleanup.policy", policy), AlterConfigOp.OpType.SET))))
+                    .all().get(30, TimeUnit.SECONDS);
+            Process process = start("gap-policy-" + policy.replace(',', '-'), "600000");
+            org.apache.kafka.clients.admin.Config config = admin.describeConfigs(List.of(resource))
+                    .all().get(30, TimeUnit.SECONDS).get(resource);
+            assertEquals("compact", config.get("cleanup.policy").value());
+            process.destroy();
+            assertTrue(process.waitFor(30, TimeUnit.SECONDS), "Dedup did not stop");
+        }
+    }
+
+    @Test
+    void newGapTopicUsesCompactionDespiteDeleteOnlyBrokerDefault() throws Exception {
+        admin.deleteTopics(List.of(gaps)).all().get(30, TimeUnit.SECONDS);
+        start("new-gap-topic", "600000");
+        ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, gaps);
+        assertEquals("compact", admin.describeConfigs(List.of(resource)).all().get(30, TimeUnit.SECONDS)
+                .get(resource).get("cleanup.policy").value());
+        assertEquals(1, admin.describeTopics(List.of(gaps)).allTopicNames().get(30, TimeUnit.SECONDS)
+                .get(gaps).partitions().size());
     }
 
     @Test

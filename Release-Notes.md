@@ -1,5 +1,31 @@
 # Release Notes
 
+## 0.1.22-SNAPSHOT
+
+### Gap-topic compaction and create memory usage
+
+- Dedup verifies `GAP_TOPIC` at startup and changes `cleanup.policy` from
+  `delete` or `compact,delete` to `compact` before processing. A missing gap
+  topic is created with `compact`, the largest receive-topic partition count
+  and the broker's default replication factor. Existing partitioning and
+  other topic settings are unchanged. Pre-create production topics to specify
+  replication and cleaner settings.
+- The dedup Kafka principal needs `DescribeConfigs` and, when repair is
+  required, `AlterConfigs` on the gap topic and state changelog; creating a
+  missing gap topic also requires `Create` permission and source-topic
+  metadata access. Permission failures stop startup. Compaction is
+  asynchronous and requires Kafka log cleaning; changing the policy does not
+  immediately shrink an existing backlog or restore deleted records.
+- `create` retains binary gap bitmaps in compressed form and streams gap
+  ranges to JSON instead of expanding the entire bundle in memory. File
+  output is replaced after a complete write, and write errors cause a nonzero
+  exit. Existing file permissions are preserved.
+- TC-42 reproduces the previous OOM with three fragmented 5,000,000-offset
+  windows under a 1 GiB limit and verifies two complete 7,500,000-gap bundle
+  writes after the fix. It also checks repair of a delete-only gap topic and
+  removal of purged keys by compaction. TC-46 checks existing and new topic
+  policies. These tests do not replace a 24-hour production soak.
+
 ## 0.1.21-SNAPSHOT
 
 ### Protocol safety
