@@ -3,10 +3,8 @@ package resend
 import (
 	"context"
 	"os"
-	"strings"
 	"time"
 
-	"github.com/IBM/sarama"
 	"sitia.nu/airgap/src/kafka"
 	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/udp"
@@ -37,19 +35,6 @@ func (k *KafkaAdapter) SetTLS(certFile, keyFile, caFile, keyPasswordFile string)
 }
 
 func (k *KafkaAdapter) GetLastOffset(servers, topic string, partition int) (int64, error) {
-	kafka.ConfigureSaramaLogger()
-
-	config := sarama.NewConfig()
-	if err := kafka.ApplyTLSConfig(config); err != nil {
-		return 0, err
-	}
-	bootstrapServers := strings.Split(servers, ",")
-	client, err := sarama.NewClient(bootstrapServers, config)
-	if err != nil {
-		return 0, err
-	}
-	defer client.Close()
-
 	if partition < 0 || partition > 2147483647 {
 		Logger.Errorf(logging.Event(logging.EventConfigInvalid,
 			logging.Failure(),
@@ -58,11 +43,7 @@ func (k *KafkaAdapter) GetLastOffset(servers, topic string, partition int) (int6
 		), "Partition out of int32 range: %d", partition)
 		os.Exit(1)
 	}
-	offset, err := client.GetOffset(topic, int32(partition), sarama.OffsetNewest)
-	if err != nil {
-		return 0, err
-	}
-	return offset, nil
+	return kafka.GetLastOffset(context.Background(), servers, topic, int32(partition))
 }
 
 // UDPAdapter is the concrete adapter for UDP.

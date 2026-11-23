@@ -91,7 +91,8 @@ func TestTemplateOTLPAttributes(t *testing.T) {
 		t.Fatal(err)
 	}
 	const template = "Error from consumer (attempt {airgap.retry.count}): {error.message}"
-	attrs := Event(EventDiagnostic, ErrMessage(errors.New("refused")))
+	err := errors.New("refused")
+	attrs := Event(EventDiagnostic).Merge(Err(err)).With(ErrMessage(err))
 	Logger.ErrorT(attrs, template, Int("airgap.retry.count", 1))
 	Logger.ErrorT(attrs, template, Int("airgap.retry.count", 2))
 	Logger.ErrorT(attrs, template, Int("airgap.retry.count", 3))
@@ -106,8 +107,14 @@ func TestTemplateOTLPAttributes(t *testing.T) {
 		t.Fatalf("bodies = %q, %q", first.body, repeated.body)
 	}
 	for _, record := range records {
-		if record.attributes[AttrMessageTemplate] != template || record.attributes["error.message"] != "refused" {
-			t.Fatalf("missing template/error attributes: %+v", record.attributes)
+		if record.attributes[AttrMessageTemplate] != template {
+			t.Fatalf("missing message template: %+v", record.attributes)
+		}
+		if _, present := record.attributes[AttrErrorMessage]; present {
+			t.Fatalf("%s must not be emitted as an OTLP attribute: %+v", AttrErrorMessage, record.attributes)
+		}
+		if record.attributes[AttrErrorType] == "" {
+			t.Fatalf("missing error type: %+v", record.attributes)
 		}
 	}
 	if first.attributes["airgap.retry.count"] != "1" || repeated.attributes["airgap.retry.count"] != "3" ||

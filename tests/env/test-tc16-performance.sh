@@ -13,7 +13,7 @@ chmod +x "$WORK/mock/docker"
 touch "$WORK/env/bin/LogGenerator-1.1-9.jar"
 export PATH="$WORK/mock:$PATH" FAKE_STATE="$WORK/state"
 export TC16_COUNT=10 TC16_PARTITIONS=1 TC16_SETTLE=1 TC16_POLL=1
-unset TC16_TIMEOUT
+unset TC16_TIMEOUT TC16_EPS AIRGAP_TEST_UDP_PACING
 printf 'dedup fixture' > "$WORK/dedup.jar"
 export TC16_CURRENT_DEDUP_JAR="$WORK/dedup.jar"
 
@@ -29,6 +29,11 @@ run_case() {
 }
 line() { grep -nE "$1" "$FAKE_STATE/calls" | head -1 | cut -d: -f1; }
 before() { [[ "$(line "$1")" -lt "$(line "$2")" ]] || { echo "Ordering failed: $1 before $2" >&2; exit 1; }; }
+reset_fake() {
+    rm -f "$FAKE_STATE/upstream" "$FAKE_STATE/downstream" "$FAKE_STATE/lg-producer" \
+        "$FAKE_STATE/dedup" "$FAKE_STATE/lg-sink" "$FAKE_STATE/partial-bind"
+    : > "$FAKE_STATE/calls"
+}
 
 test_dedup_polling() (
     export FAKE_REMOTE=1 TC16_TIMEOUT=4 TC16_RESULTS_DIR="$WORK/poll-results"
@@ -76,6 +81,7 @@ if [[ "${1:-}" == --polling-only ]]; then exit 0; fi
 
 run_case 0 16
 grep -qx '300' "$FAKE_STATE/timeout"
+grep -qx '30000' "$FAKE_STATE/eps"
 grep -q 'TC-16 PASS' "$WORK/result"
 if [[ -z "${NO_COLOR-}" ]]; then
     grep -Fq $'\033[0;32m─── TC-16 (all): PASS' "$WORK/result"
@@ -108,6 +114,14 @@ before 'stop .*downstream$' 'up .*dedup$'
 before 'stop .*upstream$' 'up .*dedup$'
 before 'stop .*dedup$' 'up .*lg-sink$'
 echo "PASS: single-machine default timeout, phase ordering and full verification"
+
+reset_fake
+AIRGAP_TEST_UDP_PACING=38583,54016200,32 run_case 0 16
+grep -qx '30866' "$FAKE_STATE/eps"
+reset_fake
+TC16_EPS=45000 AIRGAP_TEST_UDP_PACING=38583,54016200,32 run_case 0 16
+grep -qx '45000' "$FAKE_STATE/eps"
+echo "PASS: calibrated rate uses headroom and explicit EPS overrides it"
 
 export TC16_TIMEOUT=3
 rc=0
@@ -205,12 +219,22 @@ echo "PASS: colored success/failure summaries and NO_COLOR output"
 mkdir -p "$WORK/env/testcases"
 cp "$HERE/run-testcases.sh" "$WORK/env/"
 cp "$HERE/testcases/16.env" "$WORK/env/testcases/"
+cat > "$WORK/env/calibrate-test-udp.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$1"
+printf 'udpPacingDatagramsPerSecond=38583\nudpPacingBytesPerSecond=54016200\nudpPacingBurstDatagrams=32\n' \
+    > "$1/pacing.properties"
+EOF
+chmod +x "$WORK/env/calibrate-test-udp.sh"
 for selection in 16 1-; do
     # Seed retained input: batch preparation must remove it without user resets.
     touch "$FAKE_STATE/lg-producer"
+    rm -f "$FAKE_STATE/eps"
     : > "$FAKE_STATE/calls"
     bash "$WORK/env/run-testcases.sh" "$selection" > "$WORK/result" 2>&1
     grep -q 'TC-16 PASS: all 10 sequence IDs' "$WORK/result"
+    grep -qx '30866' "$FAKE_STATE/eps"
     grep -q 'testcase 16 PASS' "$WORK/result"
     grep -q 'Cleaning up TC-16 containers and Kafka volumes' "$WORK/result"
     before 'airgap-tc16-[a-z0-9]+-us .*down -v --remove-orphans' 'up .*lg-producer$'

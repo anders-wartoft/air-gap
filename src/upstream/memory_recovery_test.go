@@ -47,7 +47,7 @@ func TestUnsafeGoMemoryTargetsFailAtStartup(t *testing.T) {
 			if !strings.Contains(string(output), "must be below memoryLowWatermarkPercent") {
 				t.Fatalf("missing actionable headroom error:\n%s", output)
 			}
-			if strings.Contains(string(output), "Starting a new Sarama consumer") {
+			if strings.Contains(string(output), "Starting upstream franz-go trial consumer") {
 				t.Fatalf("invalid memory configuration reached Kafka startup:\n%s", output)
 			}
 		})

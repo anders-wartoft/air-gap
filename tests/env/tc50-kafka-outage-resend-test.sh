@@ -80,7 +80,7 @@ source2_id="$(compose ps -q kafka-upstream-2)"
 [[ -n "$upstream_id" && -n "$downstream_id" && -n "$dedup_id" && -n "$source_id" && -n "$source2_id" ]] || exit 1
 deadline=$((SECONDS + 120))
 while (( SECONDS < deadline )); do
-    if compose logs --no-color upstream-a | grep -q 'Sarama consumer (WithContext) now up and running' &&
+    if compose logs --no-color upstream-a | grep -q 'Franz-go consumer (WithContext) now up and running' &&
        docker exec "$downstream_id" ss -uln | grep -q ':1234 ' &&
        compose logs --no-color dedup | grep -q 'RUNNING'; then
         break

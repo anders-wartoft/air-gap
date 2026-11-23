@@ -180,7 +180,7 @@ func sanitize(attrs Attrs) Attrs {
 	seen := make(map[string]struct{}, len(attrs))
 	result := make(Attrs, 0, len(attrs))
 	for _, attr := range attrs {
-		if attr.Key == "" || strings.HasPrefix(attr.Key, reservedAttrPrefix) {
+		if attr.Key == "" || attr.Key == AttrErrorMessage || strings.HasPrefix(attr.Key, reservedAttrPrefix) {
 			continue
 		}
 

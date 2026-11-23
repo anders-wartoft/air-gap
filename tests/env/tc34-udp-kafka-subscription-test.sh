@@ -91,16 +91,6 @@ transfer_count="$(docker exec "$KAFKA_CID" kafka-get-offsets \
     awk -F: '{ total += $3 } END { print total + 0 }')"
 
 rc=0
-if grep -q "kafkaMaxProcessingTimeMs: 2000" "$WORK/upstream.log"; then
-    report_check "processing timeout applied" "kafkaMaxProcessingTimeMs 2000" "configured" 0 || rc=1
-else
-    report_check "processing timeout applied" "kafkaMaxProcessingTimeMs 2000" "missing" 1 || rc=1
-fi
-if grep -q "abandoned subscription.*consuming was taking too long" "$WORK/upstream.log"; then
-    report_check "Kafka subscription stability" "no abandoned subscription" "abandonment observed" 1 || rc=1
-else
-    report_check "Kafka subscription stability" "no abandoned subscription" "stable" 0 || rc=1
-fi
 if [[ "$lag" == "0" ]]; then
     report_check "slow consumer progress" "consumer lag 0" "lag 0" 0 || rc=1
 else

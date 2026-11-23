@@ -275,28 +275,24 @@ upstream warns at startup when it is not.
    All of them can be overridden with environment variables and command-line
    arguments like any other property.
 
-### REQ-8d — Stable Kafka subscriptions during slow processing
+### REQ-8d — Stable Kafka delivery during slow processing
 
-> Expected upstream processing delays must not make Sarama abandon and recreate
-> an otherwise healthy Kafka partition subscription.
+> Expected upstream processing delays must not interrupt delivery from an
+> otherwise healthy Kafka partition.
 
 * Implemented in: 0.1.14-SNAPSHOT
 * Covered by: TC-34
 
-1. Upstream applies `kafkaMaxProcessingTimeMs` to Sarama
-   `Consumer.MaxProcessingTime`. The default is 30000 ms.
-2. The value must be a positive integer and can be set through the property
-   file, `AIRGAP_UPSTREAM_KAFKA_MAX_PROCESSING_TIME_MS`, or
-   `--kafkaMaxProcessingTimeMs`.
-3. The configured interval must cover the longest expected synchronous
-   processing time for one record, including rate limiting, memory
-   backpressure, compression, encryption, fragmentation, transport writes and
-   bounded retries.
-4. Under processing delays shorter than the configured interval, upstream must
-   not log `abandoned subscription ... because consuming was taking too long`,
-   must reach consumer lag zero, and must not duplicate or lose records.
-5. Increasing the interval does not claim to increase throughput. Sustained
-   overload remains observable as Kafka consumer lag.
+1. Upstream uses bounded franz-go poll batches; `kafkaChannelBufferSize`
+   controls the maximum records requested per poll.
+2. Upstream waits for each polled batch to finish downstream delivery before
+   polling again, and marks records for commit only after successful delivery.
+3. Slow synchronous processing may increase Kafka lag, but must not interrupt
+   delivery or advance offsets beyond successfully delivered records.
+4. `kafkaMaxProcessingTimeMs` and `kafkaDelayedReadBuffer` remain accepted for
+   configuration compatibility but do not control franz-go polling or
+   delivery behavior.
+5. Sustained overload remains observable as Kafka consumer lag.
 
 ### REQ-8e — Log rotation releases replaced file descriptors
 
@@ -1446,8 +1442,9 @@ Acceptance criteria:
    FATAL/PANIC, and both a `source=kafka` and a `source=random` upstream
    deliver again through the same processes.
 5. With the default repeat interval and 20 events/s, downstream writes at most
-   60 send-failure lines for the outage, with summaries for the suppressed
-   failures.
+   60 send-failure lines for the outage. When repeated same-cause callbacks are
+   observed, they are summarized; the exact callback and summary counts depend
+   on the Kafka client retry behavior.
 6. Downstream reports startup retry failures and clears the error after
    producer creation succeeds or a message is acknowledged. Each producer
    result channel has a single reader so status updates and logging observe

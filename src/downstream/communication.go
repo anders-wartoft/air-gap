@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/IBM/sarama"
 	"github.com/google/uuid"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"sitia.nu/airgap/src/kafka"
 	"sitia.nu/airgap/src/logging"
 	"sitia.nu/airgap/src/protocol"
@@ -239,127 +239,74 @@ func readPrivateKeys(fileGlob string) []KeyInfo {
 	return config.keyInfos
 }
 
+// producerCompressionCodecs maps the validated producerCompression setting to
+// franz-go codecs, always falling back to no compression when the broker does
+// not support the preferred codec.
+func producerCompressionCodecs(name string) []kgo.CompressionCodec {
+	var codec kgo.CompressionCodec
+	switch name {
+	case "gzip":
+		codec = kgo.GzipCompression()
+	case "snappy":
+		codec = kgo.SnappyCompression()
+	case "lz4":
+		codec = kgo.Lz4Compression()
+	case "zstd":
+		codec = kgo.ZstdCompression()
+	default:
+		return []kgo.CompressionCodec{kgo.NoCompression()}
+	}
+	return []kgo.CompressionCodec{codec, kgo.NoCompression()}
+}
+
 func connectToKafka(ctx context.Context, config TransferConfiguration) error {
 	Logger.Infof(logging.Event(logging.EventKafkaConnect,
 		logging.Str("server.address", config.bootstrapServers),
 		logging.Str("messaging.kafka.client.id", config.clientID),
 	), "Connecting to %s\n", config.bootstrapServers)
 
-	kafka.ConfigureSaramaLogger()
-
-	// Check if we have TLS to Kafka
-	conf := sarama.NewConfig()
-	// Tell Sarama to use manual partitioning - we provide the partition in the ProducerMessage
-	conf.Producer.Partitioner = sarama.NewManualPartitioner
-	// Check if we have TLS to Kafka
 	if config.certFile != "" || config.keyFile != "" || config.caFile != "" {
 		Logger.Info(logging.Event(logging.EventKafkaConnect,
 			logging.Str("server.address", config.bootstrapServers),
 			logging.Str("file.path", config.certFile),
 		), "Using TLS for Kafka")
-		tlsConfig, err := kafka.SetTLSConfigParameters(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
+		_, err := kafka.SetTLSConfigParameters(config.certFile, config.keyFile, config.caFile, config.keyPasswordFile)
 		if err != nil {
 			Logger.Panicf(logging.Event(logging.EventTLSHandshake,
 				logging.Str("file.path", config.certFile),
 			).Merge(logging.Err(err)),
 				"Error setting TLS config parameters: %v", err)
 		}
-		conf.Net.TLS.Enable = true
-		conf.Net.TLS.Config = tlsConfig
 	}
-	conf.Producer.RequiredAcks = sarama.WaitForLocal
-	conf.Producer.Return.Successes = true
-	conf.Producer.Return.Errors = true
-	conf.Net.KeepAlive = 30 * time.Second
-	conf.ClientID = config.clientID
+	opts, err := kafka.FranzClientOptions(config.bootstrapServers, config.clientID)
+	if err != nil {
+		return err
+	}
+	opts = append(opts,
+		kgo.RecordPartitioner(kgo.ManualPartitioner()),
+		kgo.RequiredAcks(kgo.LeaderAck()),
+		kgo.DisableIdempotentWrite(),
+		kgo.MaxProduceRequestsInflightPerBroker(5),
+		kgo.RecordRetries(3),
+		kgo.MaxBufferedRecords(config.batchSize),
+		kgo.DialTimeout(30*time.Second),
+		kgo.ProducerBatchCompression(producerCompressionCodecs(config.producerCompression)...),
+	)
 	producer, err := newKafkaProducerWithRetry(ctx, config.bootstrapServers,
-		time.Duration(config.kafkaRetryInterval)*time.Millisecond, func() (sarama.AsyncProducer, error) {
-			return sarama.NewAsyncProducer(strings.Split(config.bootstrapServers, ","), conf)
+		time.Duration(config.kafkaRetryInterval)*time.Millisecond, func() (kafka.Producer, error) {
+			client, err := kgo.NewClient(opts...)
+			if err != nil {
+				return nil, err
+			}
+			return client, nil
 		})
 	if err != nil {
 		return err
 	}
-	monitorKafkaProducer(producer)
 	Logger.Infof(logging.Event(logging.EventKafkaConnect,
 		logging.Str("server.address", config.bootstrapServers),
 		logging.Int("airgap.kafka.batch.size", int64(config.batchSize)),
 	), "Connected to Kafka. Creating startup message...\n")
-	kafka.SetProducer(producer, config.batchSize)
+	kafka.SetProducer(producer, config.batchSize, UpdateKafkaStatus)
 	return nil
-}
-
-// These are the sole readers of the producer result channels.
-func monitorKafkaProducer(producer sarama.AsyncProducer) {
-	go func() {
-		for producerErr := range producer.Errors() {
-			topic := ""
-			partition := int32(-1)
-			key := "<nil>"
-
-			if producerErr != nil && producerErr.Msg != nil {
-				topic = producerErr.Msg.Topic
-				partition = producerErr.Msg.Partition
-				if producerErr.Msg.Key != nil {
-					keyBytes, keyErr := producerErr.Msg.Key.Encode()
-					if keyErr != nil {
-						key = fmt.Sprintf("<key encode error: %v>", keyErr)
-					} else {
-						key = string(keyBytes)
-					}
-				}
-			}
-
-			if producerErr != nil {
-				UpdateKafkaStatus(fmt.Sprintf("Kafka producer error: %v", producerErr.Err))
-				// The message key is a parameter so failures with the same
-				// destination and error are summarized instead of logged per message.
-				Logger.ErrorT(logging.Event(logging.EventKafkaProduce,
-					logging.Failure(),
-					logging.Str("messaging.destination.name", topic),
-					logging.Decimal("messaging.destination.partition.id", int64(partition)),
-					logging.ErrorType(producerErr.Err),
-					logging.ErrMessage(producerErr.Err),
-				), "Failed to send message: topic={messaging.destination.name} partition={messaging.destination.partition.id} key={airgap.message.id} error={error.message}",
-					logging.Str("airgap.message.id", key))
-			} else {
-				UpdateKafkaStatus("Kafka producer error: unknown producer error")
-				Logger.Errorf(logging.Event(logging.EventKafkaProduce,
-					logging.Failure(),
-				), "Failed to send message: unknown producer error")
-			}
-		}
-	}()
-	go func() {
-		for msg := range producer.Successes() {
-			if msg == nil {
-				continue
-			}
-			UpdateKafkaStatus("running")
-			if Logger.CanLog(logging.DEBUG) {
-				// Log at most 80 characters from msg. Note that msg can be shorter
-				valueBytes, err := msg.Value.Encode()
-				keyBytes, _ := msg.Key.Encode()
-				if err != nil {
-					Logger.Debugf(logging.Event(logging.EventProtocolEncode).Merge(logging.Err(err)),
-						"Error encoding message value: %v", err)
-				} else {
-					if len(valueBytes) > 120 {
-						Logger.Debugf(logging.Event(logging.EventKafkaProduce,
-							logging.Str("messaging.destination.name", msg.Topic),
-							logging.Decimal("messaging.destination.partition.id", int64(msg.Partition)),
-							logging.Str("airgap.message.id", string(keyBytes)),
-							logging.Int("airgap.message.size", int64(len(valueBytes))),
-						), "Message sent: key=%s partition=%d %s ...", string(keyBytes), msg.Partition, string(valueBytes[:120]))
-					} else {
-						Logger.Debugf(logging.Event(logging.EventKafkaProduce,
-							logging.Str("messaging.destination.name", msg.Topic),
-							logging.Decimal("messaging.destination.partition.id", int64(msg.Partition)),
-							logging.Str("airgap.message.id", string(keyBytes)),
-							logging.Int("airgap.message.size", int64(len(valueBytes))),
-						), "Message sent: key=%s partition=%d %s", string(keyBytes), msg.Partition, string(valueBytes))
-					}
-				}
-			}
-		}
-	}()
 }

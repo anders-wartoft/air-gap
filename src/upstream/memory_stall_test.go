@@ -81,7 +81,7 @@ func TestMemoryStallInvalidIntervalFailsAtStartup(t *testing.T) {
 				t.Fatalf("invalid interval must fail promptly: error=%v context=%v\n%s", err, ctx.Err(), output)
 			}
 			if !strings.Contains(string(output), "memoryStallStatusIntervalSeconds") ||
-				strings.Contains(string(output), "Starting a new Sarama consumer") {
+				strings.Contains(string(output), "Starting upstream franz-go trial consumer") {
 				t.Fatalf("expected actionable interval error before Kafka startup:\n%s", output)
 			}
 		})

@@ -9,11 +9,11 @@ import (
 // OTLP output.
 const AttrMessageTemplate = "airgap.message.template"
 
-// AttrErrorMessage carries the human-readable error text (OpenTelemetry
-// error.message). The low-cardinality classification is error.type.
+// AttrErrorMessage carries error text internally for template rendering and
+// repeat grouping. It is omitted from OTLP attributes; error.type is exported.
 const AttrErrorMessage = "error.message"
 
-// ErrMessage builds the error.message attribute for err.
+// ErrMessage builds the internal error-text value for err.
 func ErrMessage(err error) Attr {
 	if err == nil {
 		return Str(AttrErrorMessage, "<nil>")

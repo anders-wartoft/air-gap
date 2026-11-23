@@ -9,11 +9,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"sitia.nu/airgap/src/kafka"
 )
 
 func TestKafkaClientIDEnvironmentOverride(t *testing.T) {
@@ -43,17 +46,16 @@ func TestRetryableKafkaStartupError(t *testing.T) {
 		retry bool
 	}{
 		{"connection_refused", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, true},
-		{"broker_unavailable", sarama.ErrOutOfBrokers, true},
-		{"leader_not_ready", sarama.ErrLeaderNotAvailable, true},
-		{"coordinator_not_ready", sarama.ErrConsumerCoordinatorNotAvailable, true},
-		{"metadata_timeout", sarama.ErrRequestTimedOut, true},
-		{"configuration", sarama.ConfigurationError("invalid"), false},
-		{"authentication", sarama.ErrSASLAuthenticationFailed, false},
-		{"authorization", sarama.ErrClusterAuthorizationFailed, false},
+		{"broker_unavailable", kerr.BrokerNotAvailable, true},
+		{"leader_not_ready", kerr.LeaderNotAvailable, true},
+		{"coordinator_not_ready", kerr.CoordinatorNotAvailable, true},
+		{"metadata_timeout", kerr.RequestTimedOut, true},
+		{"authentication", kerr.SaslAuthenticationFailed, false},
+		{"authorization", kerr.ClusterAuthorizationFailed, false},
 		{"certificate", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, false},
-		{"wrapped_authentication", sarama.Wrap(sarama.ErrOutOfBrokers, sarama.ErrSASLAuthenticationFailed), false},
-		{"wrapped_certificate", sarama.Wrap(sarama.ErrOutOfBrokers, &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), false},
-		{"wrapped_network", sarama.Wrap(sarama.ErrOutOfBrokers, &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}), true},
+		{"wrapped_authentication", errors.Join(kerr.BrokerNotAvailable, kerr.SaslAuthenticationFailed), false},
+		{"wrapped_certificate", errors.Join(kerr.BrokerNotAvailable, &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), false},
+		{"wrapped_network", fmt.Errorf("broker: %w", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}), true},
 		{"unknown", errors.New("unrecognized failure"), false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -64,26 +66,29 @@ func TestRetryableKafkaStartupError(t *testing.T) {
 	}
 }
 
-type startupTestProducer struct{ sarama.AsyncProducer }
-
-type canceledStartupProducer struct {
-	sarama.AsyncProducer
-	closed chan struct{}
+type startupTestProducer struct {
+	pingErr error
+	closed  chan struct{}
+	once    sync.Once
 }
 
-func (p *canceledStartupProducer) Close() error {
-	close(p.closed)
-	return nil
+func (p *startupTestProducer) Ping(context.Context) error                                   { return p.pingErr }
+func (*startupTestProducer) Produce(context.Context, *kgo.Record, func(*kgo.Record, error)) {}
+func (*startupTestProducer) Flush(context.Context) error                                    { return nil }
+func (p *startupTestProducer) Close() {
+	if p.closed != nil {
+		p.once.Do(func() { close(p.closed) })
+	}
 }
 
 func TestKafkaProducerStartupRetriesUntilReady(t *testing.T) {
 	expected := &startupTestProducer{}
 	var attempts []time.Time
-	failures := []error{sarama.ErrOutOfBrokers, sarama.ErrLeaderNotAvailable, sarama.ErrBrokerNotAvailable}
+	failures := []error{kerr.BrokerNotAvailable, kerr.LeaderNotAvailable, kerr.BrokerNotAvailable}
 	interval := 20 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	producer, err := newKafkaProducerWithRetry(ctx, "test", interval, func() (sarama.AsyncProducer, error) {
+	producer, err := newKafkaProducerWithRetry(ctx, "test", interval, func() (kafka.Producer, error) {
 		attempts = append(attempts, time.Now())
 		if len(attempts) <= len(failures) {
 			return nil, failures[len(attempts)-1]
@@ -105,10 +110,10 @@ func TestKafkaProducerStartupCancellationAndPermanentErrors(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		started, release := make(chan struct{}), make(chan struct{})
-		producer := &canceledStartupProducer{closed: make(chan struct{})}
+		producer := &startupTestProducer{closed: make(chan struct{})}
 		finished := make(chan error, 1)
 		go func() {
-			_, err := newKafkaProducerWithRetry(ctx, "test", time.Hour, func() (sarama.AsyncProducer, error) {
+			_, err := newKafkaProducerWithRetry(ctx, "test", time.Hour, func() (kafka.Producer, error) {
 				close(started)
 				<-release
 				return producer, nil
@@ -138,9 +143,9 @@ func TestKafkaProducerStartupCancellationAndPermanentErrors(t *testing.T) {
 		attempted := make(chan struct{})
 		finished := make(chan error, 1)
 		go func() {
-			_, err := newKafkaProducerWithRetry(ctx, "test", time.Hour, func() (sarama.AsyncProducer, error) {
+			_, err := newKafkaProducerWithRetry(ctx, "test", time.Hour, func() (kafka.Producer, error) {
 				close(attempted)
-				return nil, sarama.ErrOutOfBrokers
+				return nil, kerr.BrokerNotAvailable
 			})
 			finished <- err
 		}()
@@ -158,7 +163,7 @@ func TestKafkaProducerStartupCancellationAndPermanentErrors(t *testing.T) {
 	t.Run("already_canceled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := newKafkaProducerWithRetry(ctx, "test", time.Hour, func() (sarama.AsyncProducer, error) {
+		_, err := newKafkaProducerWithRetry(ctx, "test", time.Hour, func() (kafka.Producer, error) {
 			t.Fatal("attempt made after cancellation")
 			return nil, nil
 		})
@@ -166,14 +171,21 @@ func TestKafkaProducerStartupCancellationAndPermanentErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("permanent", func(t *testing.T) {
+	t.Run("permanent_ping_error", func(t *testing.T) {
 		attempts := 0
-		_, err := newKafkaProducerWithRetry(context.Background(), "test", time.Hour, func() (sarama.AsyncProducer, error) {
+		producer := &startupTestProducer{pingErr: kerr.TypedErrorForCode(kerr.SaslAuthenticationFailed.Code), closed: make(chan struct{})}
+		_, err := newKafkaProducerWithRetry(context.Background(), "test", time.Hour, func() (kafka.Producer, error) {
 			attempts++
-			return nil, sarama.ErrSASLAuthenticationFailed
+			return producer, nil
 		})
-		if !errors.Is(err, sarama.ErrSASLAuthenticationFailed) || attempts != 1 {
+		var kafkaError *kerr.Error
+		if !errors.As(err, &kafkaError) || kafkaError.Code != kerr.SaslAuthenticationFailed.Code || attempts != 1 {
 			t.Fatalf("err=%v attempts=%d", err, attempts)
+		}
+		select {
+		case <-producer.closed:
+		default:
+			t.Fatal("producer was not closed after permanent ping error")
 		}
 	})
 }
@@ -209,5 +221,42 @@ func TestKafkaRetryIntervalConfiguration(t *testing.T) {
 	config = parseCommandLineOverrides([]string{"--kafkaRetryInterval=400"}, config)
 	if config.kafkaRetryInterval != 400 {
 		t.Fatalf("CLI interval=%d", config.kafkaRetryInterval)
+	}
+}
+
+func TestProducerCompressionConfiguration(t *testing.T) {
+	if got := defaultConfiguration().producerCompression; got != "none" {
+		t.Fatalf("default producerCompression=%q", got)
+	}
+	for _, value := range []string{"", "snappy2", "producer"} {
+		if _, err := parseProducerCompression(value); err == nil {
+			t.Errorf("accepted invalid producerCompression %q", value)
+		}
+	}
+	if codec, err := parseProducerCompression("Snappy"); err != nil || codec != "snappy" {
+		t.Fatalf("mixed-case codec=%q err=%v", codec, err)
+	}
+	path := filepath.Join(t.TempDir(), "downstream.properties")
+	if err := os.WriteFile(path, []byte("producerCompression=gzip\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := readConfigurationFile(path, defaultConfiguration(), true)
+	if err != nil || config.producerCompression != "gzip" {
+		t.Fatalf("properties codec=%q err=%v", config.producerCompression, err)
+	}
+	if err := os.WriteFile(path, []byte("producerCompression=brotli\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readConfigurationFile(path, defaultConfiguration(), true); err == nil {
+		t.Error("properties accepted invalid producerCompression")
+	}
+	t.Setenv("AIRGAP_DOWNSTREAM_PRODUCER_COMPRESSION", "zstd")
+	config = overrideConfiguration(config)
+	if config.producerCompression != "zstd" {
+		t.Fatalf("environment codec=%q", config.producerCompression)
+	}
+	config = parseCommandLineOverrides([]string{"--producerCompression=none"}, config)
+	if config.producerCompression != "none" {
+		t.Fatalf("CLI codec=%q", config.producerCompression)
 	}
 }

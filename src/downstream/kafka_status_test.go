@@ -6,19 +6,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"sitia.nu/airgap/src/kafka"
 )
 
 type statusTestProducer struct {
-	sarama.AsyncProducer
-	errors    chan *sarama.ProducerError
-	successes chan *sarama.ProducerMessage
+	results chan error
 }
 
-func (p *statusTestProducer) Errors() <-chan *sarama.ProducerError { return p.errors }
-func (p *statusTestProducer) Successes() <-chan *sarama.ProducerMessage {
-	return p.successes
+func (*statusTestProducer) Ping(context.Context) error { return nil }
+func (p *statusTestProducer) Produce(_ context.Context, record *kgo.Record, promise func(*kgo.Record, error)) {
+	promise(record, <-p.results)
 }
+func (*statusTestProducer) Flush(context.Context) error { return nil }
+func (*statusTestProducer) Close()                      {}
 
 func waitForKafkaStatus(t *testing.T, want string) {
 	t.Helper()
@@ -38,20 +40,16 @@ func waitForKafkaStatus(t *testing.T, want string) {
 }
 
 func TestKafkaProducerStatusRecoversAfterDelivery(t *testing.T) {
-	p := &statusTestProducer{
-		errors:    make(chan *sarama.ProducerError),
-		successes: make(chan *sarama.ProducerMessage),
-	}
-	defer close(p.errors)
-	defer close(p.successes)
+	p := &statusTestProducer{results: make(chan error, 1)}
+	kafka.SetProducer(p, 1, UpdateKafkaStatus)
+	t.Cleanup(kafka.CloseProducer)
 	UpdateKafkaStatus("running")
-	monitorKafkaProducer(p)
 	for range 3 {
-		p.errors <- &sarama.ProducerError{Err: sarama.ErrOutOfBrokers}
-		waitForKafkaStatus(t, "Kafka producer error: "+sarama.ErrOutOfBrokers.Error())
-		p.successes <- &sarama.ProducerMessage{
-			Topic: "transfer", Key: sarama.StringEncoder("key"), Value: sarama.StringEncoder("value"),
-		}
+		p.results <- kerr.BrokerNotAvailable
+		kafka.WriteToKafka("key", "transfer", 0, []byte("value"))
+		waitForKafkaStatus(t, "Kafka producer error: "+kerr.BrokerNotAvailable.Error())
+		p.results <- nil
+		kafka.WriteToKafka("key", "transfer", 0, []byte("value"))
 		waitForKafkaStatus(t, "running")
 	}
 }
@@ -61,10 +59,10 @@ func TestKafkaProducerStartupStatusRecovers(t *testing.T) {
 	attempts := 0
 	expected := &startupTestProducer{}
 	p, err := newKafkaProducerWithRetry(context.Background(), "test", time.Millisecond,
-		func() (sarama.AsyncProducer, error) {
+		func() (kafka.Producer, error) {
 			attempts++
 			if attempts == 1 {
-				return nil, sarama.ErrOutOfBrokers
+				return nil, kerr.BrokerNotAvailable
 			}
 			kafkaStatusMu.Lock()
 			got := kafkaStatus

@@ -74,10 +74,11 @@ type TransferConfiguration struct {
 	tcpTLSTrustedKeysDir                string // directory with JSON trust entries for pinned mode; holds the public keys of the downstream servers we accept
 	tcpTLSRotationEnabled               bool   // allow acknowledged client identity rotation in pinned mode (default false: never switch identity without an explicit config change)
 	tcpTLSPinIdleSeconds                int    // deactivate unused overlapping pins in memory after this many idle seconds; 0 (default) disables aging
-	kafkaFetchDefaultBytes              int    // Sarama Consumer.Fetch.Default: bytes requested per partition per fetch; the normal working-set size (default 1 MiB)
-	kafkaMaxMessageBytes                int    // Sarama Consumer.Fetch.Max: hard ceiling per partition per fetch. Must be at least the broker's max.message.bytes, otherwise larger records are skipped by Sarama
-	kafkaChannelBufferSize              int    // Sarama ChannelBufferSize: records pre-buffered per partition before the handler runs. Peak consumer memory is roughly kafkaMaxMessageBytes * (buffer + 1) * partitions
-	kafkaMaxProcessingTimeMs            int    // Sarama Consumer.MaxProcessingTime: maximum expected interval between draining records from a partition channel (default 30 seconds)
+	kafkaFetchDefaultBytes              int    // Maximum target bytes per fetch response; default 1 MiB
+	kafkaMaxMessageBytes                int    // Maximum bytes requested per partition; must allow the broker's largest record batch
+	kafkaChannelBufferSize              int    // Maximum records returned per Kafka poll; bounds records awaiting delivery
+	kafkaMaxProcessingTimeMs            int    // Retained compatibility setting for the consumer's maximum processing interval
+	kafkaDelayedReadBuffer              bool
 	kafkaRetryInterval                  int    // milliseconds to wait after a transient Kafka consumer startup failure (default 5000)
 	memoryLimitBytes                    int64  // explicit memory budget in bytes; 0 (default) auto-detects from the cgroup. May only lower a detected cgroup limit, never raise it
 	memoryHighWatermarkPercent          int    // pause Kafka record admission when used memory reaches this percentage of the limit (default 80)
@@ -128,6 +129,7 @@ func DefaultConfiguration() TransferConfiguration {
 	config.kafkaMaxMessageBytes = 100 * 1024 * 1024
 	config.kafkaChannelBufferSize = 4
 	config.kafkaMaxProcessingTimeMs = 30000
+	config.kafkaDelayedReadBuffer = true
 	config.kafkaRetryInterval = 5000
 	config.memoryLimitBytes = 0
 	config.memoryHighWatermarkPercent = 80
@@ -467,13 +469,17 @@ func ReadParameters(fileName string, result TransferConfiguration) (TransferConf
 				result.maxNrMessages = tmp
 			}
 			Logger.Infof(configApplied(key, tmp), "%s: %d", key, tmp)
-		case "lostEventGuard":
+		case "kafkaDelayedReadBuffer", "lostEventGuard":
 			tmp, err := strconv.ParseBool(value)
 			if err != nil {
-				return result, fmt.Errorf("Error in config lostEventGuard. Illegal value: %s. Legal values are true or false", value)
+				return result, fmt.Errorf("Error in config %s. Illegal value: %s. Legal values are true or false", key, value)
 			}
-			result.lostEventGuard = tmp
-			Logger.Infof(configApplied("lostEventGuard", tmp), "lostEventGuard: %t", tmp)
+			if key == "kafkaDelayedReadBuffer" {
+				result.kafkaDelayedReadBuffer = tmp
+			} else {
+				result.lostEventGuard = tmp
+			}
+			Logger.Infof(configApplied(key, tmp), "%s: %t", key, tmp)
 		case "lostEvent":
 			result.lostEvent = value
 			Logger.Infof(configApplied("lostEvent", value), "lostEvent: %s", value)
@@ -818,6 +824,17 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 	applyIntEnvironment(prefix, "KAFKA_MAX_MESSAGE_BYTES", "kafkaMaxMessageBytes", &config.kafkaMaxMessageBytes)
 	applyIntEnvironment(prefix, "KAFKA_CHANNEL_BUFFER_SIZE", "kafkaChannelBufferSize", &config.kafkaChannelBufferSize)
 	applyIntEnvironment(prefix, "KAFKA_MAX_PROCESSING_TIME_MS", "kafkaMaxProcessingTimeMs", &config.kafkaMaxProcessingTimeMs)
+	const delayedReadBufferEnv = "KAFKA_DELAYED_READ_BUFFER"
+	if value := os.Getenv(prefix + delayedReadBufferEnv); value != "" {
+		env := prefix + delayedReadBufferEnv
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			Logger.Fatalf(configInvalid("kafkaDelayedReadBuffer", value).With(logging.Str("airgap.config.source", env)),
+				"Error in environment variable %s. Illegal value: %s. Legal values are true or false", env, value)
+		}
+		Logger.Infof(configOverride("kafkaDelayedReadBuffer", env, value), "Overriding kafkaDelayedReadBuffer with %s=%t", env, enabled)
+		config.kafkaDelayedReadBuffer = enabled
+	}
 	applyIntEnvironment(prefix, "KAFKA_RETRY_INTERVAL", "kafkaRetryInterval", &config.kafkaRetryInterval)
 	applyInt64Environment(prefix, "MEMORY_LIMIT_BYTES", "memoryLimitBytes", &config.memoryLimitBytes)
 	applyIntEnvironment(prefix, "MEMORY_HIGH_WATERMARK_PERCENT", "memoryHighWatermarkPercent", &config.memoryHighWatermarkPercent)
@@ -1142,12 +1159,16 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 			case "maxNrMessages":
 				config.maxNrMessages = v
 			}
-		case "lostEventGuard":
+		case "kafkaDelayedReadBuffer", "lostEventGuard":
 			v, err := strconv.ParseBool(value)
 			if err != nil {
-				Logger.Fatalf(configInvalid("lostEventGuard", value), "Error parsing --lostEventGuard: %s. Legal values are true or false", value)
+				Logger.Fatalf(configInvalid(key, value), "Error parsing --%s: %s. Legal values are true or false", key, value)
 			}
-			config.lostEventGuard = v
+			if key == "kafkaDelayedReadBuffer" {
+				config.kafkaDelayedReadBuffer = v
+			} else {
+				config.lostEventGuard = v
+			}
 		case "lostEvent":
 			config.lostEvent = value
 		case "airgapLostEventMessage":
@@ -1614,6 +1635,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Infof(configApplied("kafkaMaxMessageBytes", config.kafkaMaxMessageBytes), "  kafkaMaxMessageBytes: %d", config.kafkaMaxMessageBytes)
 	Logger.Infof(configApplied("kafkaChannelBufferSize", config.kafkaChannelBufferSize), "  kafkaChannelBufferSize: %d", config.kafkaChannelBufferSize)
 	Logger.Infof(configApplied("kafkaMaxProcessingTimeMs", config.kafkaMaxProcessingTimeMs), "  kafkaMaxProcessingTimeMs: %d", config.kafkaMaxProcessingTimeMs)
+	Logger.Infof(configApplied("kafkaDelayedReadBuffer", config.kafkaDelayedReadBuffer), "  kafkaDelayedReadBuffer: %t", config.kafkaDelayedReadBuffer)
 	Logger.Infof(configApplied("kafkaRetryInterval", config.kafkaRetryInterval), "  kafkaRetryInterval: %dms", config.kafkaRetryInterval)
 	Logger.Infof(configApplied("memoryLimitBytes", config.memoryLimitBytes), "  memoryLimitBytes: %d", config.memoryLimitBytes)
 	Logger.Infof(configApplied("memoryHighWatermarkPercent", config.memoryHighWatermarkPercent), "  memoryHighWatermarkPercent: %d", config.memoryHighWatermarkPercent)

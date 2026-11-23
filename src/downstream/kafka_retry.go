@@ -2,11 +2,12 @@ package downstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/IBM/sarama"
 	"sitia.nu/airgap/src/kafka"
 	"sitia.nu/airgap/src/logging"
 )
@@ -19,29 +20,42 @@ func parseKafkaRetryInterval(value string) (int, error) {
 	return ms, nil
 }
 
+// parseProducerCompression validates the Kafka producer compression codec name.
+// "none" keeps records uncompressed so consumers (such as the Java deduplicator)
+// never need native codec libraries, which require an executable temp directory.
+func parseProducerCompression(value string) (string, error) {
+	codec := strings.ToLower(value)
+	switch codec {
+	case "none", "gzip", "snappy", "lz4", "zstd":
+		return codec, nil
+	}
+	return "", fmt.Errorf("invalid producerCompression %q: legal values are none, gzip, snappy, lz4, zstd", value)
+}
+
 func retryableKafkaStartupError(err error) bool {
 	return kafka.RetryableStartupError(err)
 }
 
-func kafkaProducerAttempt(ctx context.Context, create func() (sarama.AsyncProducer, error)) (sarama.AsyncProducer, error) {
+func kafkaProducerAttempt(ctx context.Context, create func() (kafka.Producer, error)) (kafka.Producer, error) {
 	type result struct {
-		producer sarama.AsyncProducer
+		producer kafka.Producer
 		err      error
 	}
 	completed := make(chan result)
-	// Sarama's constructor has no context. Let shutdown proceed immediately;
-	// an in-flight constructor finishes on its own timeouts and releases any
-	// producer it created if the caller has already canceled.
 	go func() {
 		producer, err := create()
+		if err != nil {
+			producer = nil
+		} else if producer == nil {
+			err = errors.New("Kafka producer factory returned nil")
+		} else {
+			err = producer.Ping(ctx)
+		}
 		select {
 		case completed <- result{producer, err}:
 		case <-ctx.Done():
 			if producer != nil {
-				if err := producer.Close(); err != nil {
-					Logger.Errorf(logging.Event(logging.EventKafkaConnect).Merge(logging.Err(err)),
-						"Closing Kafka producer after startup cancellation: %v", err)
-				}
+				producer.Close()
 			}
 		}
 	}()
@@ -49,13 +63,16 @@ func kafkaProducerAttempt(ctx context.Context, create func() (sarama.AsyncProduc
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case result := <-completed:
+		if result.err != nil && result.producer != nil {
+			result.producer.Close()
+		}
 		return result.producer, result.err
 	}
 }
 
 func newKafkaProducerWithRetry(ctx context.Context, brokers string, interval time.Duration,
-	create func() (sarama.AsyncProducer, error),
-) (sarama.AsyncProducer, error) {
+	create func() (kafka.Producer, error),
+) (kafka.Producer, error) {
 	for attempt := int64(1); ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err

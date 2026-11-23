@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"flag"
@@ -18,7 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 func main() {
@@ -63,19 +64,21 @@ func backlog(args []string) {
 	if *count <= 0 || *size < 32 || *partitions <= 0 {
 		fatalf("count and partitions must be positive, size must be at least 32")
 	}
-	config := sarama.NewConfig()
-	config.Version = sarama.V3_6_0_0
-	config.Producer.Return.Successes = true
-	config.Producer.RequiredAcks = sarama.WaitForAll
-	config.Producer.Partitioner = sarama.NewManualPartitioner
-	config.Producer.Flush.Frequency = 10 * time.Millisecond
-	config.Producer.Flush.Messages = 1000
-	producer, err := sarama.NewAsyncProducer([]string{"kafka:9092"}, config)
+	producer, err := newKafkaClient("kafka:9092", "airgap-loadgen-backlog",
+		kgo.RecordPartitioner(kgo.ManualPartitioner()),
+		kgo.RequiredAcks(kgo.AllISRAcks()),
+		kgo.ProducerLinger(10*time.Millisecond),
+		kgo.MaxBufferedRecords(1000),
+	)
 	if err != nil {
 		fatalf("create backlog producer: %v", err)
 	}
-	go func() {
-		for i := 0; i < *count; i++ {
+	defer producer.Close()
+	acked := 0
+	for remaining := *count; remaining > 0; {
+		batch := make([]*kgo.Record, 0, min(1000, remaining))
+		for len(batch) < cap(batch) {
+			i := *count - remaining
 			payload := make([]byte, *size)
 			if *printable {
 				for j := range payload {
@@ -83,33 +86,16 @@ func backlog(args []string) {
 				}
 			}
 			copy(payload, fmt.Sprintf("AIRGAP_%09d_", i))
-			producer.Input() <- &sarama.ProducerMessage{
+			batch = append(batch, &kgo.Record{
 				Topic: *topic, Partition: int32(i % *partitions),
-				Value: sarama.ByteEncoder(payload), Timestamp: time.Now().Add(*timestampOffset),
-			}
+				Value: payload, Timestamp: time.Now().Add(*timestampOffset),
+			})
+			remaining--
 		}
-		producer.AsyncClose()
-	}()
-	successes, failures := producer.Successes(), producer.Errors()
-	acked := 0
-	for successes != nil || failures != nil {
-		select {
-		case _, ok := <-successes:
-			if !ok {
-				successes = nil
-			} else {
-				acked++
-			}
-		case failure, ok := <-failures:
-			if !ok {
-				failures = nil
-			} else {
-				fatalf("seed backlog: %v", failure.Err)
-			}
+		if err := producer.ProduceSync(context.Background(), batch...).FirstErr(); err != nil {
+			fatalf("seed backlog: %v", err)
 		}
-	}
-	if acked != *count {
-		fatalf("acknowledged=%d, want %d", acked, *count)
+		acked += len(batch)
 	}
 	fmt.Printf("backlog-ready records=%d partitions=%d bytes=%d\n", acked, *partitions, acked**size)
 }
@@ -141,12 +127,10 @@ func produce(args []string) {
 		}
 	}
 
-	config := sarama.NewConfig()
-	config.Version = sarama.V3_6_0_0
-	config.Producer.Return.Successes = true
-	config.Producer.RequiredAcks = sarama.WaitForAll
-	config.Producer.MaxMessageBytes = largest + 1024
-	producer, err := sarama.NewSyncProducer(strings.Split(*brokers, ","), config)
+	producer, err := newKafkaClient(*brokers, "airgap-loadgen-produce",
+		kgo.RequiredAcks(kgo.AllISRAcks()),
+		kgo.ProducerBatchMaxBytes(int32(largest+1024)),
+	)
 	if err != nil {
 		fatalf("create producer: %v", err)
 	}
@@ -160,11 +144,12 @@ func produce(args []string) {
 	for index := 0; index < *count; index++ {
 		recordSize := sizeList[index%len(sizeList)]
 		copy(payload, fmt.Sprintf("AIRGAP_%06d_", index))
-		_, _, err := producer.SendMessage(&sarama.ProducerMessage{
+		record := &kgo.Record{
 			Topic: *topic,
-			Key:   sarama.StringEncoder(strconv.Itoa(index)),
-			Value: sarama.ByteEncoder(payload[:recordSize]),
-		})
+			Key:   []byte(strconv.Itoa(index)),
+			Value: payload[:recordSize],
+		}
+		err := producer.ProduceSync(context.Background(), record).FirstErr()
 		if err != nil {
 			fatalf("send record %d: %v", index, err)
 		}

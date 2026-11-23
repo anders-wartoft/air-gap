@@ -11,12 +11,11 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"sitia.nu/airgap/src/protocol"
 )
 
@@ -180,24 +179,16 @@ func runUDPBatch(o udpBatchOptions, expected uint64, out io.Writer) (result udpB
 	o.probeSent = make([]atomic.Int64, o.cycles)
 	defer func() { result.ElapsedSeconds = time.Since(started).Seconds() }()
 
-	config := sarama.NewConfig()
-	config.Version = sarama.V3_6_0_0
-	config.ClientID = "tc53-udp-verifier"
-	config.Consumer.Return.Errors = true
-	config.Consumer.Fetch.Default = 1024 * 1024
-	config.Net.ReadTimeout = 10 * time.Second
-	client, err := sarama.NewClient(strings.Split(o.brokers, ","), config)
+	client, err := newKafkaClient(o.brokers, "tc53-udp-verifier",
+		kgo.FetchMaxPartitionBytes(1024*1024),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+	)
 	if err != nil {
 		return result, fmt.Errorf("create target Kafka client: %w", err)
 	}
-	defer func() { retErr = errors.Join(retErr, client.Close()) }()
-	consumer, err := sarama.NewConsumerFromClient(client)
-	if err != nil {
-		return result, fmt.Errorf("create target Kafka consumer: %w", err)
-	}
-	defer func() { retErr = errors.Join(retErr, consumer.Close()) }()
+	defer client.Close()
 
-	partitions, err := consumer.Partitions(o.targetTopic)
+	partitions, err := kafkaTopicPartitions(context.Background(), client, o.targetTopic)
 	if err != nil {
 		return result, fmt.Errorf("list target topic partitions: %w", err)
 	}
@@ -222,75 +213,58 @@ func runUDPBatch(o udpBatchOptions, expected uint64, out io.Writer) (result udpB
 		default:
 		}
 	}
+	consumeOffsets := make(map[int32]kgo.Offset, len(partitions))
 	for _, partition := range partitions {
-		pc, consumeErr := consumer.ConsumePartition(o.targetTopic, partition, sarama.OffsetOldest)
-		if consumeErr != nil {
-			cancel()
-			receivers.Wait()
-			return result, fmt.Errorf("consume target partition %d: %w", partition, consumeErr)
-		}
-		receivers.Add(1)
-		go func(partition int32, pc sarama.PartitionConsumer) {
-			defer receivers.Done()
-			defer func() {
-				if closeErr := pc.Close(); closeErr != nil {
-					fail(fmt.Errorf("close target partition consumer %d: %w", partition, closeErr))
-				}
-			}()
-			messages, errorsCh := pc.Messages(), pc.Errors()
-			for messages != nil || errorsCh != nil {
-				select {
-				case msg, ok := <-messages:
-					if !ok {
-						messages = nil
-						continue
-					}
-					seq, _, verifyErr := validateUDPBatchRecord(string(msg.Key), msg.Value, len(partitions), o.size, o.size, o.seed)
-					if verifyErr != nil {
-						fail(fmt.Errorf("validate target record: %w", verifyErr))
-						return
-					}
-					if seq >= expected {
-						fail(fmt.Errorf("unexpected sequence %d; expected range [0,%d)", seq, expected))
-						return
-					}
-					if int32(seq%uint64(len(partitions))) != partition {
-						fail(fmt.Errorf("sequence %d delivered to target partition %d", seq, partition))
-						return
-					}
-					if !udpBatchBitSet(seen, seq) {
-						fail(fmt.Errorf("duplicate sequence %d", seq))
-						return
-					}
-					if _, isProbe := probeSequences[seq]; isProbe {
-						sent := o.probeSent[seq/(perBurst+1)].Load()
-						latency := time.Since(time.Unix(0, sent))
-						if latency < 0 {
-							fail(fmt.Errorf("probe sequence %d has a future timestamp", seq))
-							return
-						}
-						for {
-							current := maxProbeLatencyNS.Load()
-							if uint64(latency) <= current || maxProbeLatencyNS.CompareAndSwap(current, uint64(latency)) {
-								break
-							}
-						}
-						probes.Add(1)
-					}
-					delivered.Add(1)
-				case consumeErr, ok := <-errorsCh:
-					if !ok {
-						errorsCh = nil
-					} else {
-						fail(fmt.Errorf("consume target partition %d: %w", partition, consumeErr))
-						return
-					}
-				case <-ctx.Done():
-					return
+		consumeOffsets[partition] = kgo.NewOffset().AtStart()
+	}
+	client.AddConsumePartitions(map[string]map[int32]kgo.Offset{o.targetTopic: consumeOffsets})
+	receivers.Add(1)
+	go func() {
+		defer receivers.Done()
+		for ctx.Err() == nil {
+			fetches := client.PollRecords(ctx, 256)
+			for _, failure := range fetches.Errors() {
+				if ctx.Err() == nil {
+					fail(fmt.Errorf("consume target topic: %w", failure.Err))
 				}
 			}
-		}(partition, pc)
-	}
+			fetches.EachRecord(func(record *kgo.Record) {
+				seq, _, verifyErr := validateUDPBatchRecord(string(record.Key), record.Value, len(partitions), o.size, o.size, o.seed)
+				if verifyErr != nil {
+					fail(fmt.Errorf("validate target record: %w", verifyErr))
+					return
+				}
+				if seq >= expected {
+					fail(fmt.Errorf("unexpected sequence %d; expected range [0,%d)", seq, expected))
+					return
+				}
+				if record.Partition != int32(seq%uint64(len(partitions))) {
+					fail(fmt.Errorf("sequence %d delivered to target partition %d", seq, record.Partition))
+					return
+				}
+				if !udpBatchBitSet(seen, seq) {
+					fail(fmt.Errorf("duplicate sequence %d", seq))
+					return
+				}
+				if _, isProbe := probeSequences[seq]; isProbe {
+					sent := o.probeSent[seq/(perBurst+1)].Load()
+					latency := time.Since(time.Unix(0, sent))
+					if latency < 0 {
+						fail(fmt.Errorf("probe sequence %d has a future timestamp", seq))
+						return
+					}
+					for {
+						current := maxProbeLatencyNS.Load()
+						if uint64(latency) <= current || maxProbeLatencyNS.CompareAndSwap(current, uint64(latency)) {
+							break
+						}
+					}
+					probes.Add(1)
+				}
+				delivered.Add(1)
+			})
+		}
+	}()
 
 	udpAddress, err := net.ResolveUDPAddr("udp", o.address)
 	if err != nil {
@@ -343,7 +317,7 @@ func runUDPBatch(o udpBatchOptions, expected uint64, out io.Writer) (result udpB
 	default:
 	}
 	if retErr == nil {
-		retErr = verifyUDPBatchTopicOffsets(client, o.targetTopic, expected, len(partitions))
+		retErr = verifyUDPBatchTopicOffsets(context.Background(), client, o.targetTopic, expected, len(partitions))
 	}
 	result.Delivered = delivered.Load()
 	result.SparseProbes = probes.Load()
@@ -370,12 +344,16 @@ func runUDPBatch(o udpBatchOptions, expected uint64, out io.Writer) (result udpB
 	return result, retErr
 }
 
-func verifyUDPBatchTopicOffsets(client sarama.Client, topic string, expected uint64, partitions int) error {
+func verifyUDPBatchTopicOffsets(ctx context.Context, client *kgo.Client, topic string, expected uint64, partitions int) error {
+	partitionIDs := make([]int32, partitions)
 	for partition := range partitions {
-		highWatermark, err := client.GetOffset(topic, int32(partition), sarama.OffsetNewest)
-		if err != nil {
-			return fmt.Errorf("read target partition %d high-water mark: %w", partition, err)
-		}
+		partitionIDs[partition] = int32(partition)
+	}
+	offsets, err := kafkaOffsets(ctx, client, topic, partitionIDs, -1)
+	if err != nil {
+		return fmt.Errorf("read target topic high-water marks: %w", err)
+	}
+	for partition, highWatermark := range offsets {
 		want := expected / uint64(partitions)
 		if uint64(partition) < expected%uint64(partitions) {
 			want++

@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Kafka client
+
+- Replaced Sarama with franz-go for Kafka consumers, producers, replay and
+  offset tools, and test utilities. The Kafka protocol version default and
+  existing configuration keys are retained.
+- New downstream `producerCompression` setting (`none`, `gzip`, `snappy`,
+  `lz4`, `zstd`; env `AIRGAP_DOWNSTREAM_PRODUCER_COMPRESSION`, also
+  `--producerCompression=CODEC`) controls the compression of records written
+  to downstream Kafka. The default is `none`, matching the Sarama-based
+  releases — franz-go would otherwise default to snappy, forcing Java
+  consumers such as the deduplicator to extract the snappy-java native
+  library into an executable temp directory (a problem on hosts with
+  `noexec /tmp` or other W^X hardening). An unsupported broker codec falls
+  back to uncompressed.
+- `kafkaMaxProcessingTimeMs` and `kafkaDelayedReadBuffer` remain accepted for
+  configuration compatibility; they no longer control Sarama-specific
+  behavior in the franz-go consumer.
+
+### Deduplication on hardened hosts
+
+- Documented how to run the deduplicator on hosts with `noexec /tmp` or other
+  W^X hardening, where its native libraries (RocksDB, zstd, Snappy, LZ4)
+  cannot be extracted to and loaded from the default temp directory. If the
+  consumed or produced records are snappy-compressed, point snappy-java's
+  extraction at a dedicated directory that the service user can execute from,
+  for example in the service's `JAVA_OPTS`:
+
+  ```sh
+  -Dorg.xerial.snappy.tempdir=/var/lib/stream/dedup/snappy
+  ```
+
+  RocksDB is always required for the Kafka Streams state store and honors
+  `-Djava.io.tmpdir` or the `ROCKSDB_SHAREDLIB_DIR` environment variable.
+  Alternatively, install the libraries read-only on `java.library.path`.
+  Keeping downstream `producerCompression` at its `none` default (or `gzip`)
+  avoids the Snappy requirement entirely. See
+  [Deduplication.md](doc/Deduplication.md#hardened-hosts-wx--noexec-temp-directories).
+
 ### Test reliability
 
 - TC-16 retries timed-out Kafka consumer-group offset checks during dedup
@@ -41,7 +79,10 @@
   Set both upstream pacing rates to positive values to enable pacing, or set
   both to `0` (the default) to disable it. The byte limit counts encoded UDP
   payload bytes, not UDP/IP headers. The burst limit is in datagrams and
-  defaults to `32` (allowed range: `1` to `256`).
+  defaults to `32` (allowed range: `1` to `256`). Keep the burst at least
+  one millisecond of the datagram rate (`udpPacingDatagramsPerSecond / 1000`):
+  each pacer timer wake-up releases at most one burst, so smaller values cap
+  effective throughput below the configured rate.
 
   Example upstream environment settings (use rates
   [calibrated for your link](./README.md#calibrating-udp-pacing-before-installing-a-data-diode)):
@@ -59,6 +100,11 @@
   subscription close/reopen churn. Overflow falls back to rereading
   uncommitted records after the current record is delivered. Ordering,
   delivery deadlines and one-way diode transport behavior are unchanged.
+- The upstream `kafkaDelayedReadBuffer` setting defaults to `true`. Set
+  `AIRGAP_UPSTREAM_KAFKA_DELAYED_READ_BUFFER=false` (or
+  `kafkaDelayedReadBuffer=false` in the properties file) to use the previous
+  pause-and-reread behavior for delayed Kafka threads. This can increase
+  subscription churn and does not change immediate threads or downstream.
 
 ## 0.1.21-SNAPSHOT
 

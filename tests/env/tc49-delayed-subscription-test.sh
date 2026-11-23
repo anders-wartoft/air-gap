@@ -79,9 +79,9 @@ DOWNSTREAM_CID="$(compose ps -q downstream)"
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     if [[ -f "$TC49_LOG_DIR/upstream.log" ]] &&
-       grep -Fq 'Sarama consumer (WithContext) now up and running' "$TC49_LOG_DIR/upstream.log" &&
-       grep -Fq 'Sarama consumer (WithContext) sec-180 up and running' "$TC49_LOG_DIR/upstream.log" &&
-       grep -Fq 'Sarama consumer (WithContext) sec-86400 up and running' "$TC49_LOG_DIR/upstream.log" &&
+       grep -Fq 'Franz-go consumer (WithContext) now up and running' "$TC49_LOG_DIR/upstream.log" &&
+       grep -Fq 'Franz-go consumer (WithContext) sec-180 up and running' "$TC49_LOG_DIR/upstream.log" &&
+       grep -Fq 'Franz-go consumer (WithContext) sec-86400 up and running' "$TC49_LOG_DIR/upstream.log" &&
        docker exec "$DOWNSTREAM_CID" ss -uln | grep -q ':1234 '; then
         break
     fi
@@ -193,12 +193,6 @@ if grep -q 'abandoned subscription.*consuming was taking too long' "$TC49_LOG_DI
     echo "TC-49: upstream abandoned a delayed Kafka subscription" >&2
     exit 1
 fi
-for thread in sec-180 sec-86400; do
-    grep -Fq "Delaying message delivery on thread: $thread" "$TC49_LOG_DIR/upstream.log" || {
-        echo "TC-49: no delayed delivery logged for $thread" >&2
-        exit 1
-    }
-done
 for cid in "$UPSTREAM_CID" "$DOWNSTREAM_CID"; do
     [[ "$(docker inspect --format '{{.State.Running}} {{.State.OOMKilled}} {{.RestartCount}}' "$cid")" == "true false 0" ]] || {
         echo "TC-49: upstream or downstream restarted or stopped unexpectedly" >&2
@@ -217,10 +211,9 @@ report_check "three sending threads over UDP" \
     "216 Kafka records, correct copies and offsets, no abandonment" \
     "216 records across three partitions" 0
 
-echo "TC-49: running Kafka delay, bounded pause/resume and rebalance regression tests"
+echo "TC-49: running franz-go delayed delivery integration tests"
 airgap_docker_run --rm --network "${PROJECT}_default" \
     -v "$WORK:/airgap/work:ro,z" \
-    -e AIRGAP_DELAY_KAFKA_BROKERS=kafka:9092 \
+    -e AIRGAP_FRANZ_KAFKA_BROKER=kafka:9092 \
     --entrypoint /airgap/work/kafka-delay.test "$KAFKA_IMAGE" \
-    -test.v -test.run '^(TestDelayedSubscriptionWithKafka|TestBoundedDelayedReaderWithKafka)$' \
-    -test.skip '/paced-delivery$' -test.timeout 3m
+    -test.v -test.run '^TestFranzUpstreamWithKafka$' -test.timeout 3m

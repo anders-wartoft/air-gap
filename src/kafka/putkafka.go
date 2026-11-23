@@ -1,12 +1,20 @@
 package kafka
 
 import (
+	"context"
 	"sync"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"sitia.nu/airgap/src/logging"
 )
+
+type Producer interface {
+	Ping(context.Context) error
+	Produce(context.Context, *kgo.Record, func(*kgo.Record, error))
+	Flush(context.Context) error
+	Close()
+}
 
 type MessageCacheEntry struct {
 	key       string
@@ -24,7 +32,8 @@ type MessageCache struct {
 
 var (
 	cache       = MessageCache{entries: make([]MessageCacheEntry, 0)}
-	producer    sarama.AsyncProducer
+	producer    Producer
+	status      func(string)
 	doneChan    chan struct{}
 	wg          sync.WaitGroup
 	batchSize   int
@@ -33,7 +42,7 @@ var (
 	cacheSpace  = sync.NewCond(&cache.mu)
 )
 
-func SetProducer(p sarama.AsyncProducer, cfgBatchSize int) {
+func SetProducer(p Producer, cfgBatchSize int, updateStatus ...func(string)) {
 	if cfgBatchSize <= 0 {
 		Logger.Panicf(logging.Event(logging.EventConfigInvalid), "Kafka batch size must be positive: %d", cfgBatchSize)
 	}
@@ -42,6 +51,10 @@ func SetProducer(p sarama.AsyncProducer, cfgBatchSize int) {
 	stopBackgroundThread()
 	cache.mu.Lock()
 	producer = p
+	status = nil
+	if len(updateStatus) > 0 {
+		status = updateStatus[0]
+	}
 	batchSize = cfgBatchSize
 	cache.entries = nil
 	cache.mu.Unlock()
@@ -136,7 +149,6 @@ func WriteToKafka(key, topic string, partition int32, val []byte) {
 	cache.mu.Unlock()
 }
 
-// Called with cache.mu held; a full batch need not wait for the partial-batch timer.
 func signalBatch() {
 	select {
 	case batchReady <- struct{}{}:
@@ -151,7 +163,6 @@ func sendBatch() {
 		cache.mu.Unlock()
 		return
 	}
-
 	toSend := cache.entries
 	cache.entries = nil
 	cache.sending += n
@@ -159,21 +170,59 @@ func sendBatch() {
 	cacheSpace.Broadcast()
 	cache.mu.Unlock()
 
-	for _, m := range toSend {
+	for _, message := range toSend {
 		if p != nil {
-			msg := &sarama.ProducerMessage{
-				Topic:     m.topic,
-				Key:       sarama.StringEncoder(m.key),
-				Value:     sarama.ByteEncoder(m.val),
-				Partition: m.partition,
+			record := &kgo.Record{
+				Topic:     message.topic,
+				Key:       []byte(message.key),
+				Value:     message.val,
+				Partition: message.partition,
 			}
-			p.Input() <- msg
+			p.Produce(context.Background(), record, reportKafkaDelivery)
 		}
 	}
 	cache.mu.Lock()
 	cache.sending -= n
 	cacheSpace.Broadcast()
 	cache.mu.Unlock()
+}
+
+func reportKafkaDelivery(record *kgo.Record, err error) {
+	if record == nil {
+		updateKafkaStatus("Kafka producer error: unknown producer error")
+		Logger.Errorf(logging.Event(logging.EventKafkaProduce, logging.Failure()),
+			"Failed to send message: unknown producer error")
+		return
+	}
+	attrs := logging.Event(logging.EventKafkaProduce,
+		logging.Str("messaging.destination.name", record.Topic),
+		logging.Decimal("messaging.destination.partition.id", int64(record.Partition)),
+		logging.Str("airgap.message.id", string(record.Key)),
+		logging.Int("airgap.message.size", int64(len(record.Value))),
+	)
+	if err != nil {
+		updateKafkaStatus("Kafka producer error: " + err.Error())
+		Logger.ErrorT(attrs.With(logging.Failure(), logging.ErrorType(err), logging.ErrMessage(err)),
+			"Failed to send message: topic={messaging.destination.name} partition={messaging.destination.partition.id} key={airgap.message.id} error={error.message}")
+		return
+	}
+	updateKafkaStatus("running")
+	if Logger.CanLog(logging.DEBUG) {
+		preview := string(record.Value)
+		if len(preview) > 120 {
+			preview = preview[:120] + "..."
+		}
+		Logger.Debugf(attrs, "Message sent: key=%s partition=%d %s", string(record.Key), record.Partition, preview)
+	}
+}
+
+func updateKafkaStatus(message string) {
+	cache.mu.RLock()
+	update := status
+	cache.mu.RUnlock()
+	if update != nil {
+		update(message)
+	}
 }
 
 func FlushCache() {
@@ -192,10 +241,14 @@ func CloseProducer() {
 	cache.mu.Lock()
 	p := producer
 	producer = nil
+	status = nil
 	cache.mu.Unlock()
 	if p != nil {
-		if err := p.Close(); err != nil {
-			Logger.Errorf(logging.Event(logging.EventKafkaProduce).Merge(logging.Err(err)), "Failed to close Kafka producer: %v", err)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := p.Flush(ctx); err != nil {
+			Logger.Errorf(logging.Event(logging.EventKafkaProduce).Merge(logging.Err(err)), "Failed to flush Kafka producer: %v", err)
 		}
+		p.Close()
 	}
 }

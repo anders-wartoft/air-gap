@@ -97,8 +97,7 @@ Only records with the same body, severity, and ordered semantic attributes are
 combined. Changing IDs, retry counts, or remote ports therefore keeps records
 distinct, unless the call site uses a message template (below). FATAL records and
 mandatory production-configuration warnings are never suppressed. Direct
-third-party text output (including Sarama's historical text writer) bypasses
-the application logger and is not suppressed.
+third-party text output that bypasses the application logger is not suppressed.
 
 ### Message templates
 
@@ -1378,10 +1377,9 @@ version banner and the "Reading configuration from file" line are emitted before
 the framework knows what `hash` is set to. This is inherent and already true for
 `logLevel` and `logFileName`.
 
-**Direct writes to `StdLogger` bypass the chain.** Sarama is routed through the
-application logger in OTel mode and is therefore encoded and stamped like other
-application records. Any other code that writes directly to the exposed
-`StdLogger` writer still bypasses the chain.
+**Direct writes to `StdLogger` bypass the chain.** Kafka connection and
+delivery failures are emitted through the application logger. Code that writes
+directly to the exposed `StdLogger` writer still bypasses the chain.
 
 **The chain proves integrity, not completeness, at the tail.** Truncating the
 file removes the end of the chain, and nothing inside the file reveals how long

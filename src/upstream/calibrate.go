@@ -18,7 +18,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/kversion"
 	"sitia.nu/airgap/src/kafka"
 	"sitia.nu/airgap/src/protocol"
 	"sitia.nu/airgap/src/udp"
@@ -62,16 +65,16 @@ func calibrateUDP(ctx context.Context, args []string, out, diagnostics io.Writer
 		}
 		candidates = append(candidates, rate)
 	}
-	conf := sarama.NewConfig()
-	conf.Version = sarama.V3_6_0_0
-	conf.ClientID = "airgap-calibration"
-	conf.Metadata.AllowAutoTopicCreation = false
-	conf.Metadata.Retry.Max = 1
-	conf.Net.DialTimeout, conf.Net.ReadTimeout, conf.Net.WriteTimeout = 5*time.Second, 5*time.Second, 5*time.Second
-	conf.Consumer.Return.Errors = true
-	conf.Consumer.IsolationLevel = sarama.ReadCommitted
 	if (*cert == "") != (*key == "") || (*password != "" && *key == "") || (*cert != "" && *ca == "") {
 		return fmt.Errorf("Kafka client TLS requires --kafka-ca-file and a certificate/key pair")
+	}
+	opts := []kgo.Opt{
+		kgo.SeedBrokers(strings.Split(*brokers, ",")...),
+		kgo.ClientID("airgap-calibration"),
+		kgo.MaxVersions(kversion.FromString("3.6.0")),
+		kgo.DialTimeout(5 * time.Second),
+		kgo.RequestTimeoutOverhead(5 * time.Second),
+		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 	}
 	if *ca != "" {
 		pem, err := os.ReadFile(*ca)
@@ -82,22 +85,25 @@ func calibrateUDP(ctx context.Context, args []string, out, diagnostics io.Writer
 		if !roots.AppendCertsFromPEM(pem) {
 			return fmt.Errorf("no certificates found in Kafka CA file")
 		}
-		conf.Net.TLS.Enable = true
-		conf.Net.TLS.Config = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+		tlsConfig := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 		if *cert != "" {
 			pair, err := kafka.LoadTLSCertificate(*cert, *key, *password)
 			if err != nil {
 				return err
 			}
-			conf.Net.TLS.Config.Certificates = []tls.Certificate{pair}
+			tlsConfig.Certificates = []tls.Certificate{pair}
 		}
+		opts = append(opts, kgo.DialTLSConfig(tlsConfig))
 	}
-	client, err := sarama.NewClient(strings.Split(*brokers, ","), conf)
+	client, err := kgo.NewClient(opts...)
 	if err != nil {
 		return fmt.Errorf("connect to verification Kafka: %w", err)
 	}
 	defer client.Close()
-	partitions, err := client.Partitions(*topic)
+	if err := client.Ping(ctx); err != nil {
+		return fmt.Errorf("connect to verification Kafka: %w", err)
+	}
+	partitions, err := calibrationTopicPartitions(ctx, client, *topic)
 	if err != nil {
 		return fmt.Errorf("read pre-created verification topic %q: %w", *topic, err)
 	}
@@ -110,7 +116,7 @@ func calibrateUDP(ctx context.Context, args []string, out, diagnostics io.Writer
 	}
 	defer conn.Close()
 	probe := calibrationTrial{topic: *topic, rate: 1000, burst: 1, duration: time.Second, drain: *drain, partitions: partitions, limit: len(partitions)}
-	sent, received, _, _, err := probe.run(ctx, conn, client)
+	sent, received, _, _, err := probe.run(ctx, conn, client, opts)
 	if err != nil {
 		return fmt.Errorf("routing probe: %w", err)
 	}
@@ -119,7 +125,7 @@ func calibrateUDP(ctx context.Context, args []string, out, diagnostics io.Writer
 	}
 	trial := func(rate int) (bool, int, error) {
 		c := calibrationTrial{topic: *topic, rate: rate, burst: *burst, duration: *duration, drain: *drain, partitions: partitions}
-		sent, received, datagrams, elapsed, err := c.run(ctx, conn, client)
+		sent, received, datagrams, elapsed, err := c.run(ctx, conn, client, opts)
 		achieved := 0
 		if elapsed > 0 {
 			achieved = int(float64(datagrams) / elapsed.Seconds())
@@ -165,11 +171,28 @@ type calibrationTrial struct {
 	limit           int
 }
 
-func (c calibrationTrial) run(ctx context.Context, conn *udp.UDPConn, client sarama.Client) (sent, received, datagrams int, elapsed time.Duration, err error) {
+func (c calibrationTrial) run(ctx context.Context, conn *udp.UDPConn, client *kgo.Client, options []kgo.Opt) (sent, received, datagrams int, elapsed time.Duration, err error) {
 	if err = ctx.Err(); err != nil {
 		return
 	}
-	consumer, err := sarama.NewConsumerFromClient(client)
+	startOffsets, err := calibrationOffsets(ctx, client, c.topic, c.partitions, -1)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	consumeOffsets := make(map[int32]kgo.Offset, len(c.partitions))
+	partitionIndices := make(map[int32]int, len(c.partitions))
+	prefixes := make([]string, len(c.partitions))
+	for i, partition := range c.partitions {
+		consumeOffsets[partition] = kgo.NewOffset().At(startOffsets[partition])
+		partitionIndices[partition] = i
+		prefixes[i] = fmt.Sprintf("%s_%d_", c.topic, partition)
+	}
+	consumeOptions := append([]kgo.Opt(nil), options...)
+	consumeOptions = append(consumeOptions,
+		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{c.topic: consumeOffsets}),
+		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
+	)
+	consumer, err := kgo.NewClient(consumeOptions...)
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
@@ -195,63 +218,47 @@ func (c calibrationTrial) run(ctx context.Context, conn *udp.UDPConn, client sar
 	var mu sync.Mutex
 	verified := 0
 	highest := -1
-	prefixes := make([]string, len(c.partitions))
-	for i, partition := range c.partitions {
-		prefix := fmt.Sprintf("%s_%d_", c.topic, partition)
-		prefixes[i] = prefix
-		startOffset, err := client.GetOffset(c.topic, partition, sarama.OffsetNewest)
-		if err != nil {
-			return 0, 0, 0, 0, err
-		}
-		pc, err := consumer.ConsumePartition(c.topic, partition, startOffset)
-		if err != nil {
-			return 0, 0, 0, 0, err
-		}
-		readers.Add(1)
-		go func() {
-			defer readers.Done()
-			for {
-				select {
-				case msg, ok := <-pc.Messages():
-					if !ok {
-						fail(fmt.Errorf("verification partition %d closed unexpectedly", partition))
-						return
-					}
-					offsetText, ok := strings.CutPrefix(string(msg.Key), prefix)
-					offset, err := strconv.ParseUint(offsetText, 10, 64)
-					if !ok || err != nil || offset < base || offset-base >= uint64(len(seen)) {
-						fail(fmt.Errorf("unexpected record in verification topic %q; keep it isolated", c.topic))
-						return
-					}
-					seq := int(offset - base)
-					if seq%len(c.partitions) != i || len(msg.Value) != 400+seq%1201 ||
-						binary.BigEndian.Uint64(msg.Value[:8]) != offset || !bytes.Equal(msg.Value[8:], payloadTemplate[8:len(msg.Value)]) {
-						fail(fmt.Errorf("corrupt calibration record %d", seq))
-						return
-					}
-					mu.Lock()
-					if seen[seq] {
-						mu.Unlock()
-						fail(fmt.Errorf("duplicate calibration record %d", seq))
-						return
-					}
-					seen[seq] = true
-					verified++
-					highest = max(highest, seq)
-					mu.Unlock()
-				case failure, ok := <-pc.Errors():
-					if ok {
-						fail(failure)
-					} else {
-						fail(fmt.Errorf("verification partition %d stopped", partition))
-					}
-					return
-				case <-readCtx.Done():
-					return
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		for readCtx.Err() == nil {
+			fetches := consumer.PollRecords(readCtx, 256)
+			for _, failure := range fetches.Errors() {
+				if readCtx.Err() == nil {
+					fail(failure.Err)
 				}
 			}
-		}()
-	}
+			fetches.EachRecord(func(record *kgo.Record) {
+				index, ok := partitionIndices[record.Partition]
+				if !ok {
+					fail(fmt.Errorf("unexpected partition %d in verification topic %q", record.Partition, c.topic))
+					return
+				}
+				offsetText, ok := strings.CutPrefix(string(record.Key), prefixes[index])
+				offset, parseErr := strconv.ParseUint(offsetText, 10, 64)
+				if !ok || parseErr != nil || offset < base || offset-base >= uint64(len(seen)) {
+					fail(fmt.Errorf("unexpected record in verification topic %q; keep it isolated", c.topic))
+					return
+				}
+				seq := int(offset - base)
+				if seq%len(c.partitions) != index || len(record.Value) != 400+seq%1201 ||
+					binary.BigEndian.Uint64(record.Value[:8]) != offset || !bytes.Equal(record.Value[8:], payloadTemplate[8:len(record.Value)]) {
+					fail(fmt.Errorf("corrupt calibration record %d", seq))
+					return
+				}
+				mu.Lock()
+				if seen[seq] {
+					mu.Unlock()
+					fail(fmt.Errorf("duplicate calibration record %d", seq))
+					return
+				}
+				seen[seq] = true
+				verified++
+				highest = max(highest, seq)
+				mu.Unlock()
+			})
+		}
+	}()
 
 	if err := conn.ConfigurePacing(readCtx, c.rate, c.rate*calibrationFrameSize, c.burst); err != nil {
 		return 0, 0, 0, 0, err
@@ -296,4 +303,63 @@ func (c calibrationTrial) run(ctx context.Context, conn *udp.UDPConn, client sar
 		err = fmt.Errorf("received calibration records that were not sent")
 	}
 	return
+}
+
+func calibrationTopicPartitions(ctx context.Context, client *kgo.Client, topic string) ([]int32, error) {
+	req := kmsg.NewPtrMetadataRequest()
+	req.Topics = []kmsg.MetadataRequestTopic{{Topic: &topic}}
+	resp, err := req.RequestWith(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range resp.Topics {
+		if item.Topic != nil && *item.Topic == topic {
+			if item.ErrorCode != 0 {
+				return nil, kerr.TypedErrorForCode(item.ErrorCode)
+			}
+			partitions := make([]int32, 0, len(item.Partitions))
+			for _, partition := range item.Partitions {
+				if partition.ErrorCode != 0 {
+					return nil, kerr.TypedErrorForCode(partition.ErrorCode)
+				}
+				partitions = append(partitions, partition.Partition)
+			}
+			return partitions, nil
+		}
+	}
+	return nil, fmt.Errorf("verification topic %q not found", topic)
+}
+
+func calibrationOffsets(ctx context.Context, client *kgo.Client, topic string, partitions []int32, timestamp int64) (map[int32]int64, error) {
+	req := kmsg.NewPtrListOffsetsRequest()
+	req.ReplicaID = -1
+	entry := kmsg.NewListOffsetsRequestTopic()
+	entry.Topic = topic
+	for _, partition := range partitions {
+		requestPartition := kmsg.NewListOffsetsRequestTopicPartition()
+		requestPartition.Partition = partition
+		requestPartition.Timestamp = timestamp
+		entry.Partitions = append(entry.Partitions, requestPartition)
+	}
+	req.Topics = []kmsg.ListOffsetsRequestTopic{entry}
+	resp, err := req.RequestWith(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	offsets := make(map[int32]int64, len(partitions))
+	for _, item := range resp.Topics {
+		if item.Topic != topic {
+			continue
+		}
+		for _, partition := range item.Partitions {
+			if partition.ErrorCode != 0 {
+				return nil, kerr.TypedErrorForCode(partition.ErrorCode)
+			}
+			offsets[partition.Partition] = partition.Offset
+		}
+	}
+	if len(offsets) != len(partitions) {
+		return nil, fmt.Errorf("Kafka returned offsets for %d of %d verification partitions", len(offsets), len(partitions))
+	}
+	return offsets, nil
 }

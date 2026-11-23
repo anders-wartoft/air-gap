@@ -26,7 +26,7 @@ const (
 var logLevel = INFO // default
 var logger = log.New(os.Stderr, "", log.LstdFlags)
 
-// StdLogger exposes the underlying *log.Logger for use with libraries like Sarama.
+// StdLogger exposes the underlying *log.Logger for use by standard-library logging adapters.
 // Records written through it bypass the integrity chain, because they do not pass
 // through emit.
 var StdLogger = logger

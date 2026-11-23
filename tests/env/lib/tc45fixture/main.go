@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/kversion"
 )
 
 func payload(index int) []byte {
@@ -28,74 +33,92 @@ func run() error {
 	if (*mode != "seed" && *mode != "verify") || *source == "" || *target == "" || *wait <= 0 {
 		return fmt.Errorf("require --mode=seed|verify, --source, --target and positive --wait")
 	}
-	config := sarama.NewConfig()
-	config.Version = sarama.V3_6_0_0
-	config.Net.DialTimeout = 5 * time.Second
-	config.Net.ReadTimeout = 5 * time.Second
-	config.Net.WriteTimeout = 5 * time.Second
-	config.Producer.Return.Successes = true
-	config.Producer.RequiredAcks = sarama.WaitForAll
-	config.Consumer.Return.Errors = true
+	clientOptions := []kgo.Opt{
+		kgo.SeedBrokers("kafka:9092"),
+		kgo.ClientID("tc45-fixture"),
+		kgo.MaxVersions(kversion.FromString("3.6.0")),
+		kgo.DialTimeout(5 * time.Second),
+		kgo.RequestTimeoutOverhead(5 * time.Second),
+		kgo.RequiredAcks(kgo.AllISRAcks()),
+	}
 	if *mode == "seed" {
-		admin, err := sarama.NewClusterAdmin([]string{"kafka:9092"}, config)
+		admin, err := kgo.NewClient(clientOptions...)
 		if err != nil {
 			return err
 		}
 		defer admin.Close()
+		create := kmsg.NewPtrCreateTopicsRequest()
+		create.TimeoutMillis = 5000
 		for _, topic := range []string{*source, *target} {
-			if err := admin.CreateTopic(topic, &sarama.TopicDetail{
-				NumPartitions: 1, ReplicationFactor: 1,
-			}, false); err != nil {
-				return fmt.Errorf("create %s: %w", topic, err)
+			create.Topics = append(create.Topics, kmsg.CreateTopicsRequestTopic{
+				Topic: topic, NumPartitions: 1, ReplicationFactor: 1,
+			})
+		}
+		response, err := create.RequestWith(context.Background(), admin)
+		if err != nil {
+			return err
+		}
+		for _, topic := range response.Topics {
+			if topic.ErrorCode != 0 && topic.ErrorCode != kerr.TopicAlreadyExists.Code {
+				return fmt.Errorf("create %s: %w", topic.Topic, kerr.TypedErrorForCode(topic.ErrorCode))
 			}
 		}
-		producer, err := sarama.NewSyncProducer([]string{"kafka:9092"}, config)
+		producerOptions := append(clientOptions, kgo.RecordPartitioner(kgo.ManualPartitioner()))
+		producer, err := kgo.NewClient(producerOptions...)
 		if err != nil {
 			return err
 		}
 		defer producer.Close()
 		for i := 0; i < 6; i++ {
-			partition, offset, err := producer.SendMessage(&sarama.ProducerMessage{
-				Topic: *source, Key: sarama.StringEncoder(fmt.Sprint(i)),
-				Value: sarama.ByteEncoder(payload(i)),
-			})
-			if err != nil {
+			record := &kgo.Record{
+				Topic: *source, Partition: 0, Key: []byte(fmt.Sprint(i)),
+				Value: payload(i),
+			}
+			if err := producer.ProduceSync(context.Background(), record).FirstErr(); err != nil {
 				return err
 			}
-			if partition != 0 || offset != int64(i) {
-				return fmt.Errorf("unexpected source identity %d:%d", partition, offset)
+			if record.Partition != 0 || record.Offset != int64(i) {
+				return fmt.Errorf("unexpected source identity %d:%d", record.Partition, record.Offset)
 			}
 		}
 		fmt.Println("Seeded six records, including empty, binary and fragmented payloads")
 		return nil
 	}
-	consumer, err := sarama.NewConsumer([]string{"kafka:9092"}, config)
+	consumerOptions := append(clientOptions,
+		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{
+			*target: {0: kgo.NewOffset().AtStart()},
+		}),
+		kgo.FetchMaxPartitionBytes(1024*1024),
+	)
+	consumer, err := kgo.NewClient(consumerOptions...)
 	if err != nil {
 		return err
 	}
 	defer consumer.Close()
-	partition, err := consumer.ConsumePartition(*target, 0, sarama.OffsetOldest)
-	if err != nil {
-		return err
-	}
-	defer partition.Close()
-	deadline := time.NewTimer(*wait)
-	defer deadline.Stop()
+	deadline := time.Now().Add(*wait)
 	seen := make(map[string]bool)
 	for {
-		select {
-		case err, ok := <-partition.Errors():
-			if !ok {
-				return fmt.Errorf("destination consumer error channel closed unexpectedly")
+		if time.Until(deadline) <= 0 {
+			if len(seen) != 6 {
+				return fmt.Errorf("delivered %d/6 expected records", len(seen))
 			}
-			return fmt.Errorf("destination consumer: %w", err)
-		case message, ok := <-partition.Messages():
-			if !ok {
-				return fmt.Errorf("destination consumer closed unexpectedly")
+			fmt.Println("Verified six exact Kafka identities and payloads, with no duplicates")
+			return nil
+		}
+		pollCtx, cancel := context.WithTimeout(context.Background(), min(100*time.Millisecond, time.Until(deadline)))
+		fetches := consumer.PollRecords(pollCtx, 1)
+		cancel()
+		for _, fetchErr := range fetches.Errors() {
+			if !errors.Is(fetchErr.Err, context.DeadlineExceeded) && !errors.Is(fetchErr.Err, context.Canceled) {
+				return fmt.Errorf("destination consumer: %w", fetchErr.Err)
 			}
-			key := string(message.Key)
+		}
+		var recordErr error
+		fetches.EachRecord(func(record *kgo.Record) {
+			key := string(record.Key)
 			if seen[key] {
-				return fmt.Errorf("duplicate destination identity %q", key)
+				recordErr = fmt.Errorf("duplicate destination identity %q", key)
+				return
 			}
 			index := -1
 			for i := 0; i < 6; i++ {
@@ -103,22 +126,17 @@ func run() error {
 					index = i
 				}
 			}
-			if index < 0 || !bytes.Equal(message.Value, payload(index)) {
-				return fmt.Errorf("unexpected identity or altered payload: key=%q size=%d", key, len(message.Value))
+			if index < 0 || !bytes.Equal(record.Value, payload(index)) {
+				recordErr = fmt.Errorf("unexpected identity or altered payload: key=%q size=%d", key, len(record.Value))
+				return
 			}
 			seen[key] = true
 			if len(seen) == 6 {
-				if !deadline.Stop() {
-					return fmt.Errorf("delivery deadline exceeded")
-				}
-				deadline.Reset(2 * time.Second)
+				deadline = time.Now().Add(2 * time.Second)
 			}
-		case <-deadline.C:
-			if len(seen) != 6 {
-				return fmt.Errorf("delivered %d/6 expected records", len(seen))
-			}
-			fmt.Println("Verified six exact Kafka identities and payloads, with no duplicates")
-			return nil
+		})
+		if recordErr != nil {
+			return recordErr
 		}
 	}
 }

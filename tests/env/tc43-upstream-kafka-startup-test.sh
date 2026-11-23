@@ -58,6 +58,17 @@ assert_no_fatal() {
     fi
 }
 
+assert_retry_log() {
+    compose logs --no-color upstream > "$WORK/upstream.log"
+    if grep -qF '{error.message}' "$WORK/upstream.log"; then
+        report_check "Retry error details" "rendered error text" "literal template placeholder found" 1
+    fi
+    if ! grep -Eq 'upstream.*\[WARN\] Kafka consumer group client unavailable: .+' "$WORK/upstream.log"; then
+        report_check "Retry error details" "WARN includes the rendered cause" "not observed" 1
+    fi
+    report_check "Retry error details" "WARN includes the rendered cause, without a template placeholder" "observed" 0
+}
+
 assert_same_process() {
     local cid="$1" started="$2"
     if [[ "$(docker inspect -f '{{.State.Running}}' "$cid")" != true ]] ||
@@ -106,6 +117,7 @@ compose up -d --no-deps upstream
 cid="$(compose ps -q upstream)"
 started="$(docker inspect -f '{{.State.StartedAt}}' "$cid")"
 wait_for_log upstream "[WARN] Kafka consumer group client unavailable:" 3
+assert_retry_log
 assert_no_fatal
 assert_same_process "$cid" "$started"
 report_check "Kafka absent" "repeated WARN retries without FATAL or restart" "observed" 0
@@ -148,6 +160,5 @@ compose stop -t 10 upstream
 if [[ "$(docker inspect -f '{{.State.ExitCode}}' "$cid")" != 0 ]]; then
     report_check "Shutdown while Kafka unavailable" "exit 0 within 10 seconds" "unclean exit" 1
 fi
-wait_for_log upstream "context cancelled while waiting for Kafka"
 assert_no_fatal
 report_check "Shutdown while Kafka unavailable" "60-second backoff canceled, exit 0" "observed" 0

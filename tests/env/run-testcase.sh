@@ -501,8 +501,8 @@ if [[ -n "$AUTO_EXIT_FROM" ]]; then
     # many seconds and then `docker compose up -d --force-recreate` the
     # upstream-a service. Compose sends SIGTERM first (so the Go upstream
     # runs its graceful shutdown — commits Kafka offsets, flushes UDP) and
-    # then starts a fresh container with the same AIRGAP_CONFIG. Sarama
-    # resumes from the committed offset, so no events should be lost or
+    # then starts a fresh container with the same AIRGAP_CONFIG. The Kafka
+    # consumer resumes from the committed offset, so no events should be lost or
     # duplicated. Proves REQ-5 / REQ-9 (at-least-once across restarts).
     if [[ -n "${UPSTREAM_A_RESTART_AT_SECONDS-}" ]]; then
         (

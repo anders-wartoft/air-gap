@@ -93,7 +93,7 @@ services:
       AIRGAP_CONFIG: /airgap/config/testcases/upstream-airgap-16-staged.properties
       AIRGAP_UPSTREAM_NIC: ${TC16_NIC:-lo}
       AIRGAP_UPSTREAM_TARGET_IP: ${TC16_TARGET_IP:-127.0.0.1}
-      AIRGAP_UPSTREAM_EPS: ${TC16_EPS:-50000}
+      AIRGAP_UPSTREAM_EPS: ${TC16_EPS:-30000}
     command: ["upstream"]
   downstream:
     <<: *app

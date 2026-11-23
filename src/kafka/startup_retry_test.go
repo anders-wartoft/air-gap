@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kerr"
 )
 
 type fakeClient struct{ closed atomic.Bool }
@@ -24,18 +24,20 @@ func TestRetryableStartupError(t *testing.T) {
 	refused := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 	for _, err := range []error{
 		refused,
-		fmt.Errorf("kafka: client has run out of available brokers to talk to: %w", sarama.ErrOutOfBrokers),
-		sarama.ErrBrokerNotAvailable,
-		sarama.ErrConsumerCoordinatorNotAvailable,
+		fmt.Errorf("kafka: broker unavailable: %w", kerr.BrokerNotAvailable),
+		kerr.BrokerNotAvailable,
+		kerr.CoordinatorNotAvailable,
+		kerr.RequestTimedOut,
 	} {
 		if !RetryableStartupError(err) {
 			t.Errorf("expected retryable: %v", err)
 		}
 	}
 	for _, err := range []error{
-		sarama.ConfigurationError("bad config"),
-		sarama.ErrSASLAuthenticationFailed,
-		sarama.ErrGroupAuthorizationFailed,
+		errors.New("bad config"),
+		kerr.SaslAuthenticationFailed,
+		kerr.TypedErrorForCode(kerr.SaslAuthenticationFailed.Code),
+		kerr.GroupAuthorizationFailed,
 		errors.New("unknown"),
 	} {
 		if RetryableStartupError(err) {
@@ -49,12 +51,12 @@ func TestStartWithRetryRetriesTransientErrorsUntilReady(t *testing.T) {
 	want := &fakeClient{}
 	got, err := startWithRetry(context.Background(), time.Millisecond, func() (*fakeClient, error) {
 		if atomic.AddInt64(&attempts, 1) < 4 {
-			return nil, sarama.ErrOutOfBrokers
+			return nil, kerr.BrokerNotAvailable
 		}
 		return want, nil
 	}, func(attempt int64, err error) {
 		retries++
-		if attempt != retries || !errors.Is(err, sarama.ErrOutOfBrokers) {
+		if attempt != retries || !errors.Is(err, kerr.BrokerNotAvailable) {
 			t.Errorf("onRetry(%d, %v), want attempt %d", attempt, err, retries)
 		}
 	})
@@ -69,9 +71,9 @@ func TestStartWithRetryRetriesTransientErrorsUntilReady(t *testing.T) {
 func TestStartWithRetryStopsOnPermanentError(t *testing.T) {
 	var retries int
 	_, err := startWithRetry(context.Background(), time.Millisecond, func() (*fakeClient, error) {
-		return nil, sarama.ErrSASLAuthenticationFailed
+		return nil, kerr.SaslAuthenticationFailed
 	}, func(int64, error) { retries++ })
-	if !errors.Is(err, sarama.ErrSASLAuthenticationFailed) || retries != 0 {
+	if !errors.Is(err, kerr.SaslAuthenticationFailed) || retries != 0 {
 		t.Fatalf("err=%v retries=%d, want permanent error without retry", err, retries)
 	}
 }
@@ -81,7 +83,7 @@ func TestStartWithRetryCancelDuringWait(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := startWithRetry(ctx, time.Hour, func() (*fakeClient, error) {
-			return nil, sarama.ErrOutOfBrokers
+			return nil, kerr.BrokerNotAvailable
 		}, func(int64, error) { cancel() })
 		done <- err
 	}()

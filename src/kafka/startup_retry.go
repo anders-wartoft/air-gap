@@ -9,7 +9,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"sitia.nu/airgap/src/logging"
 )
 
@@ -21,21 +21,30 @@ const DefaultStartupRetryInterval = 5 * time.Second
 // transient (broker not running or not ready, network failure). Configuration,
 // TLS certificate and authentication/authorization errors are permanent.
 func RetryableStartupError(err error) bool {
-	var configError sarama.ConfigurationError
 	var certificateError *tls.CertificateVerificationError
 	var unknownAuthority x509.UnknownAuthorityError
 	var hostnameError x509.HostnameError
 	var invalidCertificate x509.CertificateInvalidError
-	if errors.As(err, &configError) || errors.As(err, &certificateError) ||
+	if errors.As(err, &certificateError) ||
 		errors.As(err, &unknownAuthority) || errors.As(err, &hostnameError) ||
 		errors.As(err, &invalidCertificate) {
 		return false
 	}
+	var kafkaError *kerr.Error
+	if errors.As(err, &kafkaError) {
+		switch kafkaError.Code {
+		case kerr.SaslAuthenticationFailed.Code, kerr.UnsupportedSaslMechanism.Code,
+			kerr.TopicAuthorizationFailed.Code, kerr.GroupAuthorizationFailed.Code,
+			kerr.ClusterAuthorizationFailed.Code, kerr.UnsupportedVersion.Code,
+			kerr.InvalidRequest.Code:
+			return false
+		}
+	}
 	for _, permanent := range []error{
-		sarama.ErrSASLAuthenticationFailed, sarama.ErrUnsupportedSASLMechanism,
-		sarama.ErrTopicAuthorizationFailed, sarama.ErrGroupAuthorizationFailed,
-		sarama.ErrClusterAuthorizationFailed, sarama.ErrUnsupportedVersion,
-		sarama.ErrInvalidRequest,
+		kerr.SaslAuthenticationFailed, kerr.UnsupportedSaslMechanism,
+		kerr.TopicAuthorizationFailed, kerr.GroupAuthorizationFailed,
+		kerr.ClusterAuthorizationFailed, kerr.UnsupportedVersion,
+		kerr.InvalidRequest,
 	} {
 		if errors.Is(err, permanent) {
 			return false
@@ -43,26 +52,29 @@ func RetryableStartupError(err error) bool {
 	}
 	var networkError net.Error
 	if errors.As(err, &networkError) || errors.Is(err, io.EOF) ||
-		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, sarama.ErrOutOfBrokers) {
+		errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	for _, transient := range []error{
-		sarama.ErrBrokerNotAvailable, sarama.ErrLeaderNotAvailable,
-		sarama.ErrNotLeaderForPartition, sarama.ErrRequestTimedOut,
-		sarama.ErrNetworkException, sarama.ErrOffsetsLoadInProgress,
-		sarama.ErrConsumerCoordinatorNotAvailable, sarama.ErrNotCoordinatorForConsumer,
-		sarama.ErrReplicaNotAvailable,
+		kerr.BrokerNotAvailable, kerr.LeaderNotAvailable,
+		kerr.NotLeaderForPartition, kerr.RequestTimedOut,
+		kerr.NetworkException, kerr.CoordinatorLoadInProgress,
+		kerr.CoordinatorNotAvailable, kerr.NotCoordinator,
+		kerr.ReplicaNotAvailable,
 	} {
 		if errors.Is(err, transient) {
 			return true
 		}
 	}
+	if errors.As(err, &kafkaError) {
+		return kafkaError.Retriable
+	}
 	return false
 }
 
-// startupAttempt runs create but returns as soon as ctx is canceled. Sarama's
-// constructors take no context; an attempt still in flight at cancellation
-// finishes on its own timeouts and closes whatever it created.
+// startupAttempt runs create but returns as soon as ctx is canceled. A client
+// constructor may still finish on its own timeouts; close any client created
+// after its caller has canceled.
 func startupAttempt[T io.Closer](ctx context.Context, create func() (T, error)) (T, error) {
 	type result struct {
 		client T

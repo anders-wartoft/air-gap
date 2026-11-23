@@ -436,6 +436,29 @@ platform JAR is no larger than 40 MiB. A generated JAR is runnable with:
 java -jar java-streams/target/air-gap-deduplication-fat-<version>-<platform>.jar
 ```
 
+## Hardened hosts (W^X / `noexec` temp directories)
+
+The JAR's native libraries (RocksDB, zstd, Snappy, LZ4) are extracted to a
+temporary directory at startup and loaded from there, so that directory must be
+both writable and executable. On hosts where `/tmp` is mounted `noexec` (or
+W^X policy forbids writable+executable directories), either point the
+extraction at a dedicated directory that the service user can execute from:
+
+```sh
+JAVA_OPTS="... -Djava.io.tmpdir=/var/lib/stream/dedup/tmp -Dorg.xerial.snappy.tempdir=/var/lib/stream/dedup/tmp"
+```
+
+(RocksDB also honors the `ROCKSDB_SHAREDLIB_DIR` environment variable), or
+install the libraries read-only on `java.library.path`: RocksDB tries
+`System.loadLibrary` before extracting, and snappy-java uses a preinstalled
+library when `-Dorg.xerial.snappy.use.systemlib=true` is set.
+
+The Snappy library is only loaded when the consumed or produced records are
+snappy-compressed. The downstream writes the RAW_TOPICS records uncompressed by
+default (`producerCompression=none`); keep it at `none` or `gzip` (both
+native-free on the Java side) to avoid the Snappy requirement entirely.
+RocksDB is always required for the Kafka Streams state store.
+
 ## Configuration
 
 Configuration of the dedup application can only be done with environment variables. The following variables are configurable:

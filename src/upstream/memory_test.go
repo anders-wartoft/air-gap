@@ -59,6 +59,41 @@ func TestKafkaMaxProcessingTimeOverrides(t *testing.T) {
 	}
 }
 
+func TestKafkaDelayedReadBufferConfiguration(t *testing.T) {
+	defaults := DefaultConfiguration()
+	path := filepath.Join(t.TempDir(), "upstream.properties")
+	if err := os.WriteFile(path, []byte("kafkaDelayedReadBuffer=false\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	properties, err := ReadParameters(path, defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AIRGAP_UPSTREAM_KAFKA_DELAYED_READ_BUFFER", "true")
+	environment := overrideConfiguration(properties)
+	commandLine := parseCommandLineOverrides([]string{"upstream", "--kafkaDelayedReadBuffer=false"}, environment)
+	for _, tt := range []struct {
+		name   string
+		config TransferConfiguration
+		legacy bool
+	}{
+		{"default", defaults, false},
+		{"properties", properties, true},
+		{"environment", environment, false},
+		{"command line", commandLine, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			settings, err := kafkaConsumerSettings(tt.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.LegacyDelayedRead != tt.legacy {
+				t.Fatalf("LegacyDelayedRead = %t, want %t", settings.LegacyDelayedRead, tt.legacy)
+			}
+		})
+	}
+}
+
 type sequenceMemorySampler struct {
 	mu      sync.Mutex
 	samples []memorySample

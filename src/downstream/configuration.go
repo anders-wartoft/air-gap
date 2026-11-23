@@ -84,6 +84,7 @@ type TransferConfiguration struct {
 	channelBufferSize     int               // Size of the channel buffer between UDP receiver and Kafka writer
 	batchSize             int               // Number of messages to batch together
 	kafkaRetryInterval    int               // milliseconds between transient Kafka startup failures
+	producerCompression   string            // Kafka producer compression codec: none, gzip, snappy, lz4 or zstd
 	readBufferMultiplier  uint16            // Multiplier for the read buffer size
 	rcvBufSize            int               // Size of the OS receive buffer for UDP sockets
 	keyPasswordFile       string            // File containing the password to decrypt the key file
@@ -197,6 +198,9 @@ func defaultConfiguration() TransferConfiguration {
 	config.channelBufferSize = 16384 // default channel buffer size of 16384 bytes
 	config.batchSize = 32            // default batching of 32 messages
 	config.kafkaRetryInterval = 5000
+	// none avoids native codec libraries in Java consumers of the raw topic
+	// (snappy-java needs an executable temp directory on W^X-hardened hosts).
+	config.producerCompression = "none"
 	config.readBufferMultiplier = 16                 // default 16 times mtu as memory buffer
 	config.rcvBufSize = 4 * 1024 * 1024              // default 4MB OS receive buffer for UDP sockets
 	config.topic = ""                                // default disabled (empty = no internal Kafka logging)
@@ -369,6 +373,13 @@ func readConfigurationFile(fileName string, result TransferConfiguration, strict
 				return result, err
 			}
 			result.kafkaRetryInterval = interval
+		case "producerCompression":
+			codec, err := parseProducerCompression(value)
+			if err != nil {
+				return result, err
+			}
+			result.producerCompression = codec
+			Logger.Infof(configStr(logging.EventConfigParse, "producerCompression", codec), "producerCompression: %s", codec)
 		case "batchSize":
 			tmp, err := strconv.Atoi(value)
 			if err != nil {
@@ -670,6 +681,13 @@ func overrideConfiguration(config TransferConfiguration) TransferConfiguration {
 		}
 		config.kafkaRetryInterval = interval
 	}
+	if value := os.Getenv(prefix + "PRODUCER_COMPRESSION"); value != "" {
+		codec, err := parseProducerCompression(value)
+		if err != nil {
+			Logger.Fatal(configInvalid("producerCompression", value).Merge(logging.Err(err)), err)
+		}
+		config.producerCompression = codec
+	}
 	if batchSize := os.Getenv(prefix + "BATCH_SIZE"); batchSize != "" {
 		tmp, err := strconv.Atoi(batchSize)
 		if err != nil {
@@ -883,6 +901,7 @@ func logConfiguration(config TransferConfiguration) {
 	Logger.Infof(configInt(logging.EventConfigApplied, "channelBufferSize", int64(config.channelBufferSize)), "  channelBufferSize: %d", config.channelBufferSize)
 	Logger.Infof(configInt(logging.EventConfigApplied, "batchSize", int64(config.batchSize)), "  batchSize: %d", config.batchSize)
 	Logger.Infof(configInt(logging.EventConfigApplied, "kafkaRetryInterval", int64(config.kafkaRetryInterval)), "  kafkaRetryInterval: %dms", config.kafkaRetryInterval)
+	Logger.Infof(configStr(logging.EventConfigApplied, "producerCompression", config.producerCompression), "  producerCompression: %s", config.producerCompression)
 	Logger.Infof(configInt(logging.EventConfigApplied, "readBufferMultiplier", int64(config.readBufferMultiplier)), "  readBufferMultiplier: %d", config.readBufferMultiplier)
 	Logger.Infof(configInt(logging.EventConfigApplied, "rcvBufSize", int64(config.rcvBufSize)), "  rcvBufSize: %d", config.rcvBufSize)
 	Logger.Infof(configStr(logging.EventConfigApplied, "internalTopic", config.topic), "  internalTopic: %s", config.topic)
@@ -1022,6 +1041,12 @@ func parseCommandLineOverrides(args []string, config TransferConfiguration) Tran
 				Logger.Fatal(configInvalid("kafkaRetryInterval", value).Merge(logging.Err(err)), err)
 			}
 			config.kafkaRetryInterval = interval
+		case "producerCompression":
+			codec, err := parseProducerCompression(value)
+			if err != nil {
+				Logger.Fatal(configInvalid("producerCompression", value).Merge(logging.Err(err)), err)
+			}
+			config.producerCompression = codec
 		case "batchSize":
 			v, err := strconv.Atoi(value)
 			if err != nil || v < 1 || v > 512 {

@@ -36,7 +36,17 @@ positive TC16_PARTITIONS "$TC16_PARTITIONS"
 positive TC16_TIMEOUT "$TC16_TIMEOUT"
 positive TC16_POLL "$TC16_POLL"
 positive TC16_SETTLE "$TC16_SETTLE"
-[[ "${TC16_EPS:-50000}" =~ ^(-1|[1-9][0-9]*)$ ]] || die "TC16_EPS must be -1 or a positive integer"
+TC16_DEFAULT_EPS=30000
+if [[ -n "${AIRGAP_TEST_UDP_PACING:-}" ]]; then
+    if [[ ! "$AIRGAP_TEST_UDP_PACING" =~ ^([1-9][0-9]*),([1-9][0-9]*),([1-9][0-9]{0,2})$ ]]; then
+        die "AIRGAP_TEST_UDP_PACING must be datagrams/s,bytes/s,burst"
+    fi
+    calibrated_datagrams="${BASH_REMATCH[1]}"
+    TC16_DEFAULT_EPS=$((calibrated_datagrams * 80 / 100))
+    (( TC16_DEFAULT_EPS > 0 )) || TC16_DEFAULT_EPS=1
+fi
+export TC16_EPS="${TC16_EPS:-$TC16_DEFAULT_EPS}"
+[[ "$TC16_EPS" =~ ^(-1|[1-9][0-9]*)$ ]] || die "TC16_EPS must be -1 or a positive integer"
 
 RESULTS="${TC16_RESULTS_DIR:-$ROOT/tmp/tc16}"
 mkdir -p "$RESULTS"

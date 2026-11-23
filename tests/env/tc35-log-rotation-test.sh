@@ -197,13 +197,13 @@ compose --profile rebalance up -d upstream-b
 UPSTREAM_B_CID="$(compose --profile rebalance ps -q upstream-b)"
 [[ -n "$UPSTREAM_B_CID" ]] || { echo "upstream-b did not start" >&2; exit 1; }
 
-sarama_after_rotation=1
-if wait_for_log_line "$UPSTREAM_CID" "$UPSTREAM_LOG" "\[SARAMA\]" 120; then
-    sarama_after_rotation=0
+franz_after_rotation=1
+if wait_for_log_line "$UPSTREAM_CID" "$UPSTREAM_LOG" "Franz-go consumer .* assigned partitions" 120; then
+    franz_after_rotation=0
 fi
 rotated_digest_after="$(docker exec "$UPSTREAM_CID" sha256sum "${UPSTREAM_LOG}.${ROTATIONS}.gz" | awk '{print $1}')"
 
-if (( sarama_after_rotation == 0 )); then
+if (( franz_after_rotation == 0 )); then
     report_check "TC-35 Kafka client records after rotation" "written to the new log" "present" 0 || rc=1
 else
     report_check "TC-35 Kafka client records after rotation" "written to the new log" "missing" 1 || rc=1

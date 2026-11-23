@@ -10,12 +10,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 var stressMagic = []byte("AGSTRESS")
@@ -233,48 +232,24 @@ func stress(args []string) {
 
 func runStress(o stressOptions, out io.Writer) (result stressSummary, retErr error) {
 	result.Type = "summary"
-	conf := sarama.NewConfig()
-	conf.Version = sarama.V3_6_0_0
-	conf.ClientID = "tc52-driver"
-	conf.Consumer.Return.Errors = true
-	conf.Consumer.IsolationLevel = sarama.ReadCommitted
-	conf.Consumer.Fetch.Default = 1024 * 1024
-	conf.Producer.Partitioner = sarama.NewManualPartitioner
-	conf.Producer.RequiredAcks = sarama.WaitForAll
-	conf.Producer.Return.Successes = true
-	conf.Producer.Flush.Frequency = time.Millisecond
-	conf.Producer.Flush.Messages = 1000
-	conf.Net.ReadTimeout = 10 * time.Second
-	conf.Net.WriteTimeout = 10 * time.Second
-	sourceClient, err := sarama.NewClient(strings.Split(o.source, ","), conf)
+	sourceClient, err := newKafkaClient(o.source, "tc52-driver",
+		kgo.RecordPartitioner(kgo.ManualPartitioner()),
+		kgo.RequiredAcks(kgo.AllISRAcks()),
+		kgo.ProducerLinger(time.Millisecond),
+		kgo.MaxBufferedRecords(o.window),
+	)
 	if err != nil {
 		return result, err
 	}
-	defer func() { retErr = errors.Join(retErr, sourceClient.Close()) }()
-	admin, err := sarama.NewClusterAdminFromClient(sourceClient)
+	defer sourceClient.Close()
+	targetClient, err := newKafkaClient(o.target, "tc52-target-consumer",
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		kgo.FetchMaxPartitionBytes(1024*1024),
+	)
 	if err != nil {
 		return result, err
 	}
-	targetClient, err := sarama.NewClient(strings.Split(o.target, ","), conf)
-	if err != nil {
-		return result, err
-	}
-	defer func() { retErr = errors.Join(retErr, targetClient.Close()) }()
-	consumer, err := sarama.NewConsumerFromClient(targetClient)
-	if err != nil {
-		return result, err
-	}
-	defer func() { retErr = errors.Join(retErr, consumer.Close()) }()
-	producer, err := sarama.NewAsyncProducerFromClient(sourceClient)
-	if err != nil {
-		return result, err
-	}
-	producerStarted := false
-	defer func() {
-		if !producerStarted {
-			retErr = errors.Join(retErr, producer.Close())
-		}
-	}()
+	defer targetClient.Close()
 
 	window := newStressWindow(o.window)
 	sendCtx, stopSending := context.WithCancel(context.Background())
@@ -295,103 +270,78 @@ func runStress(o stressOptions, out io.Writer) (result stressSummary, retErr err
 	}
 	offsets := make([]atomic.Int64, o.partitions)
 	partitionIDs := make([]int32, o.partitions)
+	consumeOffsets := make(map[int32]kgo.Offset, o.partitions)
 	for p := range o.partitions {
 		partitionIDs[p] = int32(p)
-		pc, err := consumer.ConsumePartition("transfer", int32(p), sarama.OffsetOldest)
-		if err != nil {
-			return result, err
-		}
-		receivers.Add(1)
-		go func(p int, pc sarama.PartitionConsumer) {
-			defer receivers.Done()
-			defer func() {
-				if err := pc.Close(); err != nil {
-					fail(err)
-				}
-			}()
-			messages, errs := pc.Messages(), pc.Errors()
-			for messages != nil || errs != nil {
-				select {
-				case msg, ok := <-messages:
-					if !ok {
-						messages = nil
-						continue
-					}
-					seq, sent, err := validateStressPayload(msg.Value, o.minSize, o.maxSize)
-					if err == nil && int(seq%uint64(o.partitions)) != p {
-						err = fmt.Errorf("sequence %d delivered to wrong partition %d", seq, p)
-					}
-					if err == nil {
-						err = window.complete(seq, sent)
-					}
-					if err != nil {
-						fail(err)
-						return
-					}
-					offsets[p].Store(msg.Offset + 1)
-					delivered.Add(1)
-					now := time.Now().UnixNano()
-					if from := measureFrom.Load(); from > 0 && now >= from && now < measureUntil.Load() {
-						measured.Add(1)
-						measuredBytes.Add(uint64(len(msg.Value)))
-						latency := time.Duration(now - sent)
-						latencyNS.Add(uint64(max(0, latency)))
-						latencyHistogram.record(latency)
-					}
-				case err, ok := <-errs:
-					if !ok {
-						errs = nil
-					} else {
-						fail(err)
-						return
-					}
-				case <-receiveCtx.Done():
-					return
+		consumeOffsets[int32(p)] = kgo.NewOffset().AtStart()
+	}
+	targetClient.AddConsumePartitions(map[string]map[int32]kgo.Offset{"transfer": consumeOffsets})
+	receivers.Add(1)
+	go func() {
+		defer receivers.Done()
+		for receiveCtx.Err() == nil {
+			fetches := targetClient.PollRecords(receiveCtx, 256)
+			for _, fetchErr := range fetches.Errors() {
+				if receiveCtx.Err() == nil {
+					fail(fmt.Errorf("consume transfer topic: %w", fetchErr.Err))
 				}
 			}
-		}(p, pc)
-	}
+			fetches.EachRecord(func(record *kgo.Record) {
+				partition := int(record.Partition)
+				seq, sent, err := validateStressPayload(record.Value, o.minSize, o.maxSize)
+				if err == nil && int(seq%uint64(o.partitions)) != partition {
+					err = fmt.Errorf("sequence %d delivered to wrong partition %d", seq, partition)
+				}
+				if err == nil {
+					err = window.complete(seq, sent)
+				}
+				if err != nil {
+					fail(err)
+					return
+				}
+				offsets[partition].Store(record.Offset + 1)
+				delivered.Add(1)
+				now := time.Now().UnixNano()
+				if from := measureFrom.Load(); from > 0 && now >= from && now < measureUntil.Load() {
+					measured.Add(1)
+					measuredBytes.Add(uint64(len(record.Value)))
+					latency := time.Duration(now - sent)
+					latencyNS.Add(uint64(max(0, latency)))
+					latencyHistogram.record(latency)
+				}
+			})
+		}
+	}()
 	senderDone, producerDone := make(chan struct{}), make(chan struct{})
-	producerStarted = true
 	go func() {
 		defer close(senderDone)
-		defer producer.AsyncClose()
 		for seq := uint64(0); ; seq++ {
 			sent := time.Now().UnixNano()
 			if !window.reserve(sendCtx, seq, sent) {
 				return
 			}
-			msg := &sarama.ProducerMessage{
-				Topic: "stress", Partition: int32(seq % uint64(o.partitions)),
-				Value:    sarama.ByteEncoder(stressPayload(seq, sent, o.minSize, o.maxSize)),
-				Metadata: seq,
+			recordSeq := seq
+			record := &kgo.Record{
+				Topic: "stress", Partition: int32(recordSeq % uint64(o.partitions)),
+				Value: stressPayload(recordSeq, sent, o.minSize, o.maxSize),
 			}
-			select {
-			case producer.Input() <- msg:
-			case <-sendCtx.Done():
-				window.abandon(seq)
-				return
-			}
+			sourceClient.Produce(context.Background(), record, func(_ *kgo.Record, err error) {
+				if err != nil {
+					window.abandon(recordSeq)
+					fail(fmt.Errorf("produce stress record %d: %w", recordSeq, err))
+					return
+				}
+				acknowledged.Add(1)
+			})
 		}
 	}()
 	go func() {
 		defer close(producerDone)
-		successes, errs := producer.Successes(), producer.Errors()
-		for successes != nil || errs != nil {
-			select {
-			case _, ok := <-successes:
-				if !ok {
-					successes = nil
-				} else {
-					acknowledged.Add(1)
-				}
-			case err, ok := <-errs:
-				if !ok {
-					errs = nil
-				} else {
-					fail(err)
-				}
-			}
+		<-senderDone
+		flushCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := sourceClient.Flush(flushCtx); err != nil {
+			fail(fmt.Errorf("flush stress producer: %w", err))
 		}
 	}()
 	encoder := json.NewEncoder(out)
@@ -424,7 +374,19 @@ func runStress(o stressOptions, out io.Writer) (result stressSummary, retErr err
 				waiting = false
 				continue
 			}
-			response, err := admin.ListConsumerGroupOffsets(o.group, map[string][]int32{"stress": partitionIDs})
+			committed, err := kafkaCommittedOffsets(context.Background(), sourceClient, o.group, "stress", partitionIDs)
+			if err != nil {
+				retErr = err
+				waiting = false
+				continue
+			}
+			sourceEnds, err := kafkaOffsets(context.Background(), sourceClient, "stress", partitionIDs, -1)
+			if err != nil {
+				retErr = err
+				waiting = false
+				continue
+			}
+			targetEnds, err := kafkaOffsets(context.Background(), targetClient, "transfer", partitionIDs, -1)
 			if err != nil {
 				retErr = err
 				waiting = false
@@ -432,27 +394,9 @@ func runStress(o stressOptions, out io.Writer) (result stressSummary, retErr err
 			}
 			sourceLag, targetLag = 0, 0
 			for p := range o.partitions {
-				block := response.GetBlock("stress", int32(p))
-				if block == nil || block.Err != sarama.ErrNoError {
-					retErr = fmt.Errorf("source group offsets unavailable for partition %d", p)
-					waiting = false
-					break
-				}
-				sourceEnd, err := sourceClient.GetOffset("stress", int32(p), sarama.OffsetNewest)
-				if err != nil {
-					retErr = err
-					waiting = false
-					break
-				}
-				targetEnd, err := targetClient.GetOffset("transfer", int32(p), sarama.OffsetNewest)
-				if err != nil {
-					retErr = err
-					waiting = false
-					break
-				}
 				// A fresh group has offset -1 until its first successful commit.
-				sourceLag += max(0, sourceEnd-max(0, block.Offset))
-				targetLag += max(0, targetEnd-offsets[p].Load())
+				sourceLag += max(0, sourceEnds[int32(p)]-max(0, committed[int32(p)]))
+				targetLag += max(0, targetEnds[int32(p)]-offsets[p].Load())
 			}
 			current := measured.Load()
 			now := time.Now()

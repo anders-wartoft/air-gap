@@ -44,6 +44,7 @@ func kafkaConsumerSettings(config TransferConfiguration) (kafka.ConsumerSettings
 		FetchMaxBytes:        int32(config.kafkaMaxMessageBytes),
 		ChannelBufferSize:    config.kafkaChannelBufferSize,
 		MaxProcessingTime:    time.Duration(int64(config.kafkaMaxProcessingTimeMs)) * time.Millisecond,
+		LegacyDelayedRead:    !config.kafkaDelayedReadBuffer,
 		StartupRetryInterval: time.Duration(int64(config.kafkaRetryInterval)) * time.Millisecond,
 	}, nil
 }

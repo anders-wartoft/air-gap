@@ -137,12 +137,12 @@ On downstream startup, a file glob is read from the configuration file. When a k
 
 #### Performance
 
-UDP receive is normally faster than Kafka writes. Downstream receives and decrypts events, then copies them into a bounded dispatcher queue. Full batches dispatch immediately; partial batches flush on a 10 ms timer. Sarama's asynchronous producer forms the Kafka requests and reports their results independently. When the pending batch is full, receiver workers wait for space: TCP backpressures its sender, while UDP can lose packets when its receive buffers fill. Socket acceptance and enqueue statistics are not Kafka delivery acknowledgments. If the performance is not enough, first try to add nodes to the Kafka cluster and add the nodes to the bootstrapServers configuration in the downstream process. You can also try to add several events together before writing them to the upstream Kafka, since there is some overhead for each Kafka event, especially for writing. As a last resort, the upstream sender can be set to throttle (eps property), e.g., by adding a small time.Sleep after each sent event. You should be able to securely transmit tens of thousand events every second using one transmission chain, but for large installations you might have to add more sender/receiver chains, as well as upgrade the Kafka instances.
+UDP receive is normally faster than Kafka writes. Downstream receives and decrypts events, then copies them into a bounded dispatcher queue. Full batches dispatch immediately; partial batches flush on a 10 ms timer. The franz-go asynchronous producer forms Kafka requests and reports their results independently. When the pending batch is full, receiver workers wait for space: TCP backpressures its sender, while UDP can lose packets when its receive buffers fill. Socket acceptance and enqueue statistics are not Kafka delivery acknowledgments. If the performance is not enough, first try to add nodes to the Kafka cluster and add the nodes to the bootstrapServers configuration in the downstream process. You can also try to add several events together before writing them to the upstream Kafka, since there is some overhead for each Kafka event, especially for writing. As a last resort, the upstream sender can be set to throttle (eps property), e.g., by adding a small time.Sleep after each sent event. You should be able to securely transmit tens of thousand events every second using one transmission chain, but for large installations you might have to add more sender/receiver chains, as well as upgrade the Kafka instances.
 
 #### Upstream memory bounds for large Kafka records
 
 `eps` limits event rate but does not bound memory when Kafka records are
-large. Upstream therefore also bounds Sarama fetches and buffered records and
+large. Upstream therefore also bounds franz-go fetches and buffered records and
 uses the process cgroup limit for adaptive backpressure:
 
 ```properties
@@ -161,7 +161,7 @@ goMemoryLimitPercent=60
 `memoryLimitBytes=0` detects the effective cgroup v2/v1 limit, falling back to
 process RSS and system memory outside a cgroup. A positive value can lower the
 detected limit, which is useful for a stricter application budget. At the high
-watermark upstream stops admitting records from Sarama; it resumes at the low
+watermark upstream stops admitting records from franz-go; it resumes at the low
 watermark. The gap between them prevents rapid oscillation. Both transitions
 are reported through [configurable Airgap events](#configurable-airgap-events):
 
@@ -292,24 +292,44 @@ leave room for cgroup-charged non-Go memory. Increase the service's memory
 budget or reduce fetch sizes/buffers if live usage cannot reach the low
 watermark; forced collection cannot free live data.
 
-Upstream handles each Kafka record synchronously until its transport send has
-finished. Sarama's historical `Consumer.MaxProcessingTime` default is only
-100 ms. If rate limiting, compression, encryption, fragmentation, memory
-backpressure, or UDP writes keep the callback busy longer than that, Sarama may
-log `abandoned subscription ... because consuming was taking too long`. This
-is local consumer backpressure, not proof that the Kafka connection was lost.
-`kafkaMaxProcessingTimeMs` configures that deadline and defaults to 30000 ms.
-For ordinary processing, set it above the longest expected processing time
-for one record. A larger value does not increase throughput; persistent
-overload remains visible as consumer lag.
+Upstream consumes bounded poll batches and handles each Kafka record
+synchronously until its transport send has finished. `kafkaMaxProcessingTimeMs`
+remains accepted for configuration-file compatibility but does not configure a
+franz-go timeout. Slow processing is instead bounded by the current poll batch;
+persistent overload remains visible as consumer lag.
 
 Delayed sending threads wait until each record's Kafka timestamp plus the
-configured delay. For a long wait, upstream pauses that group partition,
-drains already-fetched records without marking them, and rereads them from
-Kafka after the waiting record is delivered. Each delayed sending thread
-uses an additional Kafka client, and rereads add broker traffic. This avoids
-holding a day's backlog in memory or blocking other partitions during the
-delay; it does not prevent churn caused by other processing backpressure.
+configured delay. Kafka consumer groups remain independent per sending
+thread, and offsets are marked only after delivery. A delayed partition can
+hold up the next bounded poll batch for its group but does not hold up the
+immediate group. `kafkaDelayedReadBuffer` remains accepted for configuration
+compatibility; franz-go does not use the former Sarama delayed-reader buffer.
+
+For a staging burst, copy [downstream.sh](tests/env/downstream.sh) and
+[upstream.sh](tests/env/upstream.sh) to their respective Linux hosts.
+Run the downstream collector first and wait for `Baseline saved`, then
+start the upstream producer:
+
+```sh
+# Downstream host (add the incoming topic as another argument if needed)
+bash downstream.sh DEST_BROKER:9093 /path/to/client.properties export
+# Upstream host
+bash upstream.sh SOURCE_BROKER:9093 /path/to/client.properties export
+```
+
+Use the exact Kafka client properties path on each host. The scripts need
+read access to the relevant logs and client properties; use `sudo -A bash`
+if that requires elevation. Set `UPSTREAM_LOG` or `DOWNSTREAM_LOG` if the
+service uses a different path. The default load is 1.8 million records of
+600 bytes at 60,000 records/s; override `NUM_RECORDS`, `RECORD_SIZE`, or
+`THROUGHPUT` for a smaller trial.
+
+Once the delayed copy has drained and the next statistics lines have been
+logged, press Enter on both hosts. Each script prints the name of its report.
+The downstream report contains before/after UDP counters and Kafka end
+offsets, plus the Airgap statistics and a capped excerpt of producer errors.
+If the broker fails, finish the collectors anyway; failed offset queries
+are recorded without losing the UDP and log evidence.
 
 Keep Kafka retention longer than the sending delay plus expected outage and
 lag, and monitor consumer lag and subscription churn. Do not set the
@@ -826,7 +846,7 @@ tcpTLSClientCNRegex=^upstream-[0-9]+$
 
 The provided solution encrypts data in transit over the UDP connection. If needed, add TLS and authentication to all the Kafka connections. If the event generation is also secured with Kafka TLS, then no part of the event chain needs to be in clear text.
 
-For information about Kafka and TLS, see e.g., <https://dev.to/davidsbond/golang-implementing-kafka-consumers-using-sarama-cluster-4fko>
+For information about franz-go, see <https://github.com/twmb/franz-go>.
 
 ## Input Filtering
 
@@ -923,7 +943,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | maxNrMessages | AIRGAP_UPSTREAM_MAX_NR_MESSAGES | 4096 | Maximum fragments per upstream event; configure no higher than downstream's `maxNrMessages`. |
 | udpPacingDatagramsPerSecond | AIRGAP_UPSTREAM_UDP_PACING_DATAGRAMS_PER_SECOND | 0 | Maximum UDP datagrams per second, including fragments and control datagrams. Set both pacing rates to positive values to enable pacing, or both to `0` to disable it. |
 | udpPacingBytesPerSecond | AIRGAP_UPSTREAM_UDP_PACING_BYTES_PER_SECOND | 0 | Maximum encoded UDP payload bytes per second, including Airgap framing but not UDP/IP headers. |
-| udpPacingBurstDatagrams | AIRGAP_UPSTREAM_UDP_PACING_BURST_DATAGRAMS | 32 | Maximum burst size in datagrams, from `1` to `256`. |
+| udpPacingBurstDatagrams | AIRGAP_UPSTREAM_UDP_PACING_BURST_DATAGRAMS | 32 | Maximum burst size in datagrams, from `1` to `256`. Keep this at least `udpPacingDatagramsPerSecond / 1000`: each pacer timer wake-up releases at most one burst, so smaller values limit effective throughput below the configured rate (at a 24,000/s cap, burst 8 sustained ~11,000 datagrams/s while burst 32 reached ~22,000). |
 | from | AIRGAP_UPSTREAM_FROM | | Don't read anything from Kafka that was delivered to Kafka before this timestamp |
 | enryption | AIRGAP_UPSTREAM_ENCRYPTION | false | true - encrypt all payload when sending to downstream air-gap. Status messages are still in clear text to help configuration and set-up |
 | publicKeyFile | AIRGAP_UPSTREAM_PUBLIC_KEY_FILE | | If encryption is on, this is the public key of the receiver |
@@ -1057,8 +1077,9 @@ The property privateKeyFiles should point to one or more private key files that 
 | enableRxqOvfl | AIRGAP_DOWNSTREAM_ENABLE_RXQ_OVFL | false | (Linux only) Enable SO_RXQ_OVFL socket monitoring to track kernel-level packet drops in the socket receive queue. When enabled, statistics include `SO_RXQ_OVFL` (drops since last interval) and `SO_RXQ_OVFL_TOTAL` (total drops since start). Note: This only detects drops at the socket buffer level; drops at NIC, kernel, or hypervisor layers are NOT visible. In VM environments, compare `upstream.total_messages_sent` vs `downstream.total_received` for true packet loss. See [Monitoring.md](doc/Monitoring.md) for details on VMware/hypervisor packet loss detection. |
 | numReceivers | AIRGAP_DOWNSTREAM_NUM_RECEIVERS | 1 | Number of UDP receivers to start that concurrently binds to the targetPort |
 | channelBufferSize | AIRGAP_DOWNSTREAM_CHANNEL_BUFFER_SIZE | 16384 | Maximum queued datagrams between UDP readers and workers, counted across batches. On Linux, batches hold up to `min(64, channelBufferSize)` datagrams; elsewhere each holds one. Short batches do not reduce the datagram budget. In-flight reader/worker batches are additional and bounded. See [Monitoring.md](doc/Monitoring.md#udp-receive-capacity-and-cpu-contention). |
-| batchSize | AIRGAP_DOWNSTREAM_BATCH_SIZE | 32 | Maximum dispatcher batch size (1–512). Full batches dispatch immediately; partial batches dispatch on a 10 ms timer. At most one batch is pending and one is being sent to Sarama, which forms the Kafka requests. A full pending batch backpressures receiver workers rather than growing an unbounded cache. TCP slows accordingly; UDP can still drop packets when its buffers fill. |
+| batchSize | AIRGAP_DOWNSTREAM_BATCH_SIZE | 32 | Maximum dispatcher batch size (1–512). Full batches dispatch immediately; partial batches dispatch on a 10 ms timer. At most one batch is pending and one is being sent to franz-go, which forms the Kafka requests. A full pending batch backpressures receiver workers rather than growing an unbounded cache. TCP slows accordingly; UDP can still drop packets when its buffers fill. |
 | kafkaRetryInterval | AIRGAP_DOWNSTREAM_KAFKA_RETRY_INTERVAL | 5000 | Positive milliseconds to wait between failed Kafka producer startup attempts. Temporary network/broker/not-ready errors retry indefinitely at WARN level; identifiable configuration, TLS certificate, and authentication/authorization errors remain fatal. Also accepts `--kafkaRetryInterval=N`. |
+| producerCompression | AIRGAP_DOWNSTREAM_PRODUCER_COMPRESSION | none | Kafka producer compression for records written downstream: `none`, `gzip`, `snappy`, `lz4` or `zstd`. If the broker lacks the chosen codec, records fall back to uncompressed. `none` (and `gzip`) let Java consumers such as the deduplicator run without native codec libraries, which need an executable temp directory — relevant on W^X-hardened hosts (e.g. `noexec /tmp`). Also accepts `--producerCompression=CODEC`. |
 | readBufferMultiplier | AIRGAP_DOWNSTREAM_READ_BUFFER_MULTIPLIER | 16 | User-space read buffer size: `mtu * readBufferMultiplier`. UDP allocates that size per datagram slot in each socket's read batch, capped at 65,535 bytes per slot; TCP/TLS uses it for each connection's buffered reader, bounded between 4 KiB and 64 KiB. |
 | rcvBufSize | AIRGAP_DOWNSTREAM_RCV_BUF_SIZE | 4194304 (4MiB) | Requested OS receive-buffer size per UDP socket, subject to host limits. Startup logs show requested and effective `SO_RCVBUF` (Linux normally reports twice the request for bookkeeping). Socket-option failures are reported. This absorbs bursts, not a sustained CPU deficit or blocked processing. |
 | maximumDecompressSize | AIRGAP_MAXIMUM_DECOMPRESS_SIZE | 268435456 (256MiB) | The maximum size, in bytes, downstream will try do decompress until it errors and drops the packet. Takes sufixes B, KiB, MiB, GiB or none (defaults to B). Can be set to "-1" for no limit |
@@ -1092,7 +1113,7 @@ numReceivers can be set to 10 or more to bind several threads to the same port. 
 Downstream waits for its Kafka producer to connect before starting the transport
 receiver. If local Kafka is still starting, temporary failures produce WARN
 records and retry after `kafkaRetryInterval` milliseconds (default 5000), without
-exiting for a systemd restart. Each Sarama connection attempt has its own retry
+exiting for a systemd restart. Each franz-go connection attempt has its own retry
 and network timeouts, so the interval is a delay **after** an unsuccessful
 attempt, not a total startup timeout. SIGINT/SIGTERM cancels startup, including
 the wait for an in-flight attempt, and exits cleanly. UDP traffic sent before
@@ -1205,6 +1226,11 @@ exercise source Kafka, production compression/encryption, or the installed
 diode. Operators can raise `udpPacingDatagramsPerSecond` in small increments
 and recheck loss and latency under representative load after installation.
 The byte-rate cap can still limit throughput independently of the datagram cap.
+The burst size also matters: each pacer timer wake-up releases at most one
+burst of datagrams, so keep `udpPacingBurstDatagrams` at least
+`udpPacingDatagramsPerSecond / 1000` or the achievable rate falls below the
+configured cap (observed at a 24,000 datagrams/s cap: burst 8 sustained only
+~11,000 datagrams/s, while burst 32 reached ~22,000).
 
 Instead of editing the properties file, you can set the calibrated values in
 the upstream process environment, for example:
@@ -1718,7 +1744,7 @@ See [Resend.md](doc/Resend.md) for resend parameter details and examples.
 
 ## Dependencies
 
-air-gap uses IBM/sarama for the Kafka read/write. For other dependencies, check the go.mod file.
+air-gap uses franz-go for Kafka reads and writes. For other dependencies, check the go.mod file.
 
 ## License
 

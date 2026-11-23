@@ -16,6 +16,9 @@ side="${3##*-}"
 shift 5
 command="$1"; shift
 service="${*: -1}"
+if [[ "$command" == up && "$service" == upstream ]]; then
+    printf '%s\n' "${TC16_EPS:-unset}" > "$FAKE_STATE/eps"
+fi
 case "$command" in
     ps)
         if [[ "$1" == -aq ]]; then

@@ -5494,8 +5494,8 @@ internal topic without contaminating the transferred event stream.
 
 ## TC-34 — Slow UDP Kafka subscription stability
 
-Verify that expected synchronous UDP processing delays do not make Sarama
-abandon and recreate an otherwise healthy Kafka partition subscription.
+Verify that expected synchronous UDP processing delays do not interrupt Kafka
+partition delivery.
 
 * Covers: REQ-8d
 * Implemented in: 0.1.14-SNAPSHOT
@@ -5511,51 +5511,46 @@ producer (8 × 1 KiB records)
   -> Kafka[transfer]
 ```
 
-Upstream uses a one-record Sarama channel so backpressure reaches the broker
-immediately:
+Upstream uses a one-record franz-go poll batch so backpressure reaches Kafka
+while the current record is being delivered:
 
 ```properties
 transport=udp
 eps=1
 kafkaChannelBufferSize=1
-kafkaMaxProcessingTimeMs=2000
 topicTranslations={"source":"transfer"}
 ```
 
-Sarama's historical 100 ms default abandons this subscription because the
-callback deliberately waits approximately one second between records. The
-configured two-second interval covers that expected delay without hiding a
-permanently stalled consumer.
+`kafkaMaxProcessingTimeMs` remains accepted for configuration compatibility,
+but franz-go does not use it to control polling or delivery. The consumer waits
+for the bounded poll batch to finish before polling again and commits only
+records successfully delivered downstream.
 
 ### Automated procedure
 
 1. Build the Linux binaries and helper.
 2. Start Kafka with `source`, `transfer` and `airgap-internal` topics.
 3. Start a UDP downstream and the rate-limited upstream.
-4. Require the upstream Sarama consumer to become ready.
+4. Require the upstream franz-go consumer to become ready.
 5. Produce eight 1 KiB records to `source`.
 6. Wait for group `tc34-Slow-udp` to reach lag zero.
-7. Require the upstream log to show `kafkaMaxProcessingTimeMs: 2000`.
-8. Require no `abandoned subscription ... consuming was taking too long`.
-9. Read the `transfer` end offset and require exactly eight records.
-10. Require upstream and downstream to remain running with zero restarts.
+7. Read the `transfer` end offset and require exactly eight records.
+8. Require upstream and downstream to remain running with zero restarts.
 
 ### Expected result
 
 ```text
-processing timeout applied: configured
-Kafka subscription stability: stable
 slow consumer progress: lag 0
-UDP delivery: 8 records
+Kafka-to-UDP delivery: 8 records
 process survival: both running with zero restarts
 ```
 
 ### What it proves
 
-The configured processing interval reaches Sarama and covers a known,
-deterministic callback delay. Slow UDP processing produces ordinary Kafka lag
-while work is pending, rather than subscription abandonment, duplicate
-delivery, or process restart.
+The bounded franz-go poll batch allows the downstream UDP rate limit to apply
+backpressure without interrupting delivery. Slow processing produces ordinary
+Kafka lag while work is pending, and delivered offsets advance only after
+successful downstream delivery.
 
 ## TC-35 — Log rotation closes replaced file descriptors
 
@@ -6252,10 +6247,12 @@ after retry` and exits, so step 2 fails. `NO_COLOR=1` disables colors.
 Successful runs remove containers and temporary files; failed runs retain
 artifacts at the printed path. `-pause` retains both.
 
-## TC-44 — Kafka outage during a run: recovery and grouped error logging
+## TC-44 — Kafka outage during a run: recovery and bounded failure logging
 
 Verify that upstream and downstream survive a Kafka outage in the middle of a
-run, resume on their own, and summarize repeating errors.
+run, resume on their own, and keep failure logging bounded. The logger's
+repeat-grouping behavior is covered by Go unit tests; franz-go may expose only
+a small number of terminal producer failures during an outage.
 
 * Covers: REQ-56
 * Implemented in: 0.1.17-SNAPSHOT
@@ -6287,14 +6284,15 @@ default `AIRGAP_LOG_REPEAT_INTERVAL` (10 s) is used. `TC44_OUTAGE_SECONDS`
 4. Require all three containers to be the same processes (start time,
    restart count 0), still running, with no FATAL/PANIC.
 5. Require downstream to write at most 60 `Failed to send message` lines for
-   the outage, with `Message repeated` summaries for at least 200 failures.
+   the outage. Report any `Message repeated` summaries observed, but do not
+   require a fixed number of callbacks or summaries.
 6. Require the `source=kafka` upstream to write at most 40 `Kafka status
    changed to error` lines, a `Kafka status restored to running` line after
    the restart, and `kafka_status` `running` in its last STATISTICS line.
 
-The runner prints the compacted outage log lines (first records and
-`Message repeated` summaries) for downstream send failures and upstream status
-changes, in green when the logging check passes and red when it fails.
+The runner prints the outage log lines (first records and any `Message repeated`
+summaries) for downstream send failures and upstream status changes, in green
+when the logging check passes and red when it fails.
 
 ### Expected result
 

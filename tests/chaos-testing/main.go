@@ -15,9 +15,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kversion"
 )
-type DATA_STATE int 
+
+type DATA_STATE int
+
 const (
 	Sent DATA_STATE = iota
 	Received
@@ -25,6 +28,7 @@ const (
 	Unknown
 	UnknownDuplicated
 )
+
 func (d DATA_STATE) String() string {
 	switch d {
 	case Duplicated:
@@ -41,18 +45,20 @@ func (d DATA_STATE) String() string {
 		panic(fmt.Sprintf("unexpected main.DATA_STATE: %#v", d))
 	}
 }
+
 type DATA_CONTENT struct {
-	State DATA_STATE
-	Created time.Time
-	Received time.Time
-	Duplicated time.Time
+	State            DATA_STATE
+	Created          time.Time
+	Received         time.Time
+	Duplicated       time.Time
 	Duplicated_times uint16
-	Unknown time.Time
+	Unknown          time.Time
 }
 type DATA_struct struct {
-	Data map[[32]byte]*DATA_CONTENT
+	Data  map[[32]byte]*DATA_CONTENT
 	Mutex sync.RWMutex
 }
+
 var DATA DATA_struct
 var PRODUCED uint32 = 0
 var RECEIVED uint32 = 0
@@ -69,20 +75,22 @@ var MITM_EPS_COUNT uint32 = 0
 var PRODUCER_SLEEP_TIME_MS uint32 = 1
 var PRODUCER_PRODUCE_LIMIT uint32 = 0 // 0 = no limit
 var PRODUCER_PRODUCE = true
-//var PRODUCER_MAX_PACKET_SIZE = 1000000
-//var PRODUCER_MAX_PACKET_SIZE =   10000
+
+// var PRODUCER_MAX_PACKET_SIZE = 1000000
+// var PRODUCER_MAX_PACKET_SIZE =   10000
 var PRODUCER_MAX_PACKET_SIZE = 100
 
-var KAFKA_ADDR = []string{ "kafka:9092" }
+var KAFKA_ADDR = []string{"kafka:9092"}
 var KAFKA_PRODUCE_TOPIC = "send"
 var KAFKA_CONSUME_TOPIC = []string{"dedup"}
+
 //var KAFKA_CONSUME_TOPIC = []string{"receive"}
 
 var FILE_PATH = "/out/stats.csv"
 
 func main() {
 	DATA = DATA_struct{
-		Data: make(map[[32]byte]*DATA_CONTENT),
+		Data:  make(map[[32]byte]*DATA_CONTENT),
 		Mutex: sync.RWMutex{},
 	}
 	go mitm()
@@ -92,7 +100,7 @@ func main() {
 	for {
 		write_stats()
 		write_file()
-		time.Sleep(time.Second*5)
+		time.Sleep(time.Second * 5)
 	}
 }
 func manager() {
@@ -180,7 +188,7 @@ Input: `, PRODUCER_SLEEP_TIME_MS, PRODUCER_PRODUCE_LIMIT, MITM_DROP_PROBABILITY)
 	}
 }
 
-func randomBytes(n int) []byte  {
+func randomBytes(n int) []byte {
 	b := make([]byte, n)
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for i := 0; i < n; i += 8 {
@@ -192,36 +200,41 @@ func randomBytes(n int) []byte  {
 	}
 	return b
 }
+
 var message_count uint64 = 0
+
 func generate_message() string {
-       current_count := atomic.AddUint64(&message_count, 1)
-       length := rand.Intn(PRODUCER_MAX_PACKET_SIZE)+1
-       payload := randomBytes(length)
-       return fmt.Sprint(string(payload), " number is : ", current_count)
+	current_count := atomic.AddUint64(&message_count, 1)
+	length := rand.Intn(PRODUCER_MAX_PACKET_SIZE) + 1
+	payload := randomBytes(length)
+	return fmt.Sprint(string(payload), " number is : ", current_count)
 }
 func produce() {
-	config := sarama.NewConfig()
-	config.Producer.Return.Successes = true
-	producer, err := sarama.NewSyncProducer(KAFKA_ADDR, config)
+	producer, err := kgo.NewClient(
+		kgo.SeedBrokers(KAFKA_ADDR...),
+		kgo.ClientID("airgap-chaos-producer"),
+		kgo.MaxVersions(kversion.FromString("3.6.0")),
+		kgo.RequiredAcks(kgo.AllISRAcks()),
+	)
 	if err != nil {
 		log.Panicln(err)
 	}
 	defer producer.Close()
 	for {
-		for !PRODUCER_PRODUCE {}
+		for !PRODUCER_PRODUCE {
+		}
 		locked := false
-		for PRODUCER_PRODUCE_LIMIT != 0 &&  atomic.LoadUint32(&PRODUCED) >= PRODUCER_PRODUCE_LIMIT{
+		for PRODUCER_PRODUCE_LIMIT != 0 && atomic.LoadUint32(&PRODUCED) >= PRODUCER_PRODUCE_LIMIT {
 			if !locked {
 				fmt.Println("Reached produce limit")
 			}
 			locked = true
 		}
 		msg := generate_message()
-		message := &sarama.ProducerMessage{
+		err := producer.ProduceSync(context.Background(), &kgo.Record{
 			Topic: KAFKA_PRODUCE_TOPIC,
-			Value: sarama.StringEncoder(msg),
-		}
-		_, _, err := producer.SendMessage(message)
+			Value: []byte(msg),
+		}).FirstErr()
 		if err != nil {
 			log.Println("Failed to produce message: ", err.Error())
 		}
@@ -240,14 +253,14 @@ func produce() {
 			Duplicated_times: 0,
 		}
 		DATA.Mutex.Unlock()
-		time.Sleep(time.Millisecond*time.Duration(PRODUCER_SLEEP_TIME_MS))
+		time.Sleep(time.Millisecond * time.Duration(PRODUCER_SLEEP_TIME_MS))
 	}
 }
 
 func mitm() {
-	receiver_addr := net.UDPAddr {
+	receiver_addr := net.UDPAddr{
 		Port: MITM_PORT,
-		IP: net.ParseIP("0.0.0.0"),
+		IP:   net.ParseIP("0.0.0.0"),
 	}
 	listen_conn, err := net.ListenUDP("udp", &receiver_addr)
 	if err != nil {
@@ -273,7 +286,7 @@ func mitm() {
 		r := rand.Float64()
 		if r < MITM_DROP_PROBABILITY {
 			atomic.AddUint32(&DROPPED, 1)
-			continue 
+			continue
 		}
 		atomic.AddUint32(&FORWARDED, 1)
 		atomic.AddUint32(&MITM_EPS_COUNT, 1)
@@ -286,40 +299,40 @@ func mitm() {
 }
 
 func consume() {
-	config := sarama.NewConfig()
-	config.Producer.Return.Successes = true
-	consumer_group, err := sarama.NewConsumerGroup(KAFKA_ADDR, "chaos", config)
+	consumer, err := kgo.NewClient(
+		kgo.SeedBrokers(KAFKA_ADDR...),
+		kgo.ClientID("airgap-chaos-consumer"),
+		kgo.MaxVersions(kversion.FromString("3.6.0")),
+		kgo.ConsumerGroup("chaos"),
+		kgo.ConsumeTopics(KAFKA_CONSUME_TOPIC...),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtEnd()),
+		kgo.AutoCommitMarks(),
+		kgo.AutoCommitInterval(time.Second),
+	)
 	if err != nil {
 		log.Panicln(err)
 	}
-	defer consumer_group.Close()
-	cw := context.Background()
+	defer consumer.Close()
+	ctx := context.Background()
 	for {
-		err := consumer_group.Consume(cw, KAFKA_CONSUME_TOPIC, &handler{})
-		if err != nil {
-			log.Println("COULDN'T CONSUME!!")
+		fetches := consumer.PollFetches(ctx)
+		for _, fetchErr := range fetches.Errors() {
+			log.Printf("Kafka consumer error on %s[%d]: %v", fetchErr.Topic, fetchErr.Partition, fetchErr.Err)
 		}
+		fetches.EachRecord(func(record *kgo.Record) {
+			messageHash := sha256.Sum256(record.Value)
+			consume_message(messageHash)
+			consumer.MarkCommitRecords(record)
+		})
 	}
 }
-type handler struct{}
 
-func (h *handler) Setup(s sarama.ConsumerGroupSession) error   { return nil }
-func (h *handler) Cleanup(s sarama.ConsumerGroupSession) error { return nil }
-
-func (h *handler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-    for message := range claim.Messages() {
-	message_hash := sha256.Sum256(message.Value)
-	consume_message(message_hash)
-	session.MarkMessage(message, "")
-    }
-    return nil
-}
 func consume_message(message_hash [32]byte) {
 	DATA.Mutex.Lock()
 	defer DATA.Mutex.Unlock()
 	current_sate, exists := DATA.Data[message_hash]
 	if !exists {
-		DATA.Data[message_hash] = &DATA_CONTENT {
+		DATA.Data[message_hash] = &DATA_CONTENT{
 			Created:          time.Time{},
 			Received:         time.Time{},
 			Duplicated:       time.Time{},
@@ -330,7 +343,7 @@ func consume_message(message_hash [32]byte) {
 		atomic.AddUint32(&UNKNOWN, 1)
 		return
 	}
-	switch  current_sate.State {
+	switch current_sate.State {
 	case Sent:
 		current_sate.State = Received
 		DATA.Data[message_hash].Received = time.Now()
@@ -367,7 +380,7 @@ func write_file() {
 	DATA.Mutex.RLock()
 	defer DATA.Mutex.RUnlock()
 	start_time := time.Now()
-	defer fmt.Println("It took: ", (time.Now().Second() - start_time.Second()), "s to create the statistics file" )
+	defer fmt.Println("It took: ", (time.Now().Second() - start_time.Second()), "s to create the statistics file")
 
 	file, err := os.Create(FILE_PATH)
 	if err != nil {
@@ -378,14 +391,14 @@ func write_file() {
 
 	writer := bufio.NewWriter(file)
 	fmt.Fprintln(writer, "ID,STATE,CREATED,RECEIVED,DUPLICATED,DUPLICATED_TIMES, UNKNOWN")
-	for hash, packet := range(DATA.Data) {
-		fmt.Fprintf(writer, "%x,%s,%v,%v,%v,%d,%v\n", 
-			hash, 
-			packet.State, 
-			packet.Created, 
+	for hash, packet := range DATA.Data {
+		fmt.Fprintf(writer, "%x,%s,%v,%v,%v,%d,%v\n",
+			hash,
+			packet.State,
+			packet.Created,
 			packet.Received,
-			packet.Duplicated, 
-			packet.Duplicated_times, 
+			packet.Duplicated,
+			packet.Duplicated_times,
 			packet.Unknown)
 	}
 	err = writer.Flush()
