@@ -114,7 +114,7 @@ func RunDownstream(transportReceiver TransportReceiver, stopChan <-chan struct{}
 
 	Logger.Infof(logging.Event(logging.EventAppStart,
 		logging.Str("airgap.build.number", BuildNumber),
-	), "Downstream version: %s", BuildNumber)
+	), "Downstream version: %s, build number: %s", version.GitVersion, BuildNumber)
 	sendMessage(protocol.TYPE_STATUS, "", config.topic,
 		fmt.Appendf(nil, "Downstream starting %s server on port %d", config.transport, config.targetPort))
 
@@ -450,11 +450,18 @@ func Main(build string) {
 			logging.Str("airgap.config.setting", "logFileName"),
 			logging.Str("file.path", config.logFileName),
 		), "Configuring log to: "+config.logFileName)
+		Logger.Infof(logging.Event(logging.EventAppStart,
+			logging.Str("airgap.build.number", BuildNumber),
+		), "Downstream version: %s, build number: %s", version.GitVersion, BuildNumber)
 		Logger.Info(logging.Event(logging.EventConfigApplied,
 			logging.Str("airgap.config.setting", "logFileName"),
 			logging.Str("file.path", config.logFileName),
 		), "Log to file started up")
 	}
+
+	// Log config after any log file is attached so the values reach the file.
+	logConfiguration(config)
+	Logger.Info(logging.Event(logging.EventConfigApplied), "Configuration OK")
 
 	if config.mtu == 0 {
 		mtuValue, err := mtu.GetMTU(config.nic, fmt.Sprintf("%s:%d", config.targetIP, config.targetPort))

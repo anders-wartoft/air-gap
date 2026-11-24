@@ -1261,8 +1261,6 @@ func checkConfiguration(result TransferConfiguration) TransferConfiguration {
 		Logger.Fatal(configInvalid("tcpTLSCertFile", result.tcpTLSCertFile), "Error: tcpTLSCertFile requires transport=tcp")
 	}
 
-	logConfiguration(result)
-	Logger.Info(logging.Event(logging.EventConfigApplied), "Configuration OK")
 	if result.logFileName != "" {
 		if err := Logger.SetLogFile(result.logFileName); err != nil {
 			Logger.Fatal(configInvalid("logFileName", result.logFileName).Merge(logging.Err(err)), err)

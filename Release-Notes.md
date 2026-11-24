@@ -50,6 +50,14 @@
 
 ### Configuration
 
+- Downstream now writes its startup banner and applied-configuration block to
+  the configured log file, matching upstream: `pid`, `Downstream version:
+  <version>, build number: <build>`, and the full `Configuration for build
+  number …` listing follow `Configuring log to:` in the file. Previously the
+  configuration block only reached the console/journal because it was logged
+  before the log file was attached. The version lines in both binaries now
+  include the Git version and build number (the upstream line was also
+  mislabeled "Downstream version").
 - Downstream now honors `AIRGAP_DOWNSTREAM_CLIENT_ID` as an override for the
   Kafka producer's `clientId`. An empty value leaves the properties setting unchanged.
 - Corrected the documented environment variable names for downstream

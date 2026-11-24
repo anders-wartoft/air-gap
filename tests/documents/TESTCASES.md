@@ -1289,7 +1289,7 @@ FAIL by the runner.
    mv ./tmp/downstream.log ./tmp/downstream-1.log
    ```
 
-1. Find downstream's PID (logged right after Configuration OK as
+1. Find downstream's PID (logged at the top of the log file as
    `[INFO] pid:40933`) and send SIGHUP:
 
    ```bash

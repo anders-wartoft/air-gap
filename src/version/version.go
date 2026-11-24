@@ -1,3 +1,3 @@
 package version
 
-var GitVersion = "0.1.21-SNAPSHOT"
+var GitVersion = "0.1.22-SNAPSHOT"

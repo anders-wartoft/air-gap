@@ -890,7 +890,7 @@ func Main(build string) {
 		), "Configuring log to: "+config.logFileName)
 		Logger.Infof(logging.Event(logging.EventAppStart,
 			logging.Str("airgap.build.number", BuildNumber),
-		), "Downstream version: %s", BuildNumber)
+		), "Upstream version: %s, build number: %s", version.GitVersion, BuildNumber)
 		Logger.Info(logging.Event(logging.EventAppStart,
 			logging.Str("file.path", config.logFileName),
 		), "Log to file started up")
