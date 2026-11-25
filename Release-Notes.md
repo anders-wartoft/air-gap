@@ -38,7 +38,17 @@
   Alternatively, install the libraries read-only on `java.library.path`.
   Keeping downstream `producerCompression` at its `none` default (or `gzip`)
   avoids the Snappy requirement entirely. See
-  [Deduplication.md](doc/Deduplication.md#hardened-hosts-wx--noexec-temp-directories).
+  [Deduplication.md](docs/Deduplication.md#hardened-hosts-wx--noexec-temp-directories).
+
+### Documentation
+
+- Documentation folders are unified under `docs`: `doc/` is now `docs/` and
+  `tests/documents/` is now `tests/docs/`. All cross-references are updated.
+- Test documentation for TC-49 and the memory-safety requirements now
+  describes the franz-go consumer; the removed Sarama-era bounded
+  pause/resume mechanism and its optional Go tests are no longer referenced.
+- The UDP packet-loss guidance in the FAQ and Transport Configuration now
+  covers UDP pacing and calibration.
 
 ### Test reliability
 
@@ -103,16 +113,17 @@
 
 ### Delayed Kafka subscriptions
 
-- Long delivery waits now pause fetching and retain up to 64 additional
-  records and 64 KiB of key, value and header bytes per partition, reducing
-  subscription close/reopen churn. Overflow falls back to rereading
-  uncommitted records after the current record is delivered. Ordering,
-  delivery deadlines and one-way diode transport behavior are unchanged.
-- The upstream `kafkaDelayedReadBuffer` setting defaults to `true`. Set
-  `AIRGAP_UPSTREAM_KAFKA_DELAYED_READ_BUFFER=false` (or
-  `kafkaDelayedReadBuffer=false` in the properties file) to use the previous
-  pause-and-reread behavior for delayed Kafka threads. This can increase
-  subscription churn and does not change immediate threads or downstream.
+- The franz-go consumer removes the earlier bounded pause/resume mechanism:
+  long delivery waits simply hold the current bounded poll batch (at most
+  `kafkaChannelBufferSize` records per group) and wait per record until its
+  timestamp plus the configured delay. Subscriptions are no longer closed and
+  reopened, so "closed dead subscription" and "abandoned subscription"
+  messages are gone. Rebalances remain possible during waits; revoked
+  partitions cancel their in-flight deliveries and commit delivered offsets.
+  Ordering, delivery deadlines and one-way diode transport behavior are
+  unchanged.
+- The upstream `kafkaDelayedReadBuffer` setting remains accepted for
+  configuration compatibility but no longer selects a delivery mechanism.
 
 ## 0.1.21-SNAPSHOT
 
@@ -335,7 +346,7 @@
   delete-only or `compact,delete` changelogs before processing; the Kafka
   principal needs DescribeConfigs and, for repair, AlterConfigs permissions.
   Already deleted history cannot be recovered by this fix.
-- [Topic configuration specifications](doc/Deduplication.md#kafka-topic-configuration-specification)
+- [Topic configuration specifications](docs/Deduplication.md#kafka-topic-configuration-specification)
   cover the external gap topic and internal changelog, tombstone retention,
   replication, record sizing and safe upgrade operations. Transactional output
   consumers must use `read_committed`.
@@ -405,7 +416,7 @@
   message key or retry count differ; the summary shows the latest values.
   Each distinct error text keeps its own count. OTLP output adds the
   parameters as attributes and `airgap.message.template`. See
-  [Logging](doc/Logging.md#message-templates).
+  [Logging](docs/Logging.md#message-templates).
 - Downstream no longer logs one ERROR per event that cannot be written while
   Kafka is down: a 60-second outage at 20 events/s gives 17 lines instead of
   about 700. Upstream consumer errors, Kafka startup retries and Kafka status
@@ -648,7 +659,7 @@
   only working when its shell script is invoked directly.
 - New `tests/env/verify_log_chain.py` verifies Version 1 body hashes and
   hash-chain links for an exported log without needing key material, and
-  `doc/Logging.md` now walks through investigating a single Kibana event:
+  `docs/Logging.md` now walks through investigating a single Kibana event:
   identifying it, exporting its chain segment, saving it as JSON Lines, and
   running the verifier. The verifier reports its hard-coded Version 1 format
   and rejects records declaring a future schema instead of interpreting them
@@ -826,7 +837,7 @@
 - **New `hash-chain` option** binds each record to its predecessor and writes an anchor record every N records. Because an anchor is itself hashed and chained, it transitively commits to every record in its window, which means the forthcoming signing support only has to sign anchors rather than every record. Attribute names for signatures are reserved but not yet emitted.
 - Sequence numbers are unique and monotonic for the lifetime of a process. When the chain is configured after startup, the first chained record carries `airgap.log.chain.restart`, so a verifier can distinguish a declared restart from records having been removed.
 - All three options can also be set through the usual environment variables, for example `AIRGAP_UPSTREAM_LOG_FORMAT`, `AIRGAP_UPSTREAM_LOG_HASH` and `AIRGAP_UPSTREAM_LOG_HASH_CHAIN`.
-- Known limitations: records written before the configuration file is read are not stamped, and direct writes to the exposed `StdLogger` writer bypass the chain. Sarama is routed through the application logger in OTel mode. These details are documented in [Logging.md](doc/Logging.md), together with the chain formula and a standalone verification script.
+- Known limitations: records written before the configuration file is read are not stamped, and direct writes to the exposed `StdLogger` writer bypass the chain. Sarama is routed through the application logger in OTel mode. These details are documented in [Logging.md](docs/Logging.md), together with the chain formula and a standalone verification script.
 - Routing every log method through a single formatting path made them recognisable printf wrappers to `go vet`, which surfaced twelve pre-existing format-string defects in `upstream`, `downstream`, `resend`, `protocol` and `kafka`, such as `%i` verbs, missing verbs and arguments passed to a format string with no placeholder. All twelve are fixed; they previously produced mangled log output.
 
 ### Dedup Restart Safety
@@ -859,7 +870,7 @@
 
 **Operational notes:** Generated JSON entries have distinct peer names; for manual rotation, set the replacement entry's `peer` to the existing identity before provisioning. Trust the new key on the opposite endpoint before switching the local identity, and retire the old pin after verifying the replacement connection. Certificate names, issuers, and validity dates do not authorize pinned keys or expire their trust. Automatic rotation is not independent recovery from an old-key compromise. Expiry, measured performance acceptance, and the exhaustive fault/concurrency matrix remain pending.
 
-See [Encryption](doc/Encryption.md) for setup, JSON exchange, and manual rotation, and [Pinned rotation](doc/PinnedRotation.md) for protocol and recovery details.
+See [Encryption](docs/Encryption.md) for setup, JSON exchange, and manual rotation, and [Pinned rotation](docs/PinnedRotation.md) for protocol and recovery details.
 
 ### Production Configuration Warnings
 
@@ -872,7 +883,7 @@ See [Encryption](doc/Encryption.md) for setup, JSON exchange, and manual rotatio
 - **Freestanding Docker test environment** with configurable base images, mounted application builds, Kafka TLS fixtures, and automated testcase/chain runners.
 - **TC-27 pinned TLS Docker smoke test** generates JSON entries with the real `--json-file-dir` option and installs them unchanged into the opposite endpoint's trust directory. It checks exact peer/fingerprint authentication, TLS 1.3, application delivery, rejection of untrusted client/server identities, and recovery.
 - Added Go unit, TLS integration, and subprocess tests for generation, trust validation, reload/revocation, acknowledged rotation/recovery, idle-pin aging, and functional authentication with 2,000 distinct pins. Functional capacity coverage is not a measured performance guarantee.
-- Expanded [testcase documentation](tests/documents/TESTCASES.md) and [test environment instructions](tests/env/README.md).
+- Expanded [testcase documentation](tests/docs/TESTCASES.md) and [test environment instructions](tests/env/README.md).
 
 ### Dependency and Build Updates
 
@@ -890,7 +901,7 @@ See [Encryption](doc/Encryption.md) for setup, JSON exchange, and manual rotatio
 - **New `enableRxqOvfl` configuration parameter** (Linux only): Enables tracking of kernel socket buffer drops via the `SO_RXQ_OVFL` socket option. When enabled, downstream statistics include `SO_RXQ_OVFL` (interval drops) and `SO_RXQ_OVFL_TOTAL` (cumulative) counters.
 - Requires `ReadMsgUDP` with ancillary data parsing (40-byte out-of-band buffer) to extract drop counts from the kernel.
 - Configurable via property file (`enableRxqOvfl=true`), environment variable (`AIRGAP_DOWNSTREAM_ENABLE_RXQ_OVFL=true`), or CLI flag (`--enableRxqOvfl=true`).
-- **Important limitation**: `SO_RXQ_OVFL` only measures drops between kernel UDP stack and socket buffer. It does **not** capture NIC drops, kernel backlog drops, or hypervisor-level packet loss in virtual environments. See `doc/Monitoring.md` for multi-layer monitoring strategy.
+- **Important limitation**: `SO_RXQ_OVFL` only measures drops between kernel UDP stack and socket buffer. It does **not** capture NIC drops, kernel backlog drops, or hypervisor-level packet loss in virtual environments. See `docs/Monitoring.md` for multi-layer monitoring strategy.
 
 #### Message-Level Tracking (Upstream)
 
@@ -915,20 +926,20 @@ See [Encryption](doc/Encryption.md) for setup, JSON exchange, and manual rotatio
 
 #### Comprehensive VMware and Virtualization Documentation
 
-- **New `doc/Monitoring.md` section** (lines 307-541): "Special Case: VMware and Hypervisor Packet Loss"
+- **New `docs/Monitoring.md` section** (lines 307-541): "Special Case: VMware and Hypervisor Packet Loss"
   - Explains why `SO_RXQ_OVFL=0` doesn't mean "no drops" in virtual environments
   - Step-by-step diagnostic process for identifying hypervisor vs application drops
   - VMware detection checklist (`hostnamectl`, `lspci`, `/mnt/hgfs/` mount points)
   - Visual diagram showing invisible hypervisor packet drop layer
   - Six ranked solutions: reduce EPS, VMXNET3 driver, tune vNIC, pin CPU resources, bare metal, accept and monitor
   - VMware-specific monitoring strategy (what NOT to trust vs what to monitor)
-- **Multi-layer monitoring strategy** documented in `doc/Monitoring.md`:
+- **Multi-layer monitoring strategy** documented in `docs/Monitoring.md`:
   1. End-to-End: Compare upstream sent vs downstream received (ultimate truth)
   2. Application: Message/fragment counters, SO_RXQ_OVFL
   3. NIC: `ip -s link`, `ethtool -S` counters
   4. Kernel: `netstat -s`, `/proc/net/snmp`
   5. VM-Specific: Hypervisor metrics (invisible to guest OS)
-- **New FAQ entry**: "UDP broadcast is dropping packets in VMware/virtual environments - what can I do?" (`doc/FAQ.md`)
+- **New FAQ entry**: "UDP broadcast is dropping packets in VMware/virtual environments - what can I do?" (`docs/FAQ.md`)
   - 10 optimization strategies beyond lowering EPS:
     1. Enable compression (50-80% bandwidth reduction)
     2. Increase downstream receive buffers (OS and application-level)
@@ -943,7 +954,7 @@ See [Encryption](doc/Encryption.md) for setup, JSON exchange, and manual rotatio
   - Recommended configuration for broadcast in VMs
   - Expected results and success criteria
   - Monitoring commands and verification steps
-  - Links to `doc/Monitoring.md` for detailed drop analysis
+  - Links to `docs/Monitoring.md` for detailed drop analysis
 
 #### VMware Drop Detection Tooling
 
@@ -961,12 +972,12 @@ See [Encryption](doc/Encryption.md) for setup, JSON exchange, and manual rotatio
   - Added `enableRxqOvfl` parameter documentation with VMware warning (line 501)
   - Expanded UDP Broadcast section (lines 588-633) with configuration instructions, macOS loopback behavior note, and broadcast duplication solution with firewall DNAT examples
   - Added `nic` parameter requirement when using `targetIP=255.255.255.255`
-- **doc/Monitoring.md**:
+- **docs/Monitoring.md**:
   - New "Understanding Packet Drops and Loss Detection" section with packet path diagram
   - "Where Packets Can Be Dropped" taxonomy (5 layers)
   - Interpreting combined metrics with diagnostic scenarios
   - Complete VMware troubleshooting guide (307+ lines)
-- **doc/FAQ.md**:
+- **docs/FAQ.md**:
   - New comprehensive FAQ on UDP broadcast packet loss in VMs (240+ lines)
   - Link to Monitoring.md from SO_RXQ_OVFL monitoring section
 
@@ -1034,7 +1045,7 @@ All four limits are configurable via `.properties` file and environment variable
 
 ### Documentation and README
 
-- Added a "DEBUG Logging Caveat" section to `doc/InputFilter.md`: when `logLevel=DEBUG` is active, up to 80 bytes of raw Kafka payload and the full message key are logged **before** the input filter runs, bypassing content suppression.
+- Added a "DEBUG Logging Caveat" section to `docs/InputFilter.md`: when `logLevel=DEBUG` is active, up to 80 bytes of raw Kafka payload and the full message key are logged **before** the input filter runs, bypassing content suppression.
 - Added four new rows to the downstream parameter table in `README.md` documenting `maxCacheEntries`, `maxNrMessages`, `maxTCPConnections`, and `keyExchangeMinIntervalSecs`.
 - Added a "Listening Port Security" section to `README.md` explaining the threat model and guidance on when to raise each limit above its default.
 
@@ -1048,9 +1059,9 @@ All four limits are configurable via `.properties` file and environment variable
 
 ### Documentation Updates
 
-- Updated `doc/InputFilter.md` to describe the empty-payload behaviour, corrected statistics field descriptions and troubleshooting log message references, and added `resend` environment variable examples.
+- Updated `docs/InputFilter.md` to describe the empty-payload behaviour, corrected statistics field descriptions and troubleshooting log message references, and added `resend` environment variable examples.
 - Updated `README.md` upstream configuration table to reflect the empty-payload + dedup-discard design.
-- Updated `doc/Resend.md` parameter list to include the three new `inputFilter*` options.
+- Updated `docs/Resend.md` parameter list to include the three new `inputFilter*` options.
 
 ## 0.1.9-SNAPSHOT
 
@@ -1103,7 +1114,7 @@ All four limits are configurable via `.properties` file and environment variable
   - Automatic connection health checking with 1ms read deadline test
   - Automatic reconnection on connection loss
   - Lazy connection initialization - upstream doesn't fail on startup if downstream is unavailable
-  - See [Transport Configuration.md](doc/Transport%20Configuration.md) for detailed TCP vs UDP comparison
+  - See [Transport Configuration.md](docs/Transport%20Configuration.md) for detailed TCP vs UDP comparison
 
 - **Enhanced Message Delivery Reliability**:
   - Automatic retry logic: 30 attempts with fixed 100ms intervals (3+ seconds total) for transient failures
@@ -1148,7 +1159,7 @@ All four limits are configurable via `.properties` file and environment variable
   - Dangerous pattern detection at startup (nested quantifiers)
   - New statistics counters: `filtered`, `unfiltered`, `filter_timeouts` per interval
   - Cumulative counters: `total_filtered`, `total_unfiltered`, `total_filter_timeouts`
-  - See [InputFilter.md](doc/InputFilter.md) for detailed documentation and use cases
+  - See [InputFilter.md](docs/InputFilter.md) for detailed documentation and use cases
 
 ### Documentation
 

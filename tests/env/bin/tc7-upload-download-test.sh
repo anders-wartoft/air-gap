@@ -1,7 +1,7 @@
 #!/bin/sh
 # TC-7 upload / download byte-exact round-trip test.
 #
-# Automates the manual TC-7 procedure from tests/documents/TESTCASES.md:
+# Automates the manual TC-7 procedure from tests/docs/TESTCASES.md:
 #   1. go build Upload.go + Download.go (shipped in tests/env/bin/)
 #   2. generate a deterministic high-entropy test file via /dev/urandom
 #      (reproducible for a given seed-ish stat; the exact bytes don't

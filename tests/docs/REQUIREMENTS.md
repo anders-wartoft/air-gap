@@ -1,7 +1,7 @@
 # Air-gap requirements
 
 Source of truth for air-gap functional requirements. (Originated as
-`tests/documents/Krav.xlsx`; this document now supersedes the spreadsheet.)
+`tests/docs/Krav.xlsx`; this document now supersedes the spreadsheet.)
 
 Each entry carries:
 
@@ -128,16 +128,16 @@ If a cell is blank it means the spreadsheet left that cell blank.
 For a Kafka-backed upstream:
 
 1. `kafkaMaxMessageBytes` sets the largest Kafka record upstream accepts and
-   is applied to Sarama's maximum fetch size. A larger record is rejected
+   is applied to franz-go's maximum fetch size. A larger record is rejected
    explicitly instead of being admitted with unbounded memory use.
-2. `kafkaChannelBufferSize` bounds the number of fetched records Sarama may
-   buffer per consumer channel. `kafkaFetchDefaultBytes` bounds the normal
+2. `kafkaChannelBufferSize` bounds the number of records franz-go may return
+   per poll batch. `kafkaFetchDefaultBytes` bounds the normal
    fetch target.
 3. Upstream determines the effective memory ceiling from cgroup v2, then
    cgroup v1, and finally process RSS plus system memory. A nonzero
    `memoryLimitBytes` may lower, but never raise, the detected ceiling.
-4. At `memoryHighWatermarkPercent`, upstream pauses before removing another
-   record from Sarama's bounded channel. It resumes only after usage reaches
+4. At `memoryHighWatermarkPercent`, upstream pauses before admitting another
+   record from the bounded poll batch. It resumes only after usage reaches
    `memoryLowWatermarkPercent`, preventing rapid pause/resume oscillation.
 5. The wait is context-aware so SIGTERM is not blocked by memory pressure.
 6. `goMemoryLimitPercent` applies a Go runtime soft heap limit relative to the
@@ -151,7 +151,7 @@ For a Kafka-backed upstream:
 
 The deterministic envelope is the fixed process working set plus, for every
 configured sending thread, at most `kafkaChannelBufferSize` records of up to
-`kafkaMaxMessageBytes`, Sarama fetch/decode overhead, and one record being
+`kafkaMaxMessageBytes`, franz-go fetch/decode overhead, and one record being
 transformed and fragmented. Operators must choose a systemd/cgroup limit with
 headroom for those copies. Throttling controls sustained pressure; it cannot
 make a single over-limit record safe, which is why the hard record-size limit
@@ -369,7 +369,7 @@ upstream warns at startup when it is not.
 > uninstallation.
 
 * Notes: Covered by the top-level `README.md` and
-  `doc/Installation and Configuration.md`.
+  `docs/Installation and Configuration.md`.
 
 ## REQ-16 — Send / receive / dedup logic docs
 
@@ -661,7 +661,7 @@ five seconds; shutdown must continue to close idle connections promptly.
 * Covered by: TC-25
 * Notes: `SO_RXQ_OVFL` has some overhead; it is configurable and should not
   be enabled in production when the system is near its throughput ceiling.
-  See `doc/FAQ.md` and `doc/Monitoring.md`.
+  See `docs/FAQ.md` and `docs/Monitoring.md`.
 
 ## REQ-50 — Production configuration warnings
 
@@ -873,7 +873,7 @@ an authentication mechanism.
 Pinned-rotation messages must be rejected on UDP, plaintext TCP, and CA-mode
 connections, without entering the legacy symmetric-key handler or changing
 trust. Server-key automatic rotation is not supported. The concrete approved implementation contract is documented in
-[PinnedRotation.md](../../doc/PinnedRotation.md): versioned bounded JSON,
+[PinnedRotation.md](../../docs/PinnedRotation.md): versioned bounded JSON,
 connection-bound challenges, deterministic signed requests, durable records,
 and fail-closed reconciliation of ambiguous incomplete intents. Upstream
 exchange is opt-in (`tcpTLSRotationEnabled`, default false) to preserve the
@@ -1434,7 +1434,8 @@ Acceptance criteria:
    its own count. Existing formatted calls are unchanged.
 2. Downstream Kafka send failures, upstream consumer errors and startup
    retries, and upstream Kafka status changes use templates. Upstream status
-   texts derived from Sarama do not contain Sarama's timestamp.
+   texts derived from Kafka client diagnostics do not contain the client's
+   log timestamp (originally Sarama; the franz-go client keeps this contract).
 3. Upstream sets its Kafka status to running when a consumer session starts,
    so it logs `Kafka status restored to running` and reports
    `kafka_status=running` in STATISTICS once Kafka is back.
@@ -1450,8 +1451,8 @@ Acceptance criteria:
    result channel has a single reader so status updates and logging observe
    every result rather than competing for it.
 7. Upstream clears errors on consumer session establishment or message
-   receipt. Sarama diagnostic text remains logged but does not directly set
-   connection health; absence of errors for a fixed time is not evidence of
+   receipt. Kafka client diagnostic text remains logged but does not directly
+   set connection health; absence of errors for a fixed time is not evidence of
    recovery. Actual consumer errors and failed operations remain observable.
 
 ## REQ-57 — Mutually authenticated UDP encryption

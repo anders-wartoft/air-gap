@@ -652,7 +652,7 @@ if [[ -n "$AUTO_EXIT_FROM" ]]; then
     # no-filter variant + fresh groupID). Kafka replays every event, the
     # dedup app filters duplicates, and any gaps opened intentionally in
     # phase 1 get filled. This mirrors the manual "stop upstream, restart
-    # with the 9b config" step in tests/documents/TESTCASES.md.
+    # with the 9b config" step in tests/docs/TESTCASES.md.
     # PHASE2_DRAIN_SECONDS replaces TC_DRAIN_SECONDS for the gap-fill window
     # (phase 2 needs more time).
     #

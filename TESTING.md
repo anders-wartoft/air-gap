@@ -42,7 +42,7 @@ Run the full numbered regression suite from the repository root:
 bash tests/env/run-testcases.sh 1-
 ```
 
-See [TESTCASES.md](tests/documents/TESTCASES.md) for individual case commands,
+See [TESTCASES.md](tests/docs/TESTCASES.md) for individual case commands,
 setup, procedures and acceptance criteria.
 
 ## Java tests (deduplication engine)
@@ -62,8 +62,8 @@ cd tests/env
 ./run-testcases.sh 46
 ```
 
-See [TC-46](tests/documents/TESTCASES.md#tc-46--bounded-dedup-state-and-transaction-safe-crash-recovery)
-and [REQ-59](tests/documents/REQUIREMENTS.md#req-59--bounded-transaction-safe-dedup-state)
+See [TC-46](tests/docs/TESTCASES.md#tc-46--bounded-dedup-state-and-transaction-safe-crash-recovery)
+and [REQ-59](tests/docs/REQUIREMENTS.md#req-59--bounded-transaction-safe-dedup-state)
 for the procedure and acceptance criteria. The standalone
 `bash tests/env/verify-dedup-state.sh` command (from the repository root)
 remains supported.

@@ -260,6 +260,27 @@ UDP is connectionless, so transient errors (ICMP connection refused) are handled
 - Delivery confirmation depends on Kafka gap detection
 - The downstream server should be checked if warnings appear frequently
 
+### UDP pacing
+
+Unpaced upstream sending can overrun the downstream receive buffer and drop
+datagrams silently (visible as `RcvbufErrors`/`SO_RXQ_OVFL` on the downstream
+host). Optional sender pacing smooths bursts with a shared datagram and byte
+budget across all sending threads:
+
+```properties
+# upstream.properties — both rates 0 (default) = pacing disabled
+udpPacingDatagramsPerSecond=24000
+udpPacingBytesPerSecond=33600000
+udpPacingBurstDatagrams=32
+```
+
+Keep the burst at least `udpPacingDatagramsPerSecond / 1000`: each pacer timer
+wake-up releases at most one burst, so smaller values cap effective throughput
+below the configured rate. Use `upstream --calibrate` to measure the highest
+loss-free rate for a link before installing the diode — see
+[Calibrating UDP pacing](../README.md#calibrating-udp-pacing-before-installing-a-data-diode)
+in the README.
+
 ## Monitoring Transport Health
 
 ### Log Levels

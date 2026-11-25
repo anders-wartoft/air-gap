@@ -176,11 +176,11 @@ java -jar java-streams/target/air-gap-deduplication-fat-<version>.jar
 - If UDP sending fails, check static ARP and route setup.
 - If performance is low, tune buffer sizes and batch settings (see README).
 - If deduplication is not working, check environment variable scoping and config file paths.
-- For monitoring, see `doc/Monitoring.md`.
+- For monitoring, see `docs/Monitoring.md`.
 
 ## Monitoring
 
-See `doc/Monitoring.md` for instructions on using Metricbeat, Jolokia, and JMX for resource and application monitoring.
+See `docs/Monitoring.md` for instructions on using Metricbeat, Jolokia, and JMX for resource and application monitoring.
 
 ## Uninstallation
 
@@ -348,4 +348,4 @@ Or to monitor gaps in real-time:
 tail -f /var/log/airgap/dedup.log | grep "MISSING-REPORT" | jq '.[0].total_missing'
 ```
 
-For more comprehensive monitoring solutions using Metricbeat and Jolokia, see `doc/Monitoring.md`.
+For more comprehensive monitoring solutions using Metricbeat and Jolokia, see `docs/Monitoring.md`.

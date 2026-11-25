@@ -6,7 +6,7 @@ through upstream, UDP or TCP, and downstream to Kafka, with optional dedup,
 create, and resend services. Some cases use isolated Compose projects or
 require multiple Linux hosts.
 
-Use the [testcase catalogue](../documents/TESTCASES.md) for each case's scope,
+Use the [testcase catalogue](../docs/TESTCASES.md) for each case's scope,
 requirements, setup, procedure, assertions, and expected result. This README
 covers the shared environment, prerequisites, and ways to run and maintain it.
 The package-install smoke tests are separate; see the
@@ -14,7 +14,7 @@ The package-install smoke tests are separate; see the
 The repository-root Compose project is a separate RPM-installed demo.
 TC-53 is a standalone receiver regression: it sends framed UDP datagrams
 directly to downstream and verifies every record through its isolated Kafka
-topic. See the [testcase catalogue](../documents/TESTCASES.md) for settings,
+topic. See the [testcase catalogue](../docs/TESTCASES.md) for settings,
 scope limitations, and retained diagnostics.
 
 ## Environment overview
@@ -85,7 +85,7 @@ Desktop on macOS and Docker Engine/Compose on Rocky Linux 9. Podman may work
 where its Compose provider supports the features used by the environment, but
 not every case is portable to every runtime, host, or architecture. Cases with
 systemd, cgroup, diode/network, or native Linux host-network requirements have
-additional prerequisites described in the [catalogue](../documents/TESTCASES.md).
+additional prerequisites described in the [catalogue](../docs/TESTCASES.md).
 
 On SELinux hosts, repository and testcase mounts use shared `z` labeling because
 multiple containers mount the same files. Do not change this to private `Z`
@@ -250,7 +250,7 @@ TC-16 is a staged benchmark with a dedicated runner and is included in batch
 runs. Unlike the other cases, it requires native Linux host networking; its
 machine-specific procedures, prerequisites, reset commands, and measurement
 guidance are in the [TC-16 guide](TC-16.md) and
-[catalogue entry](../documents/TESTCASES.md#tc-16--performance--throughput).
+[catalogue entry](../docs/TESTCASES.md#tc-16--performance--throughput).
 
 Runner/report regressions can be tested without Docker:
 
@@ -302,7 +302,7 @@ protocol (or run both side-by-side for comparison).
 * A one-shot `topic-init` service formats both clusters with the standard
   topic set (`transfer`, `transfer2`, `dedup`, `dedup2`, `gaps`, `gaps2`,
   `transfer-11a`, `transfer-11b`, `transfer-12a`, `transfer-12b`) before
-  anything else runs. See [TESTCASES.md](../documents/TESTCASES.md#topic-bootstrap).
+  anything else runs. See [TESTCASES.md](../docs/TESTCASES.md#topic-bootstrap).
 
 ## Prerequisites
 
@@ -405,8 +405,8 @@ Chain several test cases back-to-back:
 ./run-testcases.sh 9,11,12
 ```
 
-See [TESTCASES.md](../documents/TESTCASES.md) for the full catalogue and
-[REQUIREMENTS.md](../documents/REQUIREMENTS.md) for the requirements each case covers.
+See [TESTCASES.md](../docs/TESTCASES.md) for the full catalogue and
+[REQUIREMENTS.md](../docs/REQUIREMENTS.md) for the requirements each case covers.
 
 ## Updating the OS independently
 
@@ -700,7 +700,7 @@ safe.
 * An IP route from the upstream machine to the downstream machine on
   **UDP/1234** (or **TCP/1234** for the TCP-based testcases 6, 20, 22, 24).
 * For a real data-diode: a one-way link that physically prevents return
-  traffic. See `doc/Transport Configuration.md` for the recommended ARP /
+  traffic. See `docs/Transport Configuration.md` for the recommended ARP /
   routing setup.
 * For a firewall emulating diode semantics: a stateless rule set that permits
   only `UPSTREAM_IP -> DOWNSTREAM_IP:1234/udp` outbound and drops everything
@@ -794,7 +794,7 @@ activates so you can double-check before traffic flows.
   TCP for the diode path; TCP needs a back-channel.
 * Add a **static ARP entry** on the upstream for the downstream MAC so the
   upstream never issues ARP that the diode would drop. See
-  `doc/Transport Configuration.md`.
+  `docs/Transport Configuration.md`.
 * Add a **static route** on the upstream so the kernel does not consult the
   default gateway for the diode destination.
 * Pin a **payloadSize** matching the diode's MTU
@@ -843,4 +843,4 @@ installation smoke tests are covered separately in [`tests/`](../README.md).
 It does not model multiple concurrent dedup instances (`dedup@1`, `dedup@2`,
 and so on); use `config/testcases/launchDedup.sh` for that deployment shape.
 Cases that need real multi-host networking or special host privileges require
-the setup described in the [testcase catalogue](../documents/TESTCASES.md).
+the setup described in the [testcase catalogue](../docs/TESTCASES.md).

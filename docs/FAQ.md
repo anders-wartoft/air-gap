@@ -11,6 +11,14 @@ UDP broadcast in virtualized environments (VMware, KVM, VirtualBox, Hyper-V) is 
 
 ### Beyond Lowering EPS: 10 Optimization Strategies
 
+> **First try UDP pacing.** Since 0.1.22, upstream can pace UDP sending with a
+> shared datagram/byte budget (`udpPacingDatagramsPerSecond`,
+> `udpPacingBytesPerSecond`, `udpPacingBurstDatagrams`), and
+> `upstream --calibrate` measures the highest loss-free rate for the link. In
+> lab tests pacing took receive-buffer drops from ~9 % at full speed to zero.
+> See [Transport Configuration](Transport%20Configuration.md#udp-pacing). The
+> strategies below remain useful in addition to pacing.
+
 #### 1. Enable Compression (High Impact)
 
 Compress large messages to reduce bandwidth and packet count:

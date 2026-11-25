@@ -1,7 +1,7 @@
 # Testcases
 
 Source of truth for air-gap functional test cases. (Originated as
-`tests/documents/Testfall.xlsx`; this document now supersedes the
+`tests/docs/Testfall.xlsx`; this document now supersedes the
 spreadsheet.) For shared environment setup, runner usage, and platform
 guidance, see the [integration test environment README](../env/README.md).
 
@@ -379,10 +379,10 @@ docker compose up -d --force-recreate --no-deps upstream-a
 ```
 
 Compose sends SIGTERM to the Go process first (10 s grace); the upstream's
-signal handler runs its graceful shutdown — Sarama commits consumer-group
-offsets, UDP buffers flush — and the container is replaced with a fresh one
-holding the same `AIRGAP_CONFIG`. On restart Sarama resumes from the
-committed offset, so no event is lost or duplicated.
+signal handler runs its graceful shutdown — the Kafka consumer commits
+consumer-group offsets, UDP buffers flush — and the container is replaced with
+a fresh one holding the same `AIRGAP_CONFIG`. On restart the consumer resumes
+from the committed offset, so no event is lost or duplicated.
 
 Manifest knobs in `tests/env/testcases/02.env`:
 
@@ -591,8 +591,8 @@ Expected chain verdict:
   result    : PASS (1000/1000 received, 0 missing, 0 duplicate)
 ```
 
-If TLS misconfiguration slips in, Sarama's log will carry
-`client/metadata got error from broker -1 ... x509: certificate signed by
+If TLS misconfiguration slips in, the upstream log will carry a Kafka client
+error ending in `x509: certificate signed by
 unknown authority` — most commonly from a caFile that doesn't match the
 specific cluster's actual CA.
 
@@ -1375,7 +1375,7 @@ docker compose up -d --force-recreate --no-deps upstream-a
 Compose sends SIGTERM to the running upstream (graceful shutdown
 commits the current offsets), then starts a fresh container with
 `AIRGAP_CONFIG=…/upstream-airgap-9b.properties`. The new groupID
-`test2` is a new consumer group, so Sarama starts from offset 0 and
+`test2` is a new consumer group, so the consumer starts from offset 0 and
 re-reads **every** event. Dedup discards the ~80 it has already seen
 and lets the previously-dropped multiples of 5 through, filling the
 gaps. LG sink reads `kafka-downstream[dedup]` and sees all 100 unique
@@ -1629,7 +1629,7 @@ family:
 4. When the LG producer exits, the runner reads
    `UPSTREAM_A_PHASE2_CONFIG=…/upstream-airgap-10b-docker.properties`
    and runs `docker compose up -d --force-recreate --no-deps upstream-a`
-   (SIGTERM → fresh container with `groupID=test2`). Sarama starts
+   (SIGTERM → fresh container with `groupID=test2`). The new group starts
    phase 2 at offset 0, replays all 100 events; dedup discards the
    ~80 duplicates and emits only the previously-missing ~20.
 5. LG sink reads `kafka-downstream[dedup2]` and sees 100 unique with
@@ -2754,7 +2754,7 @@ certificate.
 * SSL listener on the Kafka cluster(s) with keystore/truststore (handled by
   `./generate-kafka-certs.sh`).
 * `dedup-17.env` adds the TLS env vars for Kafka (see
-  `doc/Kafka-encryption.md` for the full list).
+  `docs/Kafka-encryption.md` for the full list).
 
 **Chain run (Docker).**
 
@@ -2901,7 +2901,7 @@ passphrase-encrypted private key files to talk to a Kafka cluster over TLS.
 **Setup.**
 
 Kafka with mTLS enabled, using **encrypted** PKCS#12 key files (`.enc` in
-`doc/Kafka-encryption.md`). The shipped `consumer.mtls2.properties`
+`docs/Kafka-encryption.md`). The shipped `consumer.mtls2.properties`
 illustrates:
 
 ```properties
@@ -3304,7 +3304,7 @@ reusable primitive for any future testcase that needs a role to start late,
 not a one-off hack. Meanwhile `lg-producer` streams 1000 counter events
 through at the usual eps=50.
 
-**Root-caused a doc/default-config mismatch while building this.**
+**Root-caused a docs/default-config mismatch while building this.**
 `upstream.go`'s `transportStatus` only ever transitions away from
 `"running"` in the "all retries exhausted" branch, which is unreachable
 when `tcpRetryTimes=0` (the default, meaning infinite in-process retries on
@@ -3904,7 +3904,7 @@ regex-based CN authorisation works, both one-way and mutual authentication
 modes are supported, and both certificate and key can be rotated via SIGHUP
 without packet loss. (Go's TLS 1.3 implementation does not expose cipher
 selection; the three available suites are all NIST-approved — see
-`doc/Encryption.md`.)
+`docs/Encryption.md`.)
 
 **Chain run (Docker).**
 
@@ -4154,7 +4154,7 @@ Threshold comparisons are strict: equality at a stated floor is not warned.
 | Java dedup | effective `num.standby.replicas=0` | No warm standby state for failover |
 | Java dedup | effective `security.protocol=PLAINTEXT` or `SASL_PLAINTEXT` | Kafka transport is unencrypted, even if SASL authenticates |
 
-The dedup floors use the [FAQ's 500,000-offset example](../../doc/FAQ.md).
+The dedup floors use the [FAQ's 500,000-offset example](../../docs/FAQ.md).
 Warn for either small dimension even if a large other dimension compensates:
 these are explicit review heuristics. Include the retained offset capacity in
 the risk explanation; calculate it without 32-bit overflow.
@@ -4442,7 +4442,7 @@ application framing and `TYPE_KEY_EXCHANGE`, preserve legacy `KEY_UPDATE#`,
 and add a distinctly identified, versioned pinned-rotation payload subtype.
 The detailed matrix is not wholly executable or claimed passing. The approved
 core contract and implemented subset are documented in
-[PinnedRotation.md](../../doc/PinnedRotation.md) and the third batch below.
+[PinnedRotation.md](../../docs/PinnedRotation.md) and the third batch below.
 Remaining fault hooks, request-rate/performance budgets, and optional expiry
 need further decisions. Cases referencing such a limit use its approved
 value once specified, not an invented threshold.
@@ -5148,7 +5148,7 @@ and TCP-send path.
 ### Automated procedure
 
 1. Build a Linux helper and start Kafka, the TCP drain, and upstream.
-2. Require upstream's Sarama consumer to become ready.
+2. Require upstream's Kafka consumer to become ready.
 3. Inside the upstream container's cgroup, start a separate helper process
    that allocates and touches 120 MiB for eight seconds. The allocation alone
    exceeds the 115.2 MiB high watermark, so triggering backpressure does not
@@ -5187,7 +5187,7 @@ cgroup memory ceiling: measured peak at most 201326592 bytes
 
 ### What it proves
 
-The hard fetch and channel bounds prevent unbounded Sarama prefetch. The
+The hard fetch and channel bounds prevent unbounded Kafka-client prefetch. The
 cgroup-aware high/low watermarks apply real backpressure and recover without
 operator intervention, and both transitions are reported with the severity and
 the wording the operator configured. Valid large records are eventually transferred, while
@@ -5242,7 +5242,7 @@ policy, so the killed process stays dead and can be inspected.
 
 The broker is configured for 100 MiB messages and fetch responses so that the
 broker, rather than upstream, is not the component bounding memory. Note that
-100 MiB is also Sarama's own hard response ceiling. The consumer requests
+100 MiB is also the Kafka client's default hard response ceiling. The consumer requests
 96 MiB to leave room for record-batch and response framing; requesting the
 full ceiling can cause a decoding error instead of exercising memory pressure.
 
@@ -5293,7 +5293,7 @@ watermark cannot save an oversized buffer: watermark observed; consumer killed
 ### What it proves
 
 Memory watermarks cannot rescue a consumer whose buffer envelope already
-exceeds the process limit. Sarama decodes a whole fetch response before any of
+exceeds the process limit. The Kafka client decodes a whole fetch response before any of
 it reaches upstream, so allocations can outrun record-admission throttling
 even if a watermark transition is logged. The cost is multiplied by the
 number of concurrent consumers. Bounding
@@ -5347,7 +5347,7 @@ guards.
 
 1. Build the Linux helper and start Kafka, the capturing TCP drain, and
    upstream.
-2. Require upstream's Sarama consumer to become ready.
+2. Require upstream's Kafka consumer to become ready.
 3. Produce six records alternating 1 KiB and 4 MiB payloads.
 4. Wait until Kafka reports consumer-group lag zero.
 5. Require exactly three guards in the captured TCP stream. Count marker
@@ -6600,65 +6600,34 @@ new `tmp/logs/tc49.XXXXXX/` directory on success or failure; without
 contains service console logs and, on failure, Kafka startup and broker logs.
 The upstream log can be followed while the test runs.
 
-The separate Kafka regression phase sends 12 records to each
-of three partitions with a 200 ms processing timeout and a one-record channel.
-In separate phases, the first record in each partition becomes eligible
-after ten seconds for the three-minute or the 24-hour group. Subsequent
-records include older, out-of-order timestamps. The test requires no
-subscription abandonment and checks delivery timing, per-partition ordering,
-independent partition progress, repeated waits, duplicates, committed offsets,
-cancellation while records are ineligible, and a real consumer-group
-rebalance. It also checks the production reader and a 30,000-record,
-30-partition burst. Additional 30-partition cases check bounded pause/resume,
-overflow recovery for both group and dedicated readers, and cancellation
-while paused.
+The separate Kafka regression phase runs the franz-go delayed-delivery
+integration test (`TestFranzUpstreamWithKafka`) inside the isolated stack:
+it seeds 100 records into a fresh topic and consumes them with an immediate
+and a three-second-delayed consumer group, checking record ids, order, that
+no record is delivered before its timestamp plus the configured delay, and
+clean consumer shutdown. The Go unit suite additionally checks that failed
+deliveries are not marked for commit and that cancellation interrupts a
+pending delayed delivery (`TestFranzBatchDoesNotMarkFailedDelivery`,
+`TestFranzBatchCancelsBeforeDelayedDelivery`).
 
-The short processing timeout made the original issue reproducible quickly.
 This is not a 24-hour soak or a production throughput benchmark. Requires Go
 and Docker Compose. The isolated project uses the Docker engine's native
 architecture; `-pause` is unsupported.
 
-### Bounded pause/resume
+### Delayed delivery with franz-go
 
-Long delayed-delivery waits pause Kafka fetching and drain in-flight records
-into a bounded queue instead of closing the subscription. Fetching resumes
-after the retained records have been delivered successfully. Each partition
-retains at most 64 additional records and 64 KiB of key, value and header
-bytes. These limits exclude the current record, Sarama fetch buffers and Go
-allocation overhead; they are not a process-memory cap.
-
-On overflow, queued records are discarded without marking them consumed.
-After successful delivery of the current record, a dedicated reader rereads
-from the next offset. Dedicated readers close and reopen on subsequent
-overflows, so occasional "closed dead subscription" messages remain expected.
-Cancellation or rebalance releases the reader and restores group pause state.
-The behavior requires no downstream connection, ICMP or acknowledgment.
-
-TC-49 runs the production regression cases except the longer paced case.
-To include that case against a disposable, reachable Kafka broker, run from
-the repo root:
-
-```sh
-AIRGAP_DELAY_KAFKA_BROKERS=localhost:9092 \
-  go test ./src/kafka -run '^TestBoundedDelayedReaderWithKafka$' -count=1 -v -timeout=4m
-```
-
-The paced case waits roughly 120 seconds using the
-production 30-second processing timeout and four-record channel, then
-delivers 30 records every 750 ms (40 records/second on average). Input for
-this test is pre-seeded, not a live producer or throughput benchmark.
-It checks delivery times, per-partition ordering, committed offsets and no
-subscription closes before shutdown.
-
-### Optional pause-only comparison
-
-`TestPauseResumeWithKafka` retains the test-only prototype and does not run
-as part of TC-49. Run it with the same broker setting and Go command above,
-replacing the test selector with `^TestPauseResumeWithKafka$`. It compares
-pause-only (expected to reproduce in-flight delivery timeouts) with bounded
-draining, including paced delivery and cancellation. Its payload limit counts
-keys and values only. Unlike production overflow recovery, prototype overflow
-deliberately stops without committing undelivered records.
+Long delayed-delivery waits no longer close and reopen subscriptions (the
+Sarama-era bounded pause/resume mechanism, dedicated rereaders and
+"closed dead subscription" messages are gone). The franz-go consumer delivers
+each bounded poll batch per partition, waiting per record until its timestamp
+plus the configured delay has passed; the next batch is not polled until the
+current one is delivered, so at most one poll batch (up to
+`kafkaChannelBufferSize` records) is held per group. Rebalances remain allowed
+while waiting: when partitions are revoked, their in-flight deliveries are
+cancelled and delivered offsets are committed. `kafkaMaxProcessingTimeMs` and
+`kafkaDelayedReadBuffer` remain accepted for configuration compatibility but
+no longer control delivery. The behavior requires no downstream connection,
+ICMP or acknowledgment.
 
 ## TC-50 — Create/resend after downstream Kafka outage
 
@@ -6716,7 +6685,7 @@ CPU capacity, without race instrumentation, to avoid load-induced failures.
 
 An isolated source Kafka broker and a separate target Kafka broker each use
 ten partitions. One upstream process runs one configured sending thread.
-Sarama processes its ten partition claims concurrently; this is one consumer
+The consumer processes its ten partition claims concurrently; this is one consumer
 group, not ten groups retransmitting the same records.
 The workload cycles through every payload size from 400 to 1,600 bytes,
 including fragmentation boundaries. UDP, plain TCP and CA-verified TLS 1.3

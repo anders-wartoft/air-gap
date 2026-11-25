@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TC-8 — SIGHUP log-rotation verifier.
 #
-# Automates the manual TC-8 procedure from tests/documents/TESTCASES.md.
+# Automates the manual TC-8 procedure from tests/docs/TESTCASES.md.
 # For each air-gap process (upstream-a and downstream):
 #   1. Confirm the configured log file exists in the container.
 #   2. `docker exec` to `mv` it out of the way (e.g. upstream.log → upstream-1.log).

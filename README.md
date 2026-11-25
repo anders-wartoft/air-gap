@@ -41,14 +41,14 @@ go run src/cmd/upstream/main.go config/upstream.properties
 
 - Connect to real Kafka by editing the config files.
 - Enable encryption by setting `publicKeyFile` and related fields.
-- See the rest of this README and [Deduplication.md](doc/Deduplication.md) for advanced usage, gap detection, and production deployment.
-- A short [Installation and Configuration.md](doc/Installation%20and%20Configuration.md) guide is available.
-- More help for setting up encryption to Kafka can be found here: [Kafka-encryption.md](doc/Kafka-encryption.md)
-- See [Monitoring.md](doc/Monitoring.md) on how to monitor the applications for resource usage etc.
-- For OpenTelemetry log output and tamper-evident log hashing, see [Logging.md](doc/Logging.md)
-- To set up reduncancy and/or load balancing, see [Redundancy and Load Balancing.md](doc/Redundancy%20and%20Load%20Balancing.md)
-- There is a [Resend.md](doc/Resend.md) guide that covers how to resend missing information.
-- Finally, frequently asked questions can be found here: [FAQ.md](doc/FAQ.md)
+- See the rest of this README and [Deduplication.md](docs/Deduplication.md) for advanced usage, gap detection, and production deployment.
+- A short [Installation and Configuration.md](docs/Installation%20and%20Configuration.md) guide is available.
+- More help for setting up encryption to Kafka can be found here: [Kafka-encryption.md](docs/Kafka-encryption.md)
+- See [Monitoring.md](docs/Monitoring.md) on how to monitor the applications for resource usage etc.
+- For OpenTelemetry log output and tamper-evident log hashing, see [Logging.md](docs/Logging.md)
+- To set up reduncancy and/or load balancing, see [Redundancy and Load Balancing.md](docs/Redundancy%20and%20Load%20Balancing.md)
+- There is a [Resend.md](docs/Resend.md) guide that covers how to resend missing information.
+- Finally, frequently asked questions can be found here: [FAQ.md](docs/FAQ.md)
 
 ## Notation
 
@@ -62,7 +62,7 @@ There are five executable files that together constitutes the transfer software.
 
 To use guaranteed delivery, you must be able to copy information from the `create` application to the `resend` application but if file transfer is not allowed, a start timestamp entered on the command line will suffice, but will probably result in more events being delivered over the diode.
 
-![air-gap flow](doc/img/air-gap%20flow.png)
+![air-gap flow](docs/img/air-gap%20flow.png)
 
 N.B., neither the configuration files nor the key files are shown in the above image.
 
@@ -686,17 +686,17 @@ groupID=testGroup
 sendingThreads=[{"now": 0}, {"3minutes-ago": -180}]
 ```
 
-For each name-dealy, a thread will be created in upstream. Each thread connects to Kafka with a group name that consists of the groupID from the property file, a "-" character, and the name from the sendingThreads property. In the example above, two threads will be created. One named "now" with 0 seconds delay and one named "3minutes-ago" with 180 seconds delay.
+For each name-delay, a thread will be created in upstream. Each thread connects to Kafka with a group name that consists of the groupID from the property file, a "-" character, and the name from the sendingThreads property. In the example above, two threads will be created. One named "now" with 0 seconds delay and one named "3minutes-ago" with 180 seconds delay.
 
-The thread with name "now" will connecto to Kafka with a group id of "testGroup-now" and the other thread "testGroup-3minutes-ago".
+The thread with name "now" will connect to Kafka with a group id of "testGroup-now" and the other thread "testGroup-3minutes-ago".
 
 When a thread reads a message in Kafka, it will check if the Kafka timestamp - the delay (delay is a negative number) is at least equal to, or greater than, the current time. If not, it will sleep until the time is right to send.
 
-If a message is read but not delivered (because the thread is sleeping) and the application terminates, then the event will be resent when the application is restarted, since the thread will read the same message again and check if the time is right to send. This means that if you have a thread with a delay of 3 minutes, and you terminate the application, the in-flight message (the one the thread was sleeping on) will be resent when you restart. If the application was down longer than the delay (e.g., 5 minutes with a 3-minute delay), the message will be delivered immediately without any additional wait.
+If a message is read but not delivered (because the thread is sleeping) and the application terminates, then the event will be resent when the application is restarted, since the thread will read the same message again and check if the time is right to send. This means that if you have a thread with a delay of 3 minutes, and you terminate the application, the in-flight message (the one the thread was sleeping on) will be resent when you restart. Delivered offsets are committed about once per second (and when partitions are rebalanced), so a crash can also replay the last few already-delivered records since the previous commit; the downstream deduplicator removes such duplicates. If the application was down longer than the delay (e.g., 5 minutes with a 3-minute delay), the message will be delivered immediately without any additional wait.
 
 ### Deduplication and Gap Detection
 
-This is covered in the [Deduplication.md](doc/Deduplication.md) documentation
+This is covered in the [Deduplication.md](docs/Deduplication.md) documentation
 
 For production operation of the Java deduplicator, these environment variables control startup/recovery behavior:
 
@@ -711,11 +711,11 @@ For production operation of the Java deduplicator, these environment variables c
 When `INSTANCE_ID` is set, dedup also uses it as Kafka's static `group.instance.id`. Set
 `KAFKA_GROUP_INSTANCE_ID` to override that identity explicitly.
 
-See [Deduplication.md](doc/Deduplication.md) for defaults and full tuning guidance.
+See [Deduplication.md](docs/Deduplication.md) for defaults and full tuning guidance.
 
 ### Using Gap Detection Events to Resend from Upstream
 
-See [Resend.md](doc/Resend.md) for details regarding the create and resend applications.
+See [Resend.md](docs/Resend.md) for details regarding the create and resend applications.
 
 ## Keys
 
@@ -856,7 +856,7 @@ Common use cases include:
 
 Input filtering uses an ordered allow/deny rule system where the first matching rule determines the action. If no rules match, a configurable default action applies. The filter includes built-in protection against ReDoS (Regular Expression Denial of Service) attacks with configurable timeout limits.
 
-For detailed information, configuration options, rule format, and examples, see [InputFilter.md](doc/InputFilter.md).
+For detailed information, configuration options, rule format, and examples, see [InputFilter.md](docs/InputFilter.md).
 
 ## Configuration
 
@@ -950,10 +950,10 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | source | AIRGAP_UPSTREAM_SOURCE | random | source of the messages, kafka or random. Use random for testing only |
 | generateNewSymmetricKeyEvery | AIRGAP_UPSTREAM_GENERATE_NEW_SYMMETRIC_KEY_EVERY | | How often should we change the encryption key (symmetric key)? |
 | logFileName | AIRGAP_UPSTREAM_LOG_FILE_NAME | | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
-| logFormat | AIRGAP_UPSTREAM_LOG_FORMAT | text | `text` for the usual one line per record, or `otel` for OpenTelemetry Logs as OTLP/JSON. See [Logging.md](doc/Logging.md) |
-| (environment only) | AIRGAP_LOG_REPEAT_INTERVAL | 10000 | Milliseconds between summaries of repeated application log records; `0` disables suppression. Shared by all Go services. See [Logging.md](doc/Logging.md#repeated-messages) |
-| hash | AIRGAP_UPSTREAM_LOG_HASH | none | Hash the payload of every log record and record the digest as an attribute. `none`, `SHA256`, `SHA384`, `SHA512`, `SHA3-256`, `SHA3-384` or `SHA3-512`. See [Logging.md](doc/Logging.md) |
-| hash-chain | AIRGAP_UPSTREAM_LOG_HASH_CHAIN | 0 | Chain each log record to the one before it and write an anchor record every N records, so that edits and deletions become detectable. `0` disables chaining. See [Logging.md](doc/Logging.md) |
+| logFormat | AIRGAP_UPSTREAM_LOG_FORMAT | text | `text` for the usual one line per record, or `otel` for OpenTelemetry Logs as OTLP/JSON. See [Logging.md](docs/Logging.md) |
+| (environment only) | AIRGAP_LOG_REPEAT_INTERVAL | 10000 | Milliseconds between summaries of repeated application log records; `0` disables suppression. Shared by all Go services. See [Logging.md](docs/Logging.md#repeated-messages) |
+| hash | AIRGAP_UPSTREAM_LOG_HASH | none | Hash the payload of every log record and record the digest as an attribute. `none`, `SHA256`, `SHA384`, `SHA512`, `SHA3-256`, `SHA3-384` or `SHA3-512`. See [Logging.md](docs/Logging.md) |
+| hash-chain | AIRGAP_UPSTREAM_LOG_HASH_CHAIN | 0 | Chain each log record to the one before it and write an anchor record every N records, so that edits and deletions become detectable. `0` disables chaining. See [Logging.md](docs/Logging.md) |
 | sendingThreads | AIRGAP_UPSTREAM_SENDING_THREADS | {"now": 0} | How many times, and when, whould we send each event? |
 | certFile | AIRGAP_UPSTREAM_CERT_FILE | | For TLS to Kafka, add a certificate pem encoded file here |
 | keyFile | AIRGAP_UPSTREAM_KEY_FILE | | The private key for the certFile certificate |
@@ -964,7 +964,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 | partitionStartValue | AIRGAP_UPSTREAM_PARTITION_START_VALUE | 0 | Adds a fixed value to each source partition before sending. Example: source partitions `0..99` with `partitionStartValue=100` become downstream partitions `100..199`. |
 | logStatistics | AIRGAP_UPSTREAM_LOG_STATISTICS | 0 | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
 | compressWhenLengthExceeds | AIRGAP_UPSTREAM_COMPRESS_WHEN_LENGTH_EXCEEDS | 0 | Using compression (gzip) on short events can make them longer. The break-even length is around 100 bytes for the gzip compression. Set this to a value (ideally above 1200) to gzip longer events |
-| inputFilterRules | AIRGAP_UPSTREAM_INPUT_FILTER_RULES | | Path to file containing ordered allow/deny regex rules, or inline comma-separated rules. Format: `action:regex_pattern` where action is `allow` or `deny`. Rules evaluated in order, first match wins. Matched events are sent with **empty payload** (not dropped) so the gap-detector sees every sequence ID. The deduplicator discards zero-length events before writing to the clean topic. See [InputFilter.md](doc/InputFilter.md) for details |
+| inputFilterRules | AIRGAP_UPSTREAM_INPUT_FILTER_RULES | | Path to file containing ordered allow/deny regex rules, or inline comma-separated rules. Format: `action:regex_pattern` where action is `allow` or `deny`. Rules evaluated in order, first match wins. Matched events are sent with **empty payload** (not dropped) so the gap-detector sees every sequence ID. The deduplicator discards zero-length events before writing to the clean topic. See [InputFilter.md](docs/InputFilter.md) for details |
 | inputFilterDefaultAction | AIRGAP_UPSTREAM_INPUT_FILTER_DEFAULT_ACTION | allow | Default action when no filter rules match: `allow` or `deny`. Use `deny` for allowlist approach, `allow` for blocklist approach |
 | inputFilterTimeout | AIRGAP_UPSTREAM_INPUT_FILTER_TIMEOUT | 100 | Regex match timeout in milliseconds for input filter rules. Protects against ReDoS attacks. Increase for complex patterns or large payloads |
 | tcpRetryInterval | AIRGAP_UPSTREAM_TCP_RETRY_INTERVAL | 1000 | (TCP only) Milliseconds between send retries and minimum interval between connection attempts per adapter |
@@ -980,7 +980,7 @@ export AIRGAP_UPSTREAM_TARGET_IP=255.255.255.255
 
 ### Example use case: Two clusters, same topic name, no topic rename possible
 
-For the same scenario in the redundancy/load-balancing guide, see [Redundancy and Load Balancing.md](doc/Redundancy%20and%20Load%20Balancing.md#single-downstream-with-same-topic-name-from-two-clusters).
+For the same scenario in the redundancy/load-balancing guide, see [Redundancy and Load Balancing.md](docs/Redundancy%20and%20Load%20Balancing.md#single-downstream-with-same-topic-name-from-two-clusters).
 
 If two upstream Kafka clusters both have a topic with the same name (for example `transfer`), and you cannot rename one or both topics in upstream, you can still use two upstream instances into one downstream + one deduplicator by configuring one upstream with `partitionStartValue`.
 
@@ -1063,10 +1063,10 @@ The property privateKeyFiles should point to one or more private key files that 
 | transport | AIRGAP_DOWNSTREAM_TRANSPORT | udp | Transport protocol to use: udp or tcp. Use tcp when no diode is needed |
 | privateKeyFiles | AIRGAP_DOWNSTREAM_PRIVATE_KEY_GLOB | | Glob covering all private key files to load |
 | logFileName | AIRGAP_DOWNSTREAM_LOG_FILE_NAME | | If configured, all logs will be written to this file instead of the console. This will take effekt after the configuration is read and no errors occurs |
-| logFormat | AIRGAP_DOWNSTREAM_LOG_FORMAT | text | `text` for the usual one line per record, or `otel` for OpenTelemetry Logs as OTLP/JSON. See [Logging.md](doc/Logging.md) |
-| (environment only) | AIRGAP_LOG_REPEAT_INTERVAL | 10000 | Milliseconds between summaries of repeated application log records; `0` disables suppression. Shared by all Go services. See [Logging.md](doc/Logging.md#repeated-messages) |
-| hash | AIRGAP_DOWNSTREAM_LOG_HASH | none | Hash the payload of every log record and record the digest as an attribute. `none`, `SHA256`, `SHA384`, `SHA512`, `SHA3-256`, `SHA3-384` or `SHA3-512`. See [Logging.md](doc/Logging.md) |
-| hash-chain | AIRGAP_DOWNSTREAM_LOG_HASH_CHAIN | 0 | Chain each log record to the one before it and write an anchor record every N records, so that edits and deletions become detectable. `0` disables chaining. See [Logging.md](doc/Logging.md) |
+| logFormat | AIRGAP_DOWNSTREAM_LOG_FORMAT | text | `text` for the usual one line per record, or `otel` for OpenTelemetry Logs as OTLP/JSON. See [Logging.md](docs/Logging.md) |
+| (environment only) | AIRGAP_LOG_REPEAT_INTERVAL | 10000 | Milliseconds between summaries of repeated application log records; `0` disables suppression. Shared by all Go services. See [Logging.md](docs/Logging.md#repeated-messages) |
+| hash | AIRGAP_DOWNSTREAM_LOG_HASH | none | Hash the payload of every log record and record the digest as an attribute. `none`, `SHA256`, `SHA384`, `SHA512`, `SHA3-256`, `SHA3-384` or `SHA3-512`. See [Logging.md](docs/Logging.md) |
+| hash-chain | AIRGAP_DOWNSTREAM_LOG_HASH_CHAIN | 0 | Chain each log record to the one before it and write an anchor record every N records, so that edits and deletions become detectable. `0` disables chaining. See [Logging.md](docs/Logging.md) |
 | certFile | AIRGAP_DOWNSTREAM_CERT_FILE | | For TLS to Kafka, add a certificate pem encoded file here |
 | keyFile | AIRGAP_DOWNSTREAM_KEY_FILE | | The private key for the certFile certificate |
 | keyPasswordFile | AIRGAP_UPSTREAM_KEY_PASSWORD_FILE | | Path to a file containing the password to decrypt an encrypted keyFile |
@@ -1074,9 +1074,9 @@ The property privateKeyFiles should point to one or more private key files that 
 | internalTopic | AIRGAP_DOWNSTREAM_INTERNAL_TOPIC | | Topic name in Kafka to write to (internal logging). Defaults to empty (disabled) — set to a topic name (e.g. `airgap-internal`) to enable writing internal status and error messages to Kafka. Topic name for events from the upstream topics will have the same name as the upstream topic, if not translated by the setting AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS |
 | topicTranslations | AIRGAP_DOWNSTREAM_TOPIC_TRANSLATIONS | | Rename topics with a specified name to another name. Used in multi downstreams setup (see Redundancy and Load Balancing.md) |
 | logStatistics | AIRGAP_DOWNSTREAM_LOG_STATISTICS | 0 | How often should a statistics event be written to the console or log file. Valus is in seconds. 0 - no logging |
-| enableRxqOvfl | AIRGAP_DOWNSTREAM_ENABLE_RXQ_OVFL | false | (Linux only) Enable SO_RXQ_OVFL socket monitoring to track kernel-level packet drops in the socket receive queue. When enabled, statistics include `SO_RXQ_OVFL` (drops since last interval) and `SO_RXQ_OVFL_TOTAL` (total drops since start). Note: This only detects drops at the socket buffer level; drops at NIC, kernel, or hypervisor layers are NOT visible. In VM environments, compare `upstream.total_messages_sent` vs `downstream.total_received` for true packet loss. See [Monitoring.md](doc/Monitoring.md) for details on VMware/hypervisor packet loss detection. |
+| enableRxqOvfl | AIRGAP_DOWNSTREAM_ENABLE_RXQ_OVFL | false | (Linux only) Enable SO_RXQ_OVFL socket monitoring to track kernel-level packet drops in the socket receive queue. When enabled, statistics include `SO_RXQ_OVFL` (drops since last interval) and `SO_RXQ_OVFL_TOTAL` (total drops since start). Note: This only detects drops at the socket buffer level; drops at NIC, kernel, or hypervisor layers are NOT visible. In VM environments, compare `upstream.total_messages_sent` vs `downstream.total_received` for true packet loss. See [Monitoring.md](docs/Monitoring.md) for details on VMware/hypervisor packet loss detection. |
 | numReceivers | AIRGAP_DOWNSTREAM_NUM_RECEIVERS | 1 | Number of UDP receivers to start that concurrently binds to the targetPort |
-| channelBufferSize | AIRGAP_DOWNSTREAM_CHANNEL_BUFFER_SIZE | 16384 | Maximum queued datagrams between UDP readers and workers, counted across batches. On Linux, batches hold up to `min(64, channelBufferSize)` datagrams; elsewhere each holds one. Short batches do not reduce the datagram budget. In-flight reader/worker batches are additional and bounded. See [Monitoring.md](doc/Monitoring.md#udp-receive-capacity-and-cpu-contention). |
+| channelBufferSize | AIRGAP_DOWNSTREAM_CHANNEL_BUFFER_SIZE | 16384 | Maximum queued datagrams between UDP readers and workers, counted across batches. On Linux, batches hold up to `min(64, channelBufferSize)` datagrams; elsewhere each holds one. Short batches do not reduce the datagram budget. In-flight reader/worker batches are additional and bounded. See [Monitoring.md](docs/Monitoring.md#udp-receive-capacity-and-cpu-contention). |
 | batchSize | AIRGAP_DOWNSTREAM_BATCH_SIZE | 32 | Maximum dispatcher batch size (1–512). Full batches dispatch immediately; partial batches dispatch on a 10 ms timer. At most one batch is pending and one is being sent to franz-go, which forms the Kafka requests. A full pending batch backpressures receiver workers rather than growing an unbounded cache. TCP slows accordingly; UDP can still drop packets when its buffers fill. |
 | kafkaRetryInterval | AIRGAP_DOWNSTREAM_KAFKA_RETRY_INTERVAL | 5000 | Positive milliseconds to wait between failed Kafka producer startup attempts. Temporary network/broker/not-ready errors retry indefinitely at WARN level; identifiable configuration, TLS certificate, and authentication/authorization errors remain fatal. Also accepts `--kafkaRetryInterval=N`. |
 | producerCompression | AIRGAP_DOWNSTREAM_PRODUCER_COMPRESSION | none | Kafka producer compression for records written downstream: `none`, `gzip`, `snappy`, `lz4` or `zstd`. If the broker lacks the chosen codec, records fall back to uncompressed. `none` (and `gzip`) let Java consumers such as the deduplicator run without native codec libraries, which need an executable temp directory — relevant on W^X-hardened hosts (e.g. `noexec /tmp`). Also accepts `--producerCompression=CODEC`. |
@@ -1172,7 +1172,7 @@ This will generate events automatically in upstream, with a sequence number, sen
 
 ### Deduplicator and Gap Detector
 
-Deduplicator and Gap Detector is covered in the [Deduplication.md](doc/Deduplication.md) documentation
+Deduplicator and Gap Detector is covered in the [Deduplication.md](docs/Deduplication.md) documentation
 
 ### Logging
 
@@ -1533,7 +1533,7 @@ java.lang.NoClassDefFoundError: Could not initialize class org.rocksdb.DBOptions
 ```
 
 The remedy is to switch to the JAR matching `uname -m`, or to the universal
-JAR. See [doc/Deduplication.md](doc/Deduplication.md) for the build details and
+JAR. See [docs/Deduplication.md](docs/Deduplication.md) for the build details and
 [TESTING.md](TESTING.md) for the verification performed on the packaged
 variant.
 
@@ -1740,7 +1740,7 @@ The `resend` application is used to either consume resend bundles created by the
 
 If `partitionStartValue` was used in upstream, set the same `partitionStartValue` in resend. Gap bundles contain downstream partition IDs, and resend must map those back to upstream partitions when reading from Kafka while preserving downstream partition IDs in sent message IDs.
 
-See [Resend.md](doc/Resend.md) for resend parameter details and examples.
+See [Resend.md](docs/Resend.md) for resend parameter details and examples.
 
 ## Dependencies
 
